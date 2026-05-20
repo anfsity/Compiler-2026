@@ -19,6 +19,7 @@
 !*.typ
 !*.pdf
 !*.zip
+!*.def
 !.clangd
 !.clang-format
 !.clang-tidy
