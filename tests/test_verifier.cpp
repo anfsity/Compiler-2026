@@ -1,5 +1,5 @@
-#include "high/ir.hpp"
-#include "high/verifier.hpp"
+#include "../include/high/ir.hpp"
+#include "../include/high/verifier.hpp"
 
 #include <iostream>
 #include <memory>

@@ -165,17 +165,17 @@ void with_exception_handling(
 
 namespace exodus::Log {
 
-template <typename... Args>
-inline void log_info(const char *, Args &&...) noexcept {}
+template <typename Format, typename... Args>
+inline void log_info(Format, Args &&...) noexcept {}
 
-template <typename... Args>
-inline void log_warn(const char *, Args &&...) noexcept {}
+template <typename Format, typename... Args>
+inline void log_warn(Format, Args &&...) noexcept {}
 
-template <typename... Args>
-inline void log_error(const char *, Args &&...) noexcept {}
+template <typename Format, typename... Args>
+inline void log_error(Format, Args &&...) noexcept {}
 
-template <typename... Args>
-inline void log_fatal(const char *, Args &&...) noexcept {}
+template <typename Format, typename... Args>
+inline void log_fatal(Format, Args &&...) noexcept {}
 
 template <typename Func>
 inline void with_exception_handling(Func &&func) { // NOLINT
