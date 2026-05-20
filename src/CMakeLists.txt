@@ -37,11 +37,25 @@ target_link_libraries(compiler_core PUBLIC
 )
 
 # complie options
-target_compile_options(compiler_core PRIVATE -O2 -Wall -Wno-register -Wextra)
+target_compile_options(compiler_core PRIVATE
+    -Wall
+    -Wno-register
+    -Wextra
+    $<$<CONFIG:Release>:-O2>
+    $<$<CONFIG:RelWithDebInfo>:-O2>
+    $<$<CONFIG:MinSizeRel>:-O2>
+)
 
 # executable
 add_executable(compiler main.cpp)
-target_compile_options(compiler PRIVATE -O2 -Wall -Wno-register -Wextra)
+target_compile_options(compiler PRIVATE
+    -Wall
+    -Wno-register
+    -Wextra
+    $<$<CONFIG:Release>:-O2>
+    $<$<CONFIG:RelWithDebInfo>:-O2>
+    $<$<CONFIG:MinSizeRel>:-O2>
+)
 target_include_directories(compiler PRIVATE $ENV{CDE_INCLUDE_PATH})
 
 # compiler link libraries

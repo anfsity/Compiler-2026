@@ -15,9 +15,22 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
+# Build speed toggles
+option(ENABLE_CCACHE "Enable ccache for faster rebuilds" ON)
+
 # Static Analysis Tools
-option(ENABLE_CLANG_TIDY "Enable clang-tidy analysis during build" ON)
+option(ENABLE_CLANG_TIDY "Enable clang-tidy analysis during build" OFF)
 option(ENABLE_IWYU "Enable Include-What-You-Use analysis during build" OFF)
+
+if(ENABLE_CCACHE)
+    find_program(CCACHE_EXE NAMES "ccache")
+    if(CCACHE_EXE)
+        message(STATUS "ccache found: ${CCACHE_EXE}")
+        set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_EXE}")
+    else()
+        message(WARNING "ccache not found, disabling ENABLE_CCACHE")
+    endif()
+endif()
 
 if(ENABLE_CLANG_TIDY)
     find_program(CLANG_TIDY_EXE NAMES "clang-tidy")
@@ -50,5 +63,7 @@ add_subdirectory(3rd-party/fmt)
 add_subdirectory(include)
 add_subdirectory(src)
 
-enable_testing()
-add_subdirectory(tests)
+include(CTest)
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
