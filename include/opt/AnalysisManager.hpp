@@ -1,6 +1,6 @@
 #pragma once
 
-#include "high/ir.hpp"
+#include "../high/ir.hpp"
 #include <functional>
 #include <memory>
 #include <typeindex>

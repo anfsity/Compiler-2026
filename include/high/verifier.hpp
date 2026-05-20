@@ -16,7 +16,8 @@ struct Verifier : RecursiveOpVisitor<Verifier> {
   using RecursiveOpVisitor<Verifier>::visit;
 
   template <typename... Args>
-  auto report_error(fmt::format_string<Args...> fmt_str, Args... args) -> void {
+  auto report_error(fmt::format_string<Args...> fmt_str, Args... args)
+    -> void { // NOLINT
     exodus::Log::log_error(fmt_str, std::forward<Args>(args)...);
     has_error = true;
   }

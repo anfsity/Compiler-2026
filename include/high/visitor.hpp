@@ -21,7 +21,7 @@ struct RecursiveOpVisitor {
     }
   }
 
-  void visit([[maybe_unused]] GlobalVar &g) {}
+  void visit(GlobalVar &) {}
 
   void visit(Function &f) { static_cast<Derived *>(this)->visit(f.body); }
 
@@ -75,7 +75,7 @@ struct RecursiveOpVisitor {
   }
 
   template <OpCode Code>
-  void visit([[maybe_unused]] Op *op, OpTag<Code>) {}
+  void visit(Op * /* op */, OpTag<Code>) {}
 
   void visit(Op *op, OpTag<OpCode::If>) {
     auto &p = std::get<IfPayload>(op->payload);

@@ -1,8 +1,14 @@
 #include "../include/high/ir.hpp"
 #include "../include/high/verifier.hpp"
+#include "../include/type.hpp"
 
 #include <iostream>
+#include <list>
 #include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 using namespace exodus;
 using namespace exodus::high_ir;

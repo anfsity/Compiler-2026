@@ -1,7 +1,7 @@
 // include/high/ast_base.hpp
 #pragma once
 
-#include "type.hpp"
+#include "../type.hpp"
 #include <memory>
 #include <string>
 #include <variant>

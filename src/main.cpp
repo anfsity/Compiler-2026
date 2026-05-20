@@ -3,11 +3,11 @@
 #include <string>
 
 #include "../include/fmt/base.h"
+#include "../include/high/ast_base.hpp"
+#include "../include/high/ir.hpp"
 #include "../include/high/ir_builder.hpp"
 #include "../include/high/ir_printer.hpp"
 #include "../include/mid/flatten.hpp"
-#include "high/ast_base.hpp"
-#include "high/ir.hpp"
 
 using namespace exodus;
 using namespace exodus::ast;

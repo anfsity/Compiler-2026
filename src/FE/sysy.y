@@ -4,14 +4,13 @@
  */
 
 %{
-#include "helper/log.hpp"
-#include "high/ast.hpp"
+#include "../../include/helper/log.hpp"
+#include "../../include/high/ast.hpp"
 
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -188,7 +187,13 @@ static auto call_expr(std::string *name, std::vector<Expr> args, const Loc &loc)
 %}
 
 %code requires {
-#include "high/ast.hpp"
+#include "../../include/high/ast_base.hpp"
+
+namespace exodus { namespace ast { struct BlockSAST; } }
+namespace exodus { namespace ast { struct FuncDefAST; } }
+namespace exodus { namespace ast { struct FuncParamAST; } }
+namespace exodus { namespace ast { struct LvalAST; } }
+namespace exodus { namespace ast { struct VarDefAST; } }
 
 #include <memory>
 #include <string>
