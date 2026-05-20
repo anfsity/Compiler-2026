@@ -868,10 +868,16 @@ inline auto IRBuilder::eval_unary(ast::UnaryOp op, Constant::Data v)
 template <typename T>
 inline auto push_operand(Op *op, T &&val) -> void {
   if constexpr (std::is_same_v<std::decay_t<T>, std::vector<Value *>>) {
-    op->operands.insert(op->operands.end(), val.begin(), val.end());
+    for (auto *v : val) {
+      if (v) {
+        op->operands.push_back(v);
+        v->addUse(op);
+      }
+    }
   } else {
     if (val != nullptr) {
       op->operands.emplace_back(std::forward<T>(val));
+      val->addUse(op);
     }
   }
 }

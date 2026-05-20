@@ -25,6 +25,7 @@ enum class ValueKind : uint8_t { Constant, Argument, OpResult, GlobalVar };
 struct Value {
   ValueKind kind;
   std::shared_ptr<Type> type;
+  std::list<Op *> users;
 
   Value(ValueKind k, std::shared_ptr<Type> t) : kind(k), type(std::move(t)) {}
   virtual ~Value() = default;
@@ -35,6 +36,8 @@ struct Value {
   Value &operator=(Value &&) = delete;
 
   virtual auto dump() const -> std::string = 0;
+  void addUse(Op *user) { users.push_back(user); }
+  void rmUse(Op *user) { users.remove(user); }
 };
 
 struct Constant : Value {
