@@ -35,6 +35,22 @@ struct CP : RecursiveOpVisitor<CP> {
     for (auto &g : m->globals) {
       if (!g->is_const && (g->type->is_i32() || g->type->is_f32())) {
         safe_globals.insert(g->addr);
+        if (g->addr) {
+          if (std::holds_alternative<int>(g->init.data)) {
+            env[g->addr] =
+              ctx->make_value<Constant>(g->type, std::get<int>(g->init.data));
+
+          } else if (std::holds_alternative<float>(g->init.data)) {
+            env[g->addr] =
+              ctx->make_value<Constant>(g->type, std::get<float>(g->init.data));
+
+          } else if (std::holds_alternative<ZeroInit>(g->init.data)) {
+            env[g->addr] =
+              g->type->is_f32()
+                ? static_cast<Value *>(ctx->make_value<Constant>(g->type, 0.0f))
+                : static_cast<Value *>(ctx->make_value<Constant>(g->type, 0));
+          }
+        }
       }
     }
 

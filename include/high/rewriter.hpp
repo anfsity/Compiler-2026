@@ -47,15 +47,15 @@ public:
   }
 
   void finalize(Region &r) {
-
     auto it = r.begin();
 
     while (it != r.end()) {
       Op *op = *it;
       if (to_erase.count(op)) {
-        it = r.erase(it);
 
+        it = r.erase(it);
       } else {
+
         if (op->code == OpCode::If) {
           auto &p = std::get<IfPayload>(op->payload);
           finalize(*p.then_region);

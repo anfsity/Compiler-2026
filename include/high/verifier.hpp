@@ -36,7 +36,7 @@ struct Verifier : RecursiveOpVisitor<Verifier> {
 
   auto verify(Module &m) -> bool {
     has_error = false;
-    RecursiveOpVisitor<Verifier>::visit(m);
+    visit(m);
     return !has_error;
   }
 
@@ -60,14 +60,9 @@ struct Verifier : RecursiveOpVisitor<Verifier> {
         report_error("Null operand found in instruction");
         continue;
       }
-
       auto it = std::find(operand->users.begin(), operand->users.end(), op);
       if (it == operand->users.end()) {
-        report_error(
-          "Use-Def chain broken: user not found in value's user list for {}",
-          // FIXME: 也许这个打印不够清晰
-          operand->dump()
-        );
+        report_error("Use-Def chain broken for {}", operand->dump());
       }
     }
 
@@ -83,11 +78,11 @@ struct Verifier : RecursiveOpVisitor<Verifier> {
 
     bool old_cond = in_cdregion;
     in_cdregion = true;
-    RecursiveOpVisitor<Verifier>::visit(*p.cond_region);
+    visit(*p.cond_region);
     in_cdregion = old_cond;
 
     depth++;
-    RecursiveOpVisitor<Verifier>::visit(*p.loop_region);
+    visit(*p.loop_region);
     depth--;
   }
 
