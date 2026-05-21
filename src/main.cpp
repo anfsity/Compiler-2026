@@ -8,11 +8,13 @@
 #include "../include/high/ir_builder.hpp"
 #include "../include/high/ir_printer.hpp"
 #include "../include/mid/flatten.hpp"
+#include "../include/opt/PassBuilder.hpp"
 
 using namespace exodus;
 using namespace exodus::ast;
 using namespace exodus::high_ir;
 using namespace exodus::mid_ir;
+using namespace exodus::opt;
 
 extern FILE *yyin;
 extern int yyparse(CompUnitAST &ast);
@@ -34,6 +36,16 @@ int main(int argc, char **argv) {
 
   IRBuilder builder(nullptr);
   auto module = builder.build(ast);
+
+  PassBuilder pb(module.get());
+  auto fpm = pb.buildFunctionPipeline();
+  FunctionAnalysisManager fam;
+
+  for (auto &f : module->functions) {
+    if (!f->is_decl) {
+      fpm.run(*f, fam);
+    }
+  }
 
   Flattener flattener(module.get());
   auto mid_module = flattener.flatten();

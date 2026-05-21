@@ -14,8 +14,7 @@
 #define FUNCTION_ANALYSIS(NAME, IDENTIFIER, DESC)
 #endif
 
-
-
+FUNCTION_PASS(CP, "const_prop", "constant propagation")
 
 #undef MODULE_PASS
 #undef FUNCTION_PASS

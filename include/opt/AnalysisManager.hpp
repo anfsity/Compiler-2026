@@ -44,7 +44,7 @@ struct AnalysisResult {
 
   template <typename PassT>
   auto get() -> typename PassT::Result & {
-    return static_cast<Model<PassT *>>(self.get())->result;
+    return static_cast<Model<PassT> *>(self.get())->result;
   }
 
 private:
@@ -105,5 +105,8 @@ private:
   std::unordered_map<std::type_index, Generator> generators;
   std::unordered_map<std::type_index, AnalysisResult> cache;
 };
+
+using FunctionAnalysisManager = AnalysisManager<high_ir::Function>;
+using ModuleAnalysisManager = AnalysisManager<high_ir::Module>;
 
 } // namespace exodus::opt
