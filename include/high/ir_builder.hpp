@@ -58,6 +58,29 @@ private:
   auto visit(const ast::Expr &ast_expr) -> Value *;
   auto visit(const ast::LvalAST &ast_lval) -> Value *;
   // clang-format on
+
+  auto coerce(Value *v, const std::shared_ptr<Type> &target) -> Value * {
+    if (!v || v->type == target)
+      return v;
+    if (target->is_f32() && v->type->is_i32())
+      return emit_val(OpCode::I2F, Float::get(), v);
+    if (target->is_i32() && v->type->is_f32())
+      return emit_val(OpCode::F2I, I32::get(), v);
+    if (target->is_bool()) {
+      Value *zero =
+        v->type->is_f32()
+          ? static_cast<Value *>(ctx->make_value<Constant>(Float::get(), 0.0f))
+          : static_cast<Value *>(ctx->make_value<Constant>(I32::get(), 0));
+      return emit_val(OpCode::Ne, Bool::get(), v, zero);
+    }
+    if (target->is_i32() && v->type->is_bool())
+      return emit_val(OpCode::ZExt, I32::get(), v);
+    if (target->is_f32() && v->type->is_bool()) {
+      Value *i = emit_val(OpCode::ZExt, I32::get(), v);
+      return emit_val(OpCode::I2F, Float::get(), i);
+    }
+    return v;
+  }
 };
 
 inline auto IRBuilder::build(const ast::CompUnitAST &ast)
@@ -149,6 +172,9 @@ inline auto IRBuilder::visit(const ast::VarDeclAST &ast_decl) -> void {
           [&](const ast::Expr &expr) {
             // store 1, %ptr : i32, i32*
             auto init_val = visit(expr);
+            auto target_type =
+              std::static_pointer_cast<Ptr>(alloca_res->type)->target;
+            init_val = coerce(init_val, target_type);
             emit(OpCode::Store, nullptr, init_val, alloca_res);
             if (ast_decl.is_const && init_val->kind == ValueKind::Constant) {
               cv = static_cast<Constant *>(init_val);
@@ -177,9 +203,28 @@ inline auto IRBuilder::visit(const ast::FuncDefAST &ast_func) -> void {
   func->name = ast_func.name;
 
   std::vector<std::shared_ptr<Type>> params_type;
+  std::vector<std::shared_ptr<Type>> params_sym_type;
+  std::vector<bool> params_is_array;
   params_type.reserve(ast_func.params.size());
+  params_sym_type.reserve(ast_func.params.size());
+  params_is_array.reserve(ast_func.params.size());
+
   for (auto &p : ast_func.params) {
-    params_type.emplace_back(p->type);
+    auto param_type = p->type;
+    auto sym_type = p->type;
+    bool is_array = !p->dims.empty();
+    if (is_array) {
+      auto arr_type = p->type;
+      for (size_t i = p->dims.size(); i-- > 1;) {
+        auto *cv = static_cast<Constant *>(visit(p->dims[i]));
+        arr_type = arr_type->array_of(std::get<int>(cv->val));
+      }
+      sym_type = arr_type;
+      param_type = arr_type->ptr_to();
+    }
+    params_type.emplace_back(param_type);
+    params_sym_type.emplace_back(sym_type);
+    params_is_array.emplace_back(is_array);
   }
 
   func->type = Func::get(ast_func.ret_type, params_type);
@@ -191,14 +236,20 @@ inline auto IRBuilder::visit(const ast::FuncDefAST &ast_func) -> void {
 
   for (size_t i = 0; i < ast_func.params.size(); ++i) {
     const auto &p = ast_func.params[i];
+    auto param_type = params_type[i];
+    auto sym_type = params_sym_type[i];
+    bool is_array = params_is_array[i];
 
-    auto *arg_val = ctx->make_value<Argument>(p->type, i);
+    auto *arg_val = ctx->make_value<Argument>(param_type, i);
     func->args.emplace_back(arg_val);
 
-    Value *alloca_res = emit_val(OpCode::Alloca, p->type->ptr_to());
-    emit(OpCode::Store, nullptr, arg_val, alloca_res);
-
-    symtab.push(p->name, {p->type, alloca_res, nullptr, nullptr, false});
+    if (is_array) {
+      symtab.push(p->name, {sym_type, arg_val, nullptr, nullptr, false});
+    } else {
+      Value *alloca_res = emit_val(OpCode::Alloca, param_type->ptr_to());
+      emit(OpCode::Store, nullptr, arg_val, alloca_res);
+      symtab.push(p->name, {sym_type, alloca_res, nullptr, nullptr, false});
+    }
   }
 
   // FIXME: 用 visit(stmt) 优化？
@@ -224,12 +275,18 @@ inline auto IRBuilder::visit(const ast::Stmt &ast_stmt) -> void {
     overload{
       [&](const std::unique_ptr<ast::ReturnStmtAST> &ret) {
         Value *val = ret->expr ? visit(*ret->expr) : nullptr;
+        if (val && func) {
+          auto func_type = std::static_pointer_cast<Func>(func->type);
+          val = coerce(val, func_type->ret_type);
+        }
         emit(OpCode::Ret, nullptr, val);
       },
 
       [&](const std::unique_ptr<ast::AssignStmtAST> &assign) {
         Value *val = visit(assign->expr);
         Value *ptr = visit(*assign->lval);
+        auto target_type = std::static_pointer_cast<Ptr>(ptr->type)->target;
+        val = coerce(val, target_type);
         emit(OpCode::Store, nullptr, val, ptr);
       },
 
@@ -256,6 +313,7 @@ inline auto IRBuilder::visit(const ast::Stmt &ast_stmt) -> void {
 
       [&](const std::unique_ptr<ast::IfStmtAST> &if_ast) {
         Value *cond = visit(if_ast->cond);
+        cond = coerce(cond, Bool::get());
 
         auto then_region = std::make_unique<Region>();
         Region *old_region = cur_region;
@@ -282,6 +340,7 @@ inline auto IRBuilder::visit(const ast::Stmt &ast_stmt) -> void {
 
         cur_region = cond_region.get();
         Value *cond = visit(wh_ast->cond);
+        cond = coerce(cond, Bool::get());
 
         emit(OpCode::Condition, nullptr, cond);
 
@@ -340,15 +399,7 @@ inline auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
           // A && B 或 A || B
           Value *res_ptr = emit_val(OpCode::Alloca, Bool::get()->ptr_to());
           Value *lhs = visit(bin->left);
-          auto to_cond = [&](Value *v) -> Value * {
-            auto *zero =
-              v->type->is_f32()
-                ? static_cast<Value *>(ctx->make_value<Constant>(v->type, 0.0f))
-                : static_cast<Value *>(ctx->make_value<Constant>(v->type, 0));
-            return emit_val(OpCode::Ne, Bool::get(), v, zero);
-          };
-
-          auto lhs_bool = to_cond(lhs);
+          auto lhs_bool = coerce(lhs, Bool::get());
           emit(OpCode::Store, nullptr, lhs_bool, res_ptr);
 
           auto *bool_zero = ctx->make_value<Constant>(Bool::get(), 0);
@@ -362,7 +413,7 @@ inline auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
           cur_region = then_region.get();
 
           Value *rhs = visit(bin->right);
-          Value *rhs_bool = to_cond(rhs);
+          Value *rhs_bool = coerce(rhs, Bool::get());
           emit(OpCode::Store, nullptr, rhs_bool, res_ptr);
 
           cur_region = old_region;
@@ -375,20 +426,6 @@ inline auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
 
         Value *lhs = visit(bin->left);
         Value *rhs = visit(bin->right);
-        auto promote_bool_to_i32 = [&](Value *v) -> Value * {
-          if (!v->type->is_bool()) {
-            return v;
-          }
-          if (v->kind == ValueKind::Constant) {
-            auto *cv = static_cast<Constant *>(v);
-            return ctx->make_value<Constant>(
-              I32::get(), std::get<int>(cv->val)
-            );
-          }
-          return emit_val(OpCode::ZExt, I32::get(), v);
-        };
-        lhs = promote_bool_to_i32(lhs);
-        rhs = promote_bool_to_i32(rhs);
 
         static const std::map<ast::BinaryOp, std::pair<OpCode, OpCode>> op_map =
           {
@@ -411,8 +448,7 @@ inline auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
         std::shared_ptr<Type> eval_type;
         if (lhs->type->is_f32() || rhs->type->is_f32()) {
           eval_type = Float::get();
-        }
-        if (lhs->type->is_i32() && rhs->type->is_i32()) {
+        } else {
           eval_type = I32::get();
         }
 
@@ -425,8 +461,19 @@ inline auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
           auto *lc = static_cast<Constant *>(lhs);
           auto *rc = static_cast<Constant *>(rhs);
           auto res_val = eval_arith(bin->op, lc->val, rc->val);
-          return ctx->make_value<Constant>(result_type, res_val);
+
+          // The result type of evaluation might be float even if operands were
+          // int (if promoted) or int if it was a comparison.
+          auto eval_type =
+            std::holds_alternative<float>(res_val) ? Float::get() : I32::get();
+          if (cmp_map.count(bin->op))
+            eval_type = Bool::get();
+
+          return ctx->make_value<Constant>(eval_type, res_val);
         }
+
+        lhs = coerce(lhs, eval_type);
+        rhs = coerce(rhs, eval_type);
 
         if (symtab.is_global()) {
           Log::log_error("Initializer element is not a compile-time constant");
@@ -454,6 +501,8 @@ inline auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
           auto *cv = static_cast<Constant *>(val);
           auto res_val = eval_unary(una->op, cv->val);
           auto res_type = val->type;
+
+          // Not 仅出现在条件表达式内
           if (una->op == ast::UnaryOp::Not) {
             res_type = Bool::get();
           } else if (
@@ -462,6 +511,7 @@ inline auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
           ) {
             res_type = I32::get();
           }
+
           return ctx->make_value<Constant>(res_type, res_val);
         }
 
@@ -472,11 +522,14 @@ inline auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
 
         switch (una->op) {
         case ast::UnaryOp::Neg: {
-          if (val->type->is_bool()) {
-            val = emit_val(OpCode::ZExt, I32::get(), val);
-          }
+          val = coerce(val, val->type->is_bool() ? I32::get() : val->type);
           bool is_f = val->type->is_f32();
-          Value *zero = ctx->make_value<Constant>(val->type, 0);
+          Value *zero =
+            is_f
+              ? static_cast<Value *>(
+                  ctx->make_value<Constant>(Float::get(), 0.0f)
+                )
+              : static_cast<Value *>(ctx->make_value<Constant>(I32::get(), 0));
           OpCode code = is_f ? OpCode::FSub : OpCode::Sub;
           return emit_val(code, val->type, zero, val);
         }
@@ -494,14 +547,33 @@ inline auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
       },
 
       [&](const std::unique_ptr<ast::CallExprAST> &call) -> Value * {
-        std::vector<Value *> args;
-        for (auto &arg : call->args) {
-          args.emplace_back(visit(arg));
-        }
-
-        // FIXME: 没有进行 check.
         auto sym = symtab.lookup(call->name);
         auto func_type = std::static_pointer_cast<Func>(sym->type);
+
+        std::vector<Value *> args;
+        auto decay_array_arg =
+          [&](Value *arg_val, const std::shared_ptr<Type> &target) -> Value * {
+          if (
+            !arg_val || !target || !arg_val->type->is_ptr() || !target->is_ptr()
+          )
+            return arg_val;
+          auto src_ptr = std::static_pointer_cast<Ptr>(arg_val->type);
+          auto dst_ptr = std::static_pointer_cast<Ptr>(target);
+          auto src_arr = std::dynamic_pointer_cast<Array>(src_ptr->target);
+          if (!src_arr || src_arr->base != dst_ptr->target) {
+            return arg_val;
+          }
+          Value *zero = ctx->make_value<Constant>(I32::get(), 0);
+          return emit_val(OpCode::GetPtr, target, arg_val, zero);
+        };
+        for (size_t i = 0; i < call->args.size(); ++i) {
+          Value *arg_val = visit(call->args[i]);
+          if (i < func_type->params.size()) {
+            arg_val = decay_array_arg(arg_val, func_type->params[i]);
+            arg_val = coerce(arg_val, func_type->params[i]);
+          }
+          args.emplace_back(arg_val);
+        }
 
         Op *op = emit(OpCode::Call, func_type->ret_type, std::move(args));
         op->payload = CallPayload{call->name};
@@ -662,6 +734,7 @@ inline auto IRBuilder::flatten_list(
           // 必须是常量 但是在局部数组初始化，value
           // 可以是左值，我们得把左值的实际值提取出来。 这里的处理就比较麻烦。
           Value *val = visit(expr);
+          val = coerce(val, scalar_type);
           store_flat(idx, val);
           idx++;
         },
@@ -844,22 +917,22 @@ inline auto IRBuilder::eval_unary(ast::UnaryOp op, Constant::Data v)
   if (std::holds_alternative<int>(v)) {
     int val = std::get<int>(v);
     switch (op) {
+    case ast::UnaryOp::Pos:
+      return val;
     case ast::UnaryOp::Neg:
       return -val;
     case ast::UnaryOp::Not:
       return val == 0 ? 1 : 0;
-    case ast::UnaryOp::Pos:
-      return val;
     }
   } else {
     float val = std::get<float>(v);
     switch (op) {
+    case ast::UnaryOp::Pos:
+      return val;
     case ast::UnaryOp::Neg:
       return -val;
     case ast::UnaryOp::Not:
       return val == 0.0f ? 1 : 0;
-    case ast::UnaryOp::Pos:
-      return val;
     }
   }
   return 0;

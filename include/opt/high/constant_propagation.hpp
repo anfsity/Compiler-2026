@@ -153,13 +153,20 @@ struct CP : RecursiveOpVisitor<CP> {
     if (op->operands.size() == 2u) {
       auto *l = static_cast<Constant *>(op->operands[0]);
       auto *r = static_cast<Constant *>(op->operands[1]);
-      if (std::holds_alternative<int>(l->val))
+
+      if (
+        std::holds_alternative<int>(l->val) &&
+        std::holds_alternative<int>(r->val)
+      ) {
         res =
           fold_arith(op->code, std::get<int>(l->val), std::get<int>(r->val));
-      else
-        res = fold_arith(
-          op->code, std::get<float>(l->val), std::get<float>(r->val)
-        );
+      } else {
+        auto get_f = [](const Constant::Data &d) {
+          return std::holds_alternative<float>(d) ? std::get<float>(d)
+                                                  : (float)std::get<int>(d);
+        };
+        res = fold_arith(op->code, get_f(l->val), get_f(r->val));
+      }
 
     } else if (op->operands.size() == 1u) {
       auto *v = static_cast<Constant *>(op->operands[0]);

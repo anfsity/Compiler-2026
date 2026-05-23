@@ -11,13 +11,14 @@ struct Verifier : RecursiveOpVisitor<Verifier> {
   int depth = 0;
   bool in_cdregion = false;
   Function *cur_func = nullptr;
+  Module *cur_module = nullptr;
   bool has_error = false;
 
   using RecursiveOpVisitor<Verifier>::visit;
 
   template <typename... Args>
-  auto report_error(fmt::format_string<Args...> fmt_str, Args... args)
-    -> void { // NOLINT
+  auto report_error(fmt::format_string<Args...> fmt_str, Args... args) // NOLINT
+    -> void {
     exodus::Log::log_error(fmt_str, std::forward<Args>(args)...);
     has_error = true;
   }
@@ -42,8 +43,15 @@ struct Verifier : RecursiveOpVisitor<Verifier> {
 
   auto verify(Function &f) -> bool {
     has_error = false;
+    cur_module = nullptr;
     visit(f);
     return !has_error;
+  }
+
+  auto visit(Module &m) -> void {
+    cur_module = &m;
+    RecursiveOpVisitor<Verifier>::visit(m);
+    cur_module = nullptr;
   }
 
   auto visit(Function &f) -> void {
@@ -399,6 +407,79 @@ struct Verifier : RecursiveOpVisitor<Verifier> {
       report_error("getptr result must be a pointer");
   }
 
+  void visit(Op *op, OpTag<OpCode::Call>) {
+    if (!cur_module) {
+      return;
+    }
+
+    auto &payload = std::get<CallPayload>(op->payload);
+    Function *callee = nullptr;
+    for (auto &f : cur_module->functions) {
+      if (f->name == payload.func_name) {
+        callee = f.get();
+        break;
+      }
+    }
+
+    if (!callee) {
+      report_error("call to undefined function '{}'", payload.func_name);
+      return;
+    }
+
+    if (!callee->type || !callee->type->is_func()) {
+      report_error("call target '{}' is not a function", payload.func_name);
+      return;
+    }
+
+    auto func_type = std::static_pointer_cast<exodus::Func>(callee->type);
+    if (op->operands.size() != func_type->params.size()) {
+      report_error(
+        "call '{}' expects {} args, got {}",
+        payload.func_name,
+        func_type->params.size(),
+        op->operands.size()
+      );
+    }
+
+    if (has_null_operand(op)) {
+      return;
+    }
+
+    auto arg_count = std::min(op->operands.size(), func_type->params.size());
+    for (size_t i = 0; i < arg_count; ++i) {
+      auto expected = func_type->params[i];
+      auto actual = op->operands[i]->type;
+      if (expected != actual) {
+        report_error(
+          "call '{}' arg {} type mismatch: expected {}, got {}",
+          payload.func_name,
+          i,
+          expected->to_string(),
+          actual->to_string()
+        );
+      }
+    }
+
+    if (func_type->ret_type->is_void()) {
+      if (op->result && !op->result->type->is_void()) {
+        report_error("call '{}' result must be void", payload.func_name);
+      }
+    } else if (!op->result) {
+      report_error(
+        "call '{}' must return {}",
+        payload.func_name,
+        func_type->ret_type->to_string()
+      );
+    } else if (op->result->type != func_type->ret_type) {
+      report_error(
+        "call '{}' result type mismatch: expected {}, got {}",
+        payload.func_name,
+        func_type->ret_type->to_string(),
+        op->result->type->to_string()
+      );
+    }
+  }
+
   void visit(Op *op, OpTag<OpCode::Ret>) {
     if (!cur_func)
       return;
@@ -421,12 +502,6 @@ struct Verifier : RecursiveOpVisitor<Verifier> {
           op->operands[0]->type->to_string()
         );
       }
-    }
-  }
-
-  void visit(Op *op, OpTag<OpCode::Call>) {
-    if (op->result && op->result->type->is_void()) {
-      report_error("call result cannot be void");
     }
   }
 };
