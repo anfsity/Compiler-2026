@@ -207,6 +207,27 @@ auto test_valid_memory() -> bool {
   return verify_function(*func, true);
 }
 
+auto test_valid_memset() -> bool {
+  Module m;
+  auto *func = make_function(m, Void::get());
+
+  auto *alloca_op = m.ctx.make_op(OpCode::Alloca);
+  attach_result(m, alloca_op, I32::get()->ptr_to());
+  add_op(func, alloca_op);
+
+  auto *ptr = alloca_op->result;
+  auto *count = make_const(m, I32::get(), 10);
+  auto *val = make_const(m, I32::get(), 0);
+
+  auto *memset_op = m.ctx.make_op(OpCode::Memset);
+  add_operand(memset_op, ptr);
+  add_operand(memset_op, count);
+  add_operand(memset_op, val);
+  add_op(func, memset_op);
+
+  return verify_function(*func, true);
+}
+
 auto test_valid_control() -> bool {
   Module m;
   auto *func = make_function(m, Void::get());
@@ -520,6 +541,28 @@ auto test_invalid_memory() -> bool {
   return verify_function(*func, false);
 }
 
+auto test_invalid_memset() -> bool {
+  Module m;
+  auto *func = make_function(m, Void::get());
+
+  auto *val = make_const(m, I32::get(), 1);
+  auto *fval = make_const(m, Float::get(), 1.0f);
+
+  // Wrong operand count
+  auto *memset_count = m.ctx.make_op(OpCode::Memset);
+  add_operand(memset_count, val);
+  add_op(func, memset_count);
+
+  // Wrong types
+  auto *memset_type = m.ctx.make_op(OpCode::Memset);
+  add_operand(memset_type, val);  // Should be ptr
+  add_operand(memset_type, fval); // Should be i32
+  add_operand(memset_type, val);  // ok
+  add_op(func, memset_type);
+
+  return verify_function(*func, false);
+}
+
 auto test_invalid_control() -> bool {
   Module m;
   auto *func = make_function(m, Void::get());
@@ -621,6 +664,8 @@ int main() {
     return 1;
   if (run("test_valid_memory", test_valid_memory()))
     return 1;
+  if (run("test_valid_memset", test_valid_memset()))
+    return 1;
   if (run("test_valid_control", test_valid_control()))
     return 1;
   if (run("test_valid_return_void", test_valid_return_void()))
@@ -645,6 +690,8 @@ int main() {
   if (run("test_invalid_casts", test_invalid_casts()))
     return 1;
   if (run("test_invalid_memory", test_invalid_memory()))
+    return 1;
+  if (run("test_invalid_memset", test_invalid_memset()))
     return 1;
   if (run("test_invalid_control", test_invalid_control()))
     return 1;
