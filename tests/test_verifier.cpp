@@ -15,15 +15,25 @@ using namespace exodus::high_ir;
 
 namespace {
 
-auto make_function(Module &m, const std::shared_ptr<Type> &ret_type)
-  -> Function * {
+auto make_function(
+  Module &m,
+  const std::string &name,
+  const std::shared_ptr<Type> &ret_type,
+  const std::vector<std::shared_ptr<Type>> &params = {},
+  bool is_decl = false
+) -> Function * {
   auto func = std::make_unique<Function>();
-  func->name = "test";
-  func->type = Func::get(ret_type, {});
-  func->is_decl = false;
+  func->name = name;
+  func->type = Func::get(ret_type, params);
+  func->is_decl = is_decl;
   auto *ptr = func.get();
   m.functions.emplace_back(std::move(func));
   return ptr;
+}
+
+auto make_function(Module &m, const std::shared_ptr<Type> &ret_type)
+  -> Function * {
+  return make_function(m, "test", ret_type);
 }
 
 auto make_const(
@@ -86,6 +96,11 @@ auto make_binary_op(
 auto verify_function(Function &func, bool expected) -> bool {
   Verifier v;
   return v.verify(func) == expected;
+}
+
+auto verify_module(Module &m, bool expected) -> bool {
+  Verifier v;
+  return v.verify(m) == expected;
 }
 
 auto test_valid_arithmetic() -> bool {
@@ -245,13 +260,18 @@ auto test_valid_return_nonvoid() -> bool {
 auto test_valid_call() -> bool {
   Module m;
   auto *func = make_function(m, Void::get());
+  make_function(m, "foo", I32::get(), {I32::get(), Float::get()}, true);
 
+  auto *i1 = make_const(m, I32::get(), 1);
+  auto *f1 = make_const(m, Float::get(), 1.0f);
   auto *call_op = m.ctx.make_op(OpCode::Call);
   call_op->payload = CallPayload{"foo"};
+  add_operand(call_op, i1);
+  add_operand(call_op, f1);
   attach_result(m, call_op, I32::get());
   add_op(func, call_op);
 
-  return verify_function(*func, true);
+  return verify_module(m, true);
 }
 
 auto test_invalid_use_def_chain() -> bool {
@@ -567,13 +587,16 @@ auto test_invalid_return() -> bool {
 auto test_invalid_call() -> bool {
   Module m;
   auto *func = make_function(m, Void::get());
+  make_function(m, "foo", I32::get(), {I32::get()}, true);
 
+  auto *f1 = make_const(m, Float::get(), 1.0f);
   auto *call_op = m.ctx.make_op(OpCode::Call);
   call_op->payload = CallPayload{"foo"};
-  attach_result(m, call_op, Void::get());
+  add_operand(call_op, f1);
+  attach_result(m, call_op, I32::get());
   add_op(func, call_op);
 
-  return verify_function(*func, false);
+  return verify_module(m, false);
 }
 
 } // namespace

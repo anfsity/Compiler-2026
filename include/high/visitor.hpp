@@ -70,6 +70,7 @@ struct RecursiveOpVisitor {
       case OpCode::Condition: static_cast<Derived *>(this)->visit(op, OpTag<OpCode::Condition>{}); break;
       case OpCode::Jump:      static_cast<Derived *>(this)->visit(op, OpTag<OpCode::Jump>{}); break;
       case OpCode::Branch:    static_cast<Derived *>(this)->visit(op, OpTag<OpCode::Branch>{}); break;
+      case OpCode::Memset:    static_cast<Derived *>(this)->visit(op, OpTag<OpCode::Memset>{}); break;
       // clang-format on
     }
   }

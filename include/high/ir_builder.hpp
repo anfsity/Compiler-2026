@@ -204,10 +204,8 @@ inline auto IRBuilder::visit(const ast::FuncDefAST &ast_func) -> void {
 
   std::vector<std::shared_ptr<Type>> params_type;
   std::vector<std::shared_ptr<Type>> params_sym_type;
-  std::vector<bool> params_is_array;
   params_type.reserve(ast_func.params.size());
   params_sym_type.reserve(ast_func.params.size());
-  params_is_array.reserve(ast_func.params.size());
 
   for (auto &p : ast_func.params) {
     auto param_type = p->type;
@@ -224,7 +222,6 @@ inline auto IRBuilder::visit(const ast::FuncDefAST &ast_func) -> void {
     }
     params_type.emplace_back(param_type);
     params_sym_type.emplace_back(sym_type);
-    params_is_array.emplace_back(is_array);
   }
 
   func->type = Func::get(ast_func.ret_type, params_type);
@@ -238,18 +235,13 @@ inline auto IRBuilder::visit(const ast::FuncDefAST &ast_func) -> void {
     const auto &p = ast_func.params[i];
     auto param_type = params_type[i];
     auto sym_type = params_sym_type[i];
-    bool is_array = params_is_array[i];
 
     auto *arg_val = ctx->make_value<Argument>(param_type, i);
     func->args.emplace_back(arg_val);
 
-    if (is_array) {
-      symtab.push(p->name, {sym_type, arg_val, nullptr, nullptr, false});
-    } else {
-      Value *alloca_res = emit_val(OpCode::Alloca, param_type->ptr_to());
-      emit(OpCode::Store, nullptr, arg_val, alloca_res);
-      symtab.push(p->name, {sym_type, alloca_res, nullptr, nullptr, false});
-    }
+    Value *alloca_res = emit_val(OpCode::Alloca, param_type->ptr_to());
+    emit(OpCode::Store, nullptr, arg_val, alloca_res);
+    symtab.push(p->name, {sym_type, alloca_res, nullptr, nullptr, false});
   }
 
   // FIXME: 用 visit(stmt) 优化？
@@ -387,9 +379,12 @@ inline auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
         Value *ptr = visit(*lval);
         auto tar_type = std::static_pointer_cast<Ptr>(ptr->type)->target;
 
-        // TODO: sysy 允许数组名作为指针使用吗？
-        if (tar_type->is_array() && lval->indices.empty()) {
-          return ptr;
+        if (tar_type->is_array()) {
+          auto base = std::static_pointer_cast<Array>(tar_type)->base;
+          auto zero = ctx->make_value<Constant>(I32::get(), 0);
+          return emit_val(
+            OpCode::GetPtr, base->ptr_to(), ptr, std::vector<Value *>{zero}
+          );
         }
         return emit_val(OpCode::Load, tar_type, ptr);
       },
@@ -602,6 +597,9 @@ inline auto IRBuilder::eval_gbinit(
 
       // int a[2][2] = {1, 2, {1, 2}};
       [&](const std::unique_ptr<ast::InitListAST> &list) -> InitVal {
+        if (list->values.empty()) {
+          return {ZeroInit{}};
+        }
         int tot_size =
           type->is_array() ? std::static_pointer_cast<Array>(type)->size() : 1;
         std::vector<InitVal> flattened(tot_size, InitVal{ZeroInit{}});
@@ -635,9 +633,10 @@ inline auto IRBuilder::visit(const ast::LvalAST &ast_lval) -> Value * {
 
   for (auto &idx : ast_lval.indices) {
     indices.emplace_back(visit(idx));
-    auto arr_t = std::dynamic_pointer_cast<Array>(cur_type);
-    if (arr_t) {
+    if (auto arr_t = std::dynamic_pointer_cast<Array>(cur_type)) {
       cur_type = arr_t->base;
+    } else if (auto ptr_t = std::dynamic_pointer_cast<Ptr>(cur_type)) {
+      cur_type = ptr_t->target;
     } else {
       // 怎么会失败呢？肯定是发生了错误。
     }
@@ -763,15 +762,41 @@ inline auto IRBuilder::flatten_list(
     );
   }
 
+  auto get_flat_ptr = [&](int flat_idx) -> Value * {
+    if (dims.empty())
+      return base_ptr;
+    std::vector<Value *> indices;
+    int rem = flat_idx;
+    for (int stride : strides) {
+      indices.emplace_back(ctx->make_value<Constant>(I32::get(), rem / stride));
+      rem %= stride;
+    }
+    return emit_val(OpCode::GetPtr, scalar_type->ptr_to(), base_ptr, indices);
+  };
+
   // 如果 idx 不能和子数组对齐，则说明之前的填充还有空余，我们应该补 0
   // 来消除这些空余。举个例子 int a[2][2] = {{1}, {2}} -> {{1, 0}, {2,
   // 0}}; 但是对于 int a[2][2] = {1, {1, 2}};
   // 这就是一个错误。也就是说，在进入这个 递归前，如果 idx
   // 没有对齐，就代表着出现了错误。
   // 为了处理这种复杂的情况，我们需要好好的设计返回值。
-  while (idx >= 0 && idx < end_idx) {
-    store_zero(idx);
-    idx++;
+  if (idx >= 0 && idx < end_idx) {
+    int count = end_idx - idx;
+    if (count > 16) {
+      Value *start_ptr = get_flat_ptr(idx);
+      Value *count_val = ctx->make_value<Constant>(I32::get(), count);
+      Value *zero_val =
+        scalar_type->is_f32()
+          ? static_cast<Value *>(ctx->make_value<Constant>(Float::get(), 0.0f))
+          : static_cast<Value *>(ctx->make_value<Constant>(I32::get(), 0));
+      emit(OpCode::Memset, nullptr, start_ptr, count_val, zero_val);
+      idx = end_idx;
+    } else {
+      while (idx < end_idx) {
+        store_zero(idx);
+        idx++;
+      }
+    }
   }
 }
 

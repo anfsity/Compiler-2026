@@ -332,6 +332,27 @@ struct Verifier : RecursiveOpVisitor<Verifier> {
       report_error("zext result must be i32");
   }
 
+  void visit(Op *op, OpTag<OpCode::Memset>) {
+    if (op->operands.size() != 3u) {
+      report_error("memset expects 3 operands (ptr, count, value)");
+      return;
+    }
+
+    if (has_null_operand(op)) {
+      return;
+    }
+
+    if (!op->operands[0]->type->is_ptr()) {
+      report_error("memset first operand must be a pointer");
+    }
+    if (!op->operands[1]->type->is_i32()) {
+      report_error("memset second operand (count) must be i32");
+    }
+    if (!op->operands[2]->type->is_i32() && !op->operands[2]->type->is_f32()) {
+      report_error("memset third operand (value) must be i32 or f32");
+    }
+  }
+
   void visit(Op *op, OpTag<OpCode::Alloca>) {
     if (!op->result || !op->result->type->is_ptr())
       report_error("alloca result must be a pointer");

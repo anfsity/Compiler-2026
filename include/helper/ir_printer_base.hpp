@@ -128,6 +128,7 @@ struct IRPrinterBase {
     case high_ir::OpCode::Jump: return "jump";
     case high_ir::OpCode::Branch: return "branch";
     case high_ir::OpCode::Condition: return "condition";
+    case high_ir::OpCode::Memset: return "memset";
     default: return "unknown";
       // clang-format on
     }

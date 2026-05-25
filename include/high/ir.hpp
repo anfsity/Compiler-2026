@@ -103,9 +103,9 @@ enum class OpCode : uint8_t {
     Alloca, Load, Store, GetPtr,                     // memory
     Call, Ret,                                       // function
     If, While, Break, Continue, Condition,           // control
-    Jump, Branch                                     // for mid ir  
-};
-// clang-format on
+    Jump, Branch,                                     // for mid ir
+    Memset                                           // for efficient zero init
+    }; // clang-format on
 
 // empty, call, if ,while
 struct EmptyPayload {};
