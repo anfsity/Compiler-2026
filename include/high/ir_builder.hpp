@@ -602,12 +602,16 @@ inline auto IRBuilder::eval_gbinit(
 
       // int a[2][2] = {1, 2, {1, 2}};
       [&](const std::unique_ptr<ast::InitListAST> &list) -> InitVal {
-        auto arr_type = std::static_pointer_cast<Array>(type);
-        int tot_size = arr_type->size();
+        int tot_size =
+          type->is_array() ? std::static_pointer_cast<Array>(type)->size() : 1;
         std::vector<InitVal> flattened(tot_size, InitVal{ZeroInit{}});
         int idx = 0;
 
         flatten_gb_list(*list, type, flattened, idx);
+
+        if (!type->is_array() && flattened.size() == 1) {
+          return flattened[0];
+        }
 
         return {InitList{std::move(flattened)}};
       }
@@ -720,7 +724,11 @@ inline auto IRBuilder::flatten_list(
 
     if (idx >= end_idx) {
       Log::log_error(
-        "[{}:{}] too many initializers for array", list.line, list.col
+        "[{}:{}] {}",
+        list.line,
+        list.col,
+        type->is_array() ? "too many initializers for array"
+                         : "excess elements in scalar initializer"
       );
       idx = -1;
       return;
@@ -740,21 +748,12 @@ inline auto IRBuilder::flatten_list(
         },
 
         [&](const std::unique_ptr<ast::InitListAST> &sub_list) {
-          int sub_stride = get_size(sub_type);
-          if (idx % sub_stride != 0) {
-            // 把 gcc 的报错抄过来了
-            Log::log_error(
-              "[{}:{}] cannot convert ‘<brace-enclosed initializer list>’ to "
-              "‘{}’ in initialization",
-              sub_list->line,
-              sub_list->col,
-              scalar_type->to_string()
-            );
-            idx = -1;
-            return;
+          auto target_type = sub_type;
+          while (target_type->is_array() && idx % get_size(target_type) != 0) {
+            target_type = std::static_pointer_cast<Array>(target_type)->base;
           }
 
-          flatten_list(*sub_list, sub_type, base_ptr, idx);
+          flatten_list(*sub_list, target_type, base_ptr, idx);
           if (idx < 0) {
             return;
           }
@@ -797,7 +796,11 @@ inline auto IRBuilder::flatten_gb_list(
   for (auto &item : list.values) {
     if (idx >= end_idx) {
       Log::log_error(
-        "[{}:{}] too many initializers for array", list.line, list.col
+        "[{}:{}] {}",
+        list.line,
+        list.col,
+        type->is_array() ? "too many initializers for array"
+                         : "excess elements in scalar initializer"
       );
       idx = -1;
       return;
@@ -815,21 +818,14 @@ inline auto IRBuilder::flatten_gb_list(
         },
 
         [&](const std::unique_ptr<ast::InitListAST> &sub_list) {
-          int sub_stride = get_size(sub_type);
-
-          if (idx % sub_stride != 0) {
-            Log::log_error(
-              "[{}:{}] cannot convert ‘<brace-enclosed initializer list>’ to "
-              "scalar type",
-              sub_list->line,
-              sub_list->col
-            );
-            idx = -1;
-            return;
+          auto target_type = sub_type;
+          while (target_type->is_array() && idx % get_size(target_type) != 0) {
+            target_type = std::static_pointer_cast<Array>(target_type)->base;
           }
 
+          int sub_stride = get_size(target_type);
           int sub_idx = idx;
-          flatten_gb_list(*sub_list, sub_type, res, idx);
+          flatten_gb_list(*sub_list, target_type, res, idx);
           if (idx >= 0) {
             idx = sub_idx + sub_stride;
           }
