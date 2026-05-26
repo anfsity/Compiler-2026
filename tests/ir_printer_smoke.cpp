@@ -97,8 +97,8 @@ auto add_main(Module &module, GlobalAddr *array_addr) -> void {
   auto *ptr = make_result(module, I32::get()->ptr_to());
   make_op(module, func->body, OpCode::Alloca, {}, ptr);
 
-  auto *one = module.ctx.make_value<Constant>(I32::get(), 1);
-  auto *two = module.ctx.make_value<Constant>(I32::get(), 2);
+  auto *one = module.ctx.make_const(I32::get(), 1);
+  auto *two = module.ctx.make_const(I32::get(), 2);
 
   make_op(module, func->body, OpCode::Store, {one, ptr});
 
@@ -108,7 +108,7 @@ auto add_main(Module &module, GlobalAddr *array_addr) -> void {
   auto *sum = make_result(module, I32::get());
   make_op(module, func->body, OpCode::Add, {loaded, two}, sum);
 
-  auto *f_val = module.ctx.make_value<Constant>(Float::get(), 1.5f);
+  auto *f_val = module.ctx.make_const(Float::get(), 1.5f);
   auto *f_sum = make_result(module, Float::get());
   make_op(module, func->body, OpCode::FAdd, {f_val, f_val}, f_sum);
 
@@ -121,8 +121,8 @@ auto add_main(Module &module, GlobalAddr *array_addr) -> void {
   auto *logic = make_result(module, I32::get());
   make_op(module, func->body, OpCode::And, {sum, two}, logic);
 
-  auto *idx0 = module.ctx.make_value<Constant>(I32::get(), 0);
-  auto *idx1 = module.ctx.make_value<Constant>(I32::get(), 1);
+  auto *idx0 = module.ctx.make_zero(I32::get());
+  auto *idx1 = module.ctx.make_const(I32::get(), 1);
   auto *elem_ptr = make_result(module, I32::get()->ptr_to());
   make_op(
     module, func->body, OpCode::GetPtr, {array_addr, idx0, idx1}, elem_ptr

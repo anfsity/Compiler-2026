@@ -36,19 +36,13 @@ struct CP : RecursiveOpVisitor<CP> {
       if (!g->is_const && (g->type->is_i32() || g->type->is_f32())) {
         safe_globals.insert(g->addr);
         if (g->addr) {
-          if (std::holds_alternative<int>(g->init.data)) {
-            env[g->addr] =
-              ctx->make_value<Constant>(g->type, std::get<int>(g->init.data));
-
-          } else if (std::holds_alternative<float>(g->init.data)) {
-            env[g->addr] =
-              ctx->make_value<Constant>(g->type, std::get<float>(g->init.data));
-
+          if (
+            std::holds_alternative<int>(g->init.data) ||
+            std::holds_alternative<float>(g->init.data)
+          ) {
+            env[g->addr] = ctx->make_const(g->type, g->init);
           } else if (std::holds_alternative<ZeroInit>(g->init.data)) {
-            env[g->addr] =
-              g->type->is_f32()
-                ? static_cast<Value *>(ctx->make_value<Constant>(g->type, 0.0f))
-                : static_cast<Value *>(ctx->make_value<Constant>(g->type, 0));
+            env[g->addr] = ctx->make_zero(g->type);
           }
         }
       }
@@ -222,12 +216,13 @@ struct CP : RecursiveOpVisitor<CP> {
       ) {
         res =
           fold_arith(op->code, std::get<int>(l->val), std::get<int>(r->val));
-      } else {
-        auto get_f = [](const Constant::Data &d) {
-          return std::holds_alternative<float>(d) ? std::get<float>(d)
-                                                  : (float)std::get<int>(d);
-        };
-        res = fold_arith(op->code, get_f(l->val), get_f(r->val));
+      } else if (
+        std::holds_alternative<float>(l->val) &&
+        std::holds_alternative<float>(r->val)
+      ) {
+        res = fold_arith(
+          op->code, std::get<float>(l->val), std::get<float>(r->val)
+        );
       }
 
     } else if (op->operands.size() == 1u) {
@@ -241,7 +236,7 @@ struct CP : RecursiveOpVisitor<CP> {
     }
 
     if (res) {
-      rewriter.replaceOp(op, ctx->make_value<Constant>(op->result->type, *res));
+      rewriter.replaceOp(op, ctx->make_const(op->result->type, *res));
       changed = true;
     }
   }

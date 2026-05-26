@@ -37,9 +37,9 @@ auto make_function(Module &m, const std::shared_ptr<Type> &ret_type)
 }
 
 auto make_const(
-  Module &m, const std::shared_ptr<Type> &type, const Constant::Data &val
+  Module &m, const std::shared_ptr<Type> &type, Constant::Data val
 ) -> Constant * {
-  return m.ctx.make_value<Constant>(type, val);
+  return m.ctx.make_const(type, val);
 }
 
 auto attach_result(Module &m, Op *op, const std::shared_ptr<Type> &type)

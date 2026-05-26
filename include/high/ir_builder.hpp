@@ -67,10 +67,7 @@ private:
     if (target->is_i32() && v->type->is_f32())
       return emit_val(OpCode::F2I, I32::get(), v);
     if (target->is_bool()) {
-      Value *zero =
-        v->type->is_f32()
-          ? static_cast<Value *>(ctx->make_value<Constant>(Float::get(), 0.0f))
-          : static_cast<Value *>(ctx->make_value<Constant>(I32::get(), 0));
+      Value *zero = ctx->make_zero(v->type);
       return emit_val(OpCode::Ne, Bool::get(), v, zero);
     }
     if (target->is_i32() && v->type->is_bool())
@@ -132,15 +129,7 @@ inline auto IRBuilder::visit(const ast::GlobalItem &ast_item) -> void {
 
           Constant *cv = nullptr;
           if (d->is_const && !type->is_array()) {
-            if (std::holds_alternative<int>(g_var->init.data)) {
-              cv = ctx->make_value<Constant>(
-                type, std::get<int>(g_var->init.data)
-              );
-            } else if (std::holds_alternative<float>(g_var->init.data)) {
-              cv = ctx->make_value<Constant>(
-                type, std::get<float>(g_var->init.data)
-              );
-            }
+            cv = ctx->make_const(type, g_var->init);
           }
 
           g_var->addr = ctx->make_value<GlobalAddr>(type->ptr_to(), def->name);
@@ -364,7 +353,7 @@ inline auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
       [&](const std::unique_ptr<ast::NumberAST> &n) -> Value * {
         auto type =
           std::holds_alternative<int>(n->val) ? I32::get() : Float::get();
-        return ctx->make_value<Constant>(type, n->val);
+        return ctx->make_const(type, n->val);
       },
 
       [&](const std::unique_ptr<ast::LvalAST> &lval) -> Value * {
@@ -381,7 +370,7 @@ inline auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
 
         if (tar_type->is_array()) {
           auto base = std::static_pointer_cast<Array>(tar_type)->base;
-          auto zero = ctx->make_value<Constant>(I32::get(), 0);
+          auto zero = ctx->make_zero(I32::get());
           return emit_val(
             OpCode::GetPtr, base->ptr_to(), ptr, std::vector<Value *>{zero}
           );
@@ -397,7 +386,7 @@ inline auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
           auto lhs_bool = coerce(lhs, Bool::get());
           emit(OpCode::Store, nullptr, lhs_bool, res_ptr);
 
-          auto *bool_zero = ctx->make_value<Constant>(Bool::get(), 0);
+          auto *bool_zero = ctx->make_zero(Bool::get());
           Value *if_cond =
             (bin->op == ast::BinaryOp::And
                ? lhs_bool
@@ -464,7 +453,7 @@ inline auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
           if (cmp_map.count(bin->op))
             eval_type = Bool::get();
 
-          return ctx->make_value<Constant>(eval_type, res_val);
+          return ctx->make_const(eval_type, res_val);
         }
 
         lhs = coerce(lhs, eval_type);
@@ -472,7 +461,7 @@ inline auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
 
         if (symtab.is_global()) {
           Log::log_error("Initializer element is not a compile-time constant");
-          return ctx->make_value<Constant>(result_type, 0);
+          return ctx->make_zero(result_type);
         }
 
         bool is_f = eval_type->is_f32();
@@ -507,29 +496,23 @@ inline auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
             res_type = I32::get();
           }
 
-          return ctx->make_value<Constant>(res_type, res_val);
+          return ctx->make_const(res_type, res_val);
         }
 
         if (cur_region == nullptr) {
           Log::log_error("Initializer element is not a compile-time constant");
-          return ctx->make_value<Constant>(val->type, 0);
+          return ctx->make_zero(val->type);
         }
 
         switch (una->op) {
         case ast::UnaryOp::Neg: {
           val = coerce(val, val->type->is_bool() ? I32::get() : val->type);
-          bool is_f = val->type->is_f32();
-          Value *zero =
-            is_f
-              ? static_cast<Value *>(
-                  ctx->make_value<Constant>(Float::get(), 0.0f)
-                )
-              : static_cast<Value *>(ctx->make_value<Constant>(I32::get(), 0));
-          OpCode code = is_f ? OpCode::FSub : OpCode::Sub;
+          Value *zero = ctx->make_zero(val->type);
+          OpCode code = val->type->is_f32() ? OpCode::FSub : OpCode::Sub;
           return emit_val(code, val->type, zero, val);
         }
         case ast::UnaryOp::Not: {
-          Value *zero = ctx->make_value<Constant>(val->type, 0);
+          Value *zero = ctx->make_zero(val->type);
           return emit_val(OpCode::Eq, Bool::get(), val, zero);
         }
         case ast::UnaryOp::Pos:
@@ -558,7 +541,7 @@ inline auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
           if (!src_arr || src_arr->base != dst_ptr->target) {
             return arg_val;
           }
-          Value *zero = ctx->make_value<Constant>(I32::get(), 0);
+          Value *zero = ctx->make_zero(I32::get());
           return emit_val(OpCode::GetPtr, target, arg_val, zero);
         };
         for (size_t i = 0; i < call->args.size(); ++i) {
@@ -695,7 +678,7 @@ inline auto IRBuilder::flatten_list(
     std::vector<Value *> indices;
     int rem = flat_idx;
     for (int stride : strides) {
-      indices.emplace_back(ctx->make_value<Constant>(I32::get(), rem / stride));
+      indices.emplace_back(ctx->make_const(I32::get(), rem / stride));
       rem %= stride;
     }
 
@@ -705,10 +688,7 @@ inline auto IRBuilder::flatten_list(
   };
 
   auto store_zero = [&](int flat_idx) {
-    Value *zero =
-      scalar_type->is_f32()
-        ? static_cast<Value *>(ctx->make_value<Constant>(scalar_type, 0.0f))
-        : static_cast<Value *>(ctx->make_value<Constant>(scalar_type, 0));
+    Value *zero = ctx->make_zero(scalar_type);
     store_flat(flat_idx, zero);
   };
 
@@ -768,7 +748,7 @@ inline auto IRBuilder::flatten_list(
     std::vector<Value *> indices;
     int rem = flat_idx;
     for (int stride : strides) {
-      indices.emplace_back(ctx->make_value<Constant>(I32::get(), rem / stride));
+      indices.emplace_back(ctx->make_const(I32::get(), rem / stride));
       rem %= stride;
     }
     return emit_val(OpCode::GetPtr, scalar_type->ptr_to(), base_ptr, indices);
@@ -784,11 +764,8 @@ inline auto IRBuilder::flatten_list(
     int count = end_idx - idx;
     if (count > 16) {
       Value *start_ptr = get_flat_ptr(idx);
-      Value *count_val = ctx->make_value<Constant>(I32::get(), count);
-      Value *zero_val =
-        scalar_type->is_f32()
-          ? static_cast<Value *>(ctx->make_value<Constant>(Float::get(), 0.0f))
-          : static_cast<Value *>(ctx->make_value<Constant>(I32::get(), 0));
+      Value *count_val = ctx->make_const(I32::get(), count);
+      Value *zero_val = ctx->make_zero(scalar_type);
       emit(OpCode::Memset, nullptr, start_ptr, count_val, zero_val);
       idx = end_idx;
     } else {
