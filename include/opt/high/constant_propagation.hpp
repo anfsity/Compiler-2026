@@ -68,6 +68,22 @@ struct CP : RecursiveOpVisitor<CP> {
     }
   }
 
+  struct ModifiedFinder : RecursiveOpVisitor<ModifiedFinder> {
+    std::unordered_set<Value *> modified;
+    bool has_call = false;
+    using RecursiveOpVisitor<ModifiedFinder>::visit;
+
+    void visit(Op *op, OpTag<OpCode::Store>) {
+      modified.insert(op->operands[1]);
+    }
+
+    void visit(Op *op, OpTag<OpCode::Memset>) {
+      modified.insert(op->operands[0]);
+    }
+
+    void visit(Op * /* op */, OpTag<OpCode::Call>) { has_call = true; }
+  };
+
   void visit(Op *op, OpTag<OpCode::Alloca>) {
     auto ptr_type = std::static_pointer_cast<exodus::Ptr>(op->result->type);
     if (ptr_type->target->is_i32() || ptr_type->target->is_f32()) {
@@ -98,13 +114,59 @@ struct CP : RecursiveOpVisitor<CP> {
   }
 
   void visit(Op *op, OpTag<OpCode::If>) {
-    RecursiveOpVisitor<CP>::visit(op, OpTag<OpCode::If>{});
-    clear_all_env();
+    auto &p = std::get<IfPayload>(op->payload);
+    ModifiedFinder finder;
+    finder.visit(*p.then_region);
+    if (p.else_region)
+      finder.visit(*p.else_region);
+
+    auto saved_env = env;
+    visit(*p.then_region);
+
+    if (p.else_region) {
+      env = saved_env;
+      visit(*p.else_region);
+    }
+
+    env = saved_env;
+    for (auto *v : finder.modified)
+      env.erase(v);
+
+    if (finder.has_call)
+      clear_global_env();
   }
 
   void visit(Op *op, OpTag<OpCode::While>) {
-    RecursiveOpVisitor<CP>::visit(op, OpTag<OpCode::While>{});
-    clear_all_env();
+    auto &p = std::get<WhilePayload>(op->payload);
+    ModifiedFinder finder;
+    finder.visit(*p.cond_region);
+    finder.visit(*p.loop_region);
+
+    auto saved_allocas = safe_allocas;
+    auto saved_globals = safe_globals;
+
+    // Loop entry: invalidate potentially modified variables
+    for (auto *v : finder.modified) {
+      safe_allocas.erase(v);
+      safe_globals.erase(v);
+      env.erase(v);
+    }
+
+    if (finder.has_call) {
+      safe_globals.clear();
+      clear_global_env();
+    }
+
+    visit(*p.cond_region);
+    visit(*p.loop_region);
+
+    safe_allocas = saved_allocas;
+    safe_globals = saved_globals;
+    for (auto *v : finder.modified)
+      env.erase(v);
+
+    if (finder.has_call)
+      clear_global_env();
   }
 
   void clear_global_env() {
