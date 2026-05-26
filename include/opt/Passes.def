@@ -14,6 +14,7 @@
 #define FUNCTION_ANALYSIS(NAME, IDENTIFIER, DESC)
 #endif
 
+MODULE_PASS(Inliner, "inliner", "function inlining")
 FUNCTION_PASS(CP, "const_prop", "constant propagation")
 
 #undef MODULE_PASS

@@ -7,6 +7,7 @@
 #include "../include/high/ir.hpp"
 #include "../include/high/ir_builder.hpp"
 #include "../include/high/ir_printer.hpp"
+#include "../include/high/verifier.hpp"
 #include "../include/mid/flatten.hpp"
 #include "../include/opt/PassBuilder.hpp"
 
@@ -37,24 +38,37 @@ int main(int argc, char **argv) {
   IRBuilder builder(nullptr);
   auto module = builder.build(ast);
 
+  Verifier verifier;
+
+  // --- Optimization Phase ---
   PassBuilder pb(module.get());
-  auto fpm = pb.buildFunctionPipeline();
   FunctionAnalysisManager fam;
+  ModuleAnalysisManager mam;
 
-  for (auto &f : module->functions) {
-    if (!f->is_decl) {
-      fpm.run(*f, fam);
+  auto fpm = pb.buildFunctionPipeline();
+  auto mpm = pb.buildModulePipeline();
+
+  auto run_fpm = [&]() {
+    for (auto &f : module->functions) {
+      if (!f->is_decl)
+        fpm.run(*f, fam);
     }
-  }
+  };
 
+  run_fpm();
+  mpm.run(*module, mam);
+  run_fpm();
+
+  // --- Lowering Phase ---
   Flattener flattener(module.get());
   auto mid_module = flattener.flatten();
 
+  if (!verifier.verify(*module)) {
+    fmt::print(stderr, "Verifier: IR is invalid in modlue!\n");
+  }
+
   IRPrinter printer;
   fmt::print("{}\n", printer.dump(*module));
-
-  // LinearIRPrinter printer;
-  // fmt::print("{}\n", printer.dump(*mid_module));
 
   return 0;
 }

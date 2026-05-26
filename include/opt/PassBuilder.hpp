@@ -2,6 +2,7 @@
 
 #include "PassManager.hpp"
 #include "high/constant_propagation.hpp"
+#include "high/inliner.hpp"
 
 namespace exodus::opt {
 
