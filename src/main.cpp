@@ -9,6 +9,7 @@
 #include "../include/high/ir_printer.hpp"
 #include "../include/high/verifier.hpp"
 #include "../include/mid/flatten.hpp"
+#include "../include/mid/ir_printer.hpp"
 #include "../include/opt/PassBuilder.hpp"
 
 using namespace exodus;
@@ -69,6 +70,9 @@ int main(int argc, char **argv) {
 
   IRPrinter printer;
   fmt::print("{}\n", printer.dump(*module));
+
+  LinearIRPrinter mprinter;
+  fmt::print("{}\n", mprinter.dump(*mid_module));
 
   return 0;
 }

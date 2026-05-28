@@ -75,6 +75,9 @@ public:
   void finalize(Function &f) { finalize(f.body); }
 
   void clear() { to_erase.clear(); }
+
+  bool empty() const { return to_erase.empty(); }
+  size_t size() const { return to_erase.size(); }
 };
 
 } // namespace exodus::high_ir
