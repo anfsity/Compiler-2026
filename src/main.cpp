@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <string>
 #include <type_traits>
@@ -12,9 +13,10 @@
 #include "../include/high/verifier.hpp"
 #include "../include/mid/flatten.hpp"
 #include "../include/mid/ir_printer.hpp"
+#include "../include/opt/AnalysisManager.hpp"
 #include "../include/opt/PassBuilder.hpp"
+#include "../include/opt/PassManager.hpp"
 
-using namespace exodus;
 using namespace exodus::ast;
 using namespace exodus::high_ir;
 using namespace exodus::mid_ir;

@@ -1,13 +1,22 @@
 #include "../include/high/ir.hpp"
-#include "../include/high/ir_builder.hpp"
-#include "../include/high/ir_printer.hpp"
 #include "../include/opt/high/sdce.hpp"
+#include "fmt/base.h"              // for print
+#include "opt/AnalysisManager.hpp" // for FunctionAnalysisManager
+#include "type.hpp"                // for I32, Bool, Type
 #include <cassert>
+#include <list>     // for list, _List_iterator
+#include <memory>   // for shared_ptr, unique_ptr, make...
+#include <optional> // for nullopt, nullopt_t, optional
+#include <string>   // for basic_string
+#include <utility>  // for move
+#include <variant>  // for get
+#include <vector>   // for vector
 
 using namespace exodus;
 using namespace exodus::high_ir;
 using namespace exodus::opt;
 
+#ifdef EXODUS_UNIT_TEST
 int main() {
   IRContext ctx;
   Function f;
@@ -114,7 +123,7 @@ int main() {
     dce.run(f, fam);
 
     assert(f.body.size() == 1);
-    auto &p = std::get<IfPayload>((*f.body.begin())->payload);
+    [[maybe_unused]] auto &p = std::get<IfPayload>((*f.body.begin())->payload);
     assert(p.then_region->size() == 1);
     assert((*p.then_region->begin())->code == OpCode::Store);
     fmt::print(
@@ -182,3 +191,4 @@ int main() {
 
   return 0;
 }
+#endif
