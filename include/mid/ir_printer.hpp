@@ -20,7 +20,6 @@ struct LinearIRPrinter : public IRPrinterBase {
     return res;
   }
 
-private:
   auto dump(const LinearFunction &f) -> std::string {
     std::string args_s;
     for (auto &arg : f.args) {
@@ -28,7 +27,9 @@ private:
     }
 
     if (f.is_decl) {
-      return fmt::format("decl @{}({}) : {}\n", f.name, args_s, f.type->to_string());
+      return fmt::format(
+        "decl @{}({}) : {}\n", f.name, args_s, f.type->to_string()
+      );
     }
 
     std::string body;
@@ -53,6 +54,7 @@ private:
     return res;
   }
 
+private:
   auto dump(const high_ir::Op &op) -> std::string {
     std::string line = dump_op_common(op);
 
@@ -61,9 +63,7 @@ private:
       line += " ^" + op.successors[0]->name;
     } else if (op.code == high_ir::OpCode::Branch) {
       line += fmt::format(
-        ", ^{}, ^{}",
-        op.successors[0]->name,
-        op.successors[1]->name
+        ", ^{}, ^{}", op.successors[0]->name, op.successors[1]->name
       );
     }
     return line;

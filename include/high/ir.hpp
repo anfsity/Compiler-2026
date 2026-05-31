@@ -94,8 +94,8 @@ struct InitVal {
 };
 using Region = std::list<Op *>;
 
-// clang-format off
 enum class OpCode : uint8_t {
+  // clang-format off
     Add, Sub, Mul, Div, Mod, FAdd, FSub, FMul, FDiv, // arithmetic
     I2F, F2I, ZExt,                                  // transform
     Eq, Ne, Lt, Gt, Le, Ge,                          // compare
@@ -103,9 +103,10 @@ enum class OpCode : uint8_t {
     Alloca, Load, Store, GetPtr,                     // memory
     Call, Ret,                                       // function
     If, While, Break, Continue, Condition,           // control
-    Jump, Branch,                                     // for mid ir
+    Jump, Branch,                                    // for mid ir
     Memset                                           // for efficient zero init
-    }; // clang-format on
+  // clang-format on
+};
 
 // empty, call, if ,while
 struct EmptyPayload {};

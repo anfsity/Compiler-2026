@@ -1,6 +1,8 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <type_traits>
+#include <vector>
 
 #include "../include/fmt/base.h"
 #include "../include/high/ast_base.hpp"
@@ -22,12 +24,34 @@ extern FILE *yyin;
 extern int yyparse(CompUnitAST &ast);
 
 int main(int argc, char **argv) {
-  if (argc > 1) {
-    yyin = fopen(argv[1], "r");
-    if (!yyin) {
-      fmt::print(stderr, "Error: Could not open file {}\n", argv[1]);
-      return 1;
+  std::string input_file;
+  std::vector<std::string> pass_names;
+  bool print_ir_after_all = false;
+
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg.size() > 2 && arg.substr(0, 2) == "-O") {
+      pass_names.push_back(arg.substr(2));
+    } else if (arg == "-print-ir-after-all") {
+      print_ir_after_all = true;
+    } else {
+      input_file = arg;
     }
+  }
+
+  if (input_file.empty()) {
+    fmt::print(
+      stderr,
+      "Usage: {} <input_file> [-Opass1 -Opass2 ...] [-print-ir-after-all]\n",
+      argv[0]
+    );
+    return 1;
+  }
+
+  yyin = fopen(input_file.c_str(), "r");
+  if (!yyin) {
+    fmt::print(stderr, "Error: Could not open file {}\n", input_file);
+    return 1;
   }
 
   CompUnitAST ast;
@@ -46,19 +70,73 @@ int main(int argc, char **argv) {
   FunctionAnalysisManager fam;
   ModuleAnalysisManager mam;
 
-  auto fpm = pb.buildFunctionPipeline();
-  auto mpm = pb.buildModulePipeline();
+  auto instrumentation = [&](const std::string &name, auto &unit) {
+    if (print_ir_after_all) {
+      using T = std::decay_t<decltype(unit)>;
+      if constexpr (std::is_same_v<T, Function> || std::is_same_v<T, Module>) {
+        static IRPrinter p;
+        if constexpr (std::is_same_v<T, Function>) {
+          fmt::print(
+            "*** IR after {} (High IR Function: {}) ***\n", name, unit.name
+          );
+        } else {
+          fmt::print("*** IR after {} (High IR Module) ***\n", name);
+        }
+        fmt::print("{}\n", p.dump(unit));
+      } else if constexpr (
+        std::is_same_v<T, LinearFunction> || std::is_same_v<T, MidModule>
+      ) {
+        static LinearIRPrinter p;
+        if constexpr (std::is_same_v<T, LinearFunction>) {
+          fmt::print(
+            "*** IR after {} (Mid IR Function: {}) ***\n", name, unit.name
+          );
+        } else {
+          fmt::print("*** IR after {} (Mid IR Module) ***\n", name);
+        }
+        fmt::print("{}\n", p.dump(unit));
+      }
+    }
+  };
 
-  auto run_fpm = [&]() {
+  auto run_full_pipeline = [&]() {
+    auto fpm = pb.buildFunctionPipeline();
+    auto mpm = pb.buildModulePipeline();
+    fpm.setAfterPassCallback(instrumentation);
+    mpm.setAfterPassCallback(instrumentation);
+
+    for (auto &f : module->functions) {
+      if (!f->is_decl)
+        fpm.run(*f, fam);
+    }
+    mpm.run(*module, mam);
     for (auto &f : module->functions) {
       if (!f->is_decl)
         fpm.run(*f, fam);
     }
   };
 
-  run_fpm();
-  mpm.run(*module, mam);
-  run_fpm();
+  if (pass_names.empty()) {
+    run_full_pipeline();
+  } else {
+    for (const auto &name : pass_names) {
+      if (pb.isFunctionPass(name)) {
+        auto pass = pb.createFunctionPass(name);
+        for (auto &f : module->functions) {
+          if (!f->is_decl) {
+            pass.run(*f, fam);
+            instrumentation(name, *f);
+          }
+        }
+      } else if (pb.isModulePass(name)) {
+        auto pass = pb.createModulePass(name);
+        pass.run(*module, mam);
+        instrumentation(name, *module);
+      } else {
+        fmt::print(stderr, "Warning: Unknown pass '{}'\n", name);
+      }
+    }
+  }
 
   // --- Lowering Phase ---
   Flattener flattener(module.get());
@@ -68,9 +146,11 @@ int main(int argc, char **argv) {
     fmt::print(stderr, "Verifier: IR is invalid in modlue!\n");
   }
 
-  IRPrinter printer;
-  fmt::print("{}\n", printer.dump(*module));
+  fmt::print("\n--- Final High IR ---\n");
+  IRPrinter hprinter;
+  fmt::print("{}\n", hprinter.dump(*module));
 
+  fmt::print("\n--- Final Mid IR ---\n");
   LinearIRPrinter mprinter;
   fmt::print("{}\n", mprinter.dump(*mid_module));
 

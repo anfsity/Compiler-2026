@@ -2,6 +2,7 @@
 
 #include "AnalysisManager.hpp"
 #include "helper/log.hpp"
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -58,6 +59,7 @@ public:
 template <typename IRUnitT>
 class PassManager {
   std::vector<Pass<IRUnitT>> pipeline;
+  std::function<void(const std::string &, IRUnitT &)> after_pass_cb;
 
 public:
   template <typename PassT>
@@ -65,13 +67,22 @@ public:
     pipeline.emplace_back(std::move(p), std::move(name), std::move(desc));
   }
 
+  void
+  setAfterPassCallback(std::function<void(const std::string &, IRUnitT &)> cb) {
+    after_pass_cb = std::move(cb);
+  }
+
   PreservedAnalysis run(IRUnitT &ir, AnalysisManager<IRUnitT> &am) {
     PreservedAnalysis combined_pa = PreservedAnalysis::all();
     for (auto &pass : pipeline) {
-
       Log::log_info("pass name: {}", pass.name());
 
       PreservedAnalysis pa = pass.run(ir, am);
+
+      if (after_pass_cb) {
+        after_pass_cb(pass.name(), ir);
+      }
+
       am.invalidate(ir, pa);
 
       if (!pa.all_preserved()) {
