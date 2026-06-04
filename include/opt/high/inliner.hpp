@@ -124,6 +124,7 @@ private:
   bool shouldInline(Op &call_op, Function &callee, Function &, int depth) {
     if (callee.is_decl)
       return false;
+    // TODO: 对广义编译期函数进行 inline 优化。
     if (call_graph.isRecursive(&callee))
       return false;
 
