@@ -33,6 +33,8 @@ public:
     Args &&...args
   ) {
 
+    fmt::print(fg(get_color(lvl)), "[{}] ", get_level_name(lvl));
+
     fmt::print(
       fg(fmt::terminal_color::bright_black),
       "{}:{} ",
@@ -40,7 +42,6 @@ public:
       loc.line()
     );
 
-    fmt::print(fg(get_color(lvl)), "[{}] ", get_level_name(lvl));
     fmt::print(fmt_str, std::forward<Args>(args)...);
     fmt::print("\n");
   }
