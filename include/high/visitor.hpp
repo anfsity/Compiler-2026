@@ -10,7 +10,7 @@ struct OpTag {};
 template <typename Derived>
 struct RecursiveOpVisitor {
 
-  void visit(Module &m) {
+  auto visit(Module &m) -> void {
     for (auto &g : m.globals) {
       static_cast<Derived *>(this)->visit(*g);
     }
@@ -21,17 +21,19 @@ struct RecursiveOpVisitor {
     }
   }
 
-  void visit(GlobalVar &) {}
+  auto visit(GlobalVar &) -> void {}
 
-  void visit(Function &f) { static_cast<Derived *>(this)->visit(f.body); }
+  auto visit(Function &f) -> void {
+    static_cast<Derived *>(this)->visit(f.body);
+  }
 
-  void visit(Region &r) {
+  auto visit(Region &r) -> void {
     for (auto *op : r) {
       static_cast<Derived *>(this)->visit(op);
     }
   }
 
-  void visit(Op *op) {
+  auto visit(Op *op) -> void {
     switch (op->code) {
       // clang-format off
       case OpCode::Add:       static_cast<Derived *>(this)->visit(op, OpTag<OpCode::Add>{}); break;
@@ -76,9 +78,9 @@ struct RecursiveOpVisitor {
   }
 
   template <OpCode Code>
-  void visit(Op * /* op */, OpTag<Code>) {}
+  auto visit(Op * /* op */, OpTag<Code>) -> void {}
 
-  void visit(Op *op, OpTag<OpCode::If>) {
+  auto visit(Op *op, OpTag<OpCode::If>) -> void {
     auto &p = std::get<IfPayload>(op->payload);
     static_cast<Derived *>(this)->visit(*p.then_region);
     if (p.else_region) {
@@ -86,7 +88,7 @@ struct RecursiveOpVisitor {
     }
   }
 
-  void visit(Op *op, OpTag<OpCode::While>) {
+  auto visit(Op *op, OpTag<OpCode::While>) -> void {
     auto &p = std::get<WhilePayload>(op->payload);
     static_cast<Derived *>(this)->visit(*p.cond_region);
     static_cast<Derived *>(this)->visit(*p.loop_region);

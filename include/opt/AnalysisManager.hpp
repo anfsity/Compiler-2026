@@ -22,15 +22,15 @@ struct PreservedAnalysis {
   static auto none() -> PreservedAnalysis { return {}; }
 
   template <typename AnalysisT>
-  void preserve() {
+  auto preserve() -> void {
     presvd_ids.insert(typeid(AnalysisT));
   }
 
-  bool is_presvd(std::type_index id) const {
+  auto is_presvd(std::type_index id) const -> bool {
     return all_presvd || presvd_ids.count(id);
   }
 
-  bool all_preserved() const { return all_presvd; }
+  auto all_preserved() const -> bool { return all_presvd; }
 };
 
 struct AnalysisResult {
@@ -38,7 +38,7 @@ struct AnalysisResult {
   AnalysisResult(PassT, typename PassT::Result &&res)
       : self(std::make_unique<Model<PassT>>(std::move(res))) {}
 
-  bool invalidate(void *ir, const PreservedAnalysis &pa) {
+  auto invalidate(void *ir, const PreservedAnalysis &pa) -> bool {
     return self->invalidate(ir, pa);
   }
 
@@ -58,7 +58,7 @@ private:
     typename PassT::Result result;
     Model(typename PassT::Result &&res) : result(std::move(res)) {}
 
-    bool invalidate(void *, const PreservedAnalysis &pa) override {
+    auto invalidate(void *, const PreservedAnalysis &pa) -> bool override {
       return !pa.is_presvd(typeid(PassT));
     }
   };
@@ -69,7 +69,7 @@ private:
 template <typename IRUnitT>
 struct AnalysisManager {
   template <typename PassT>
-  void registerPass() {
+  auto registerPass() -> void {
     generators[typeid(PassT)] = [](IRUnitT &ir, AnalysisManager &am) {
       return AnalysisResult(PassT{}, PassT{}.run(ir, am));
     };
@@ -85,7 +85,7 @@ struct AnalysisManager {
     return it->second.template get<PassT>();
   }
 
-  void invalidate(IRUnitT &ir, const PreservedAnalysis &pa) {
+  auto invalidate(IRUnitT &ir, const PreservedAnalysis &pa) -> void {
     if (pa.all_preserved())
       return;
     auto it = cache.begin();
@@ -98,7 +98,7 @@ struct AnalysisManager {
     }
   }
 
-  void clear() { cache.clear(); }
+  auto clear() -> void { cache.clear(); }
 
 private:
   using Generator = std::function<AnalysisResult(IRUnitT &, AnalysisManager &)>;

@@ -21,7 +21,7 @@ struct CostModel : RecursiveOpVisitor<CostModel> {
 
   using RecursiveOpVisitor<CostModel>::visit;
 
-  bool will_be_const(Value *v) const {
+  auto will_be_const(Value *v) const -> bool {
     if (!v)
       return true;
     if (v->kind == ValueKind::Constant)
@@ -38,7 +38,7 @@ struct CostModel : RecursiveOpVisitor<CostModel> {
     return false;
   }
 
-  void check_fold(Op *op, int base_cost) {
+  auto check_fold(Op *op, int base_cost) -> void {
     bool all_const = true;
     for (auto *operand : op->operands) {
       if (!will_be_const(operand)) {
@@ -52,40 +52,40 @@ struct CostModel : RecursiveOpVisitor<CostModel> {
       cost += base_cost;
   }
 
-  void visit(Op *op, OpTag<OpCode::Add>) { check_fold(op, 5); }
-  void visit(Op *op, OpTag<OpCode::Sub>) { check_fold(op, 5); }
-  void visit(Op *op, OpTag<OpCode::Mul>) { check_fold(op, 15); }
-  void visit(Op *op, OpTag<OpCode::Div>) { check_fold(op, 15); }
-  void visit(Op *op, OpTag<OpCode::Mod>) { check_fold(op, 15); }
-  void visit(Op *op, OpTag<OpCode::FAdd>) { check_fold(op, 5); }
-  void visit(Op *op, OpTag<OpCode::FSub>) { check_fold(op, 5); }
-  void visit(Op *op, OpTag<OpCode::FMul>) { check_fold(op, 15); }
-  void visit(Op *op, OpTag<OpCode::FDiv>) { check_fold(op, 15); }
+  auto visit(Op *op, OpTag<OpCode::Add>) -> void { check_fold(op, 5); }
+  auto visit(Op *op, OpTag<OpCode::Sub>) -> void { check_fold(op, 5); }
+  auto visit(Op *op, OpTag<OpCode::Mul>) -> void { check_fold(op, 15); }
+  auto visit(Op *op, OpTag<OpCode::Div>) -> void { check_fold(op, 15); }
+  auto visit(Op *op, OpTag<OpCode::Mod>) -> void { check_fold(op, 15); }
+  auto visit(Op *op, OpTag<OpCode::FAdd>) -> void { check_fold(op, 5); }
+  auto visit(Op *op, OpTag<OpCode::FSub>) -> void { check_fold(op, 5); }
+  auto visit(Op *op, OpTag<OpCode::FMul>) -> void { check_fold(op, 15); }
+  auto visit(Op *op, OpTag<OpCode::FDiv>) -> void { check_fold(op, 15); }
 
-  void visit(Op *, OpTag<OpCode::Alloca>) { cost += 5; }
-  void visit(Op *, OpTag<OpCode::Load>) { cost += 5; }
-  void visit(Op *, OpTag<OpCode::Store>) { cost += 5; }
-  void visit(Op *, OpTag<OpCode::GetPtr>) { cost += 5; }
+  auto visit(Op *, OpTag<OpCode::Alloca>) -> void { cost += 5; }
+  auto visit(Op *, OpTag<OpCode::Load>) -> void { cost += 5; }
+  auto visit(Op *, OpTag<OpCode::Store>) -> void { cost += 5; }
+  auto visit(Op *, OpTag<OpCode::GetPtr>) -> void { cost += 5; }
 
-  void visit(Op *, OpTag<OpCode::Call>) { cost += 25; }
-  void visit(Op *, OpTag<OpCode::Ret>) { cost += 5; }
+  auto visit(Op *, OpTag<OpCode::Call>) -> void { cost += 25; }
+  auto visit(Op *, OpTag<OpCode::Ret>) -> void { cost += 5; }
 
-  void visit(Op *op, OpTag<OpCode::If>) {
+  auto visit(Op *op, OpTag<OpCode::If>) -> void {
     cost += 10;
     RecursiveOpVisitor<CostModel>::visit(op, OpTag<OpCode::If>{});
   }
 
-  void visit(Op *op, OpTag<OpCode::While>) {
+  auto visit(Op *op, OpTag<OpCode::While>) -> void {
     cost += 10;
     RecursiveOpVisitor<CostModel>::visit(op, OpTag<OpCode::While>{});
   }
 
-  void visit(Op *, OpTag<OpCode::ZExt>) { cost += 5; }
-  void visit(Op *, OpTag<OpCode::I2F>) { cost += 5; }
-  void visit(Op *, OpTag<OpCode::F2I>) { cost += 5; }
+  auto visit(Op *, OpTag<OpCode::ZExt>) -> void { cost += 5; }
+  auto visit(Op *, OpTag<OpCode::I2F>) -> void { cost += 5; }
+  auto visit(Op *, OpTag<OpCode::F2I>) -> void { cost += 5; }
 
-  static int
-  calculate(Function &f, const std::vector<Value *> *args = nullptr) {
+  static auto calculate(Function &f, const std::vector<Value *> *args = nullptr)
+    -> int {
     CostModel cm(&f, args);
     cm.visit(f);
 

@@ -22,7 +22,7 @@ class PassBuilder {
 public:
   PassBuilder(high_ir::Module *_m) : m(_m) { registerPasses(); }
 
-  void registerPasses() {
+  auto registerPasses() -> void {
 #define FUNCTION_PASS(NAME, ID, DESC) /* NOLINT */                             \
   function_passes[ID] = [this]() {                                             \
     return Pass<high_ir::Function>(NAME(m), ID, DESC);                         \
@@ -34,11 +34,11 @@ public:
 #include "Passes.def"
   }
 
-  bool isFunctionPass(const std::string &name) const {
+  auto isFunctionPass(const std::string &name) const -> bool {
     return function_passes.count(name);
   }
 
-  bool isModulePass(const std::string &name) const {
+  auto isModulePass(const std::string &name) const -> bool {
     return module_passes.count(name);
   }
 

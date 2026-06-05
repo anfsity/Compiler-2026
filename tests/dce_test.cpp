@@ -17,7 +17,7 @@ using namespace exodus::high_ir;
 using namespace exodus::opt;
 
 #ifdef EXODUS_UNIT_TEST
-int main() {
+auto main() -> int {
   IRContext ctx;
   Function f;
   f.name = "test";

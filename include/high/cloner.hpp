@@ -12,13 +12,13 @@ struct IRCloner {
 
   IRCloner(IRContext *_ctx) : ctx(_ctx) {}
 
-  Value *mapValue(Value *v) {
+  auto mapValue(Value *v) -> Value * {
     if (value_map.count(v))
       return value_map[v];
     return v;
   }
 
-  Op *cloneOp(Op *op) {
+  auto cloneOp(Op *op) -> Op * {
     Op *new_op = ctx->make_op(op->code);
     for (auto *operand : op->operands) {
       Value *mapped = mapValue(operand);
@@ -55,7 +55,7 @@ struct IRCloner {
     return new_op;
   }
 
-  Region cloneRegion(const Region &r) {
+  auto cloneRegion(const Region &r) -> Region {
     Region new_r;
     for (auto *op : r) {
       new_r.push_back(cloneOp(op));

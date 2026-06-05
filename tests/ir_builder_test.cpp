@@ -261,7 +261,7 @@ auto test_complex_initializers() -> std::string {
 } // namespace
 
 #ifdef EXODUS_UNIT_TEST
-int main() {
+auto main() -> int {
   {
     const std::string actual = test_array_and_folding();
     const std::string expected =

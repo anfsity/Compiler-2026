@@ -26,12 +26,12 @@ class logger {
 public:
   template <typename... Args>
     requires(sizeof...(Args) >= 0)
-  static void output(
+  static auto output(
     level lvl,
     const std::source_location &loc,
     fmt::format_string<Args...> fmt_str,
     Args &&...args
-  ) {
+  ) -> void {
 
     fmt::print(fg(get_color(lvl)), "[{}] ", get_level_name(lvl));
 
@@ -47,7 +47,7 @@ public:
   }
 
 private:
-  static std::string_view get_level_name(level lvl) {
+  static auto get_level_name(level lvl) -> std::string_view {
     switch (lvl) {
     case level::Info:
       return "INFO";
@@ -61,7 +61,7 @@ private:
     return "UNKNOWN";
   }
 
-  static fmt::terminal_color get_color(level lvl) {
+  static auto get_color(level lvl) -> fmt::terminal_color {
     switch (lvl) {
     case level::Info:
       return fmt::terminal_color::cyan;
@@ -88,12 +88,12 @@ public:
       fmt::format(fg(fmt::terminal_color::bright_black), "--- stack end ---\n");
   }
 
-  const char *what() const noexcept override { return msg_.c_str(); }
+  auto what() const noexcept -> const char * override { return msg_.c_str(); }
 
-  const std::string_view stacktrace() const { return trace_; }
+  auto stacktrace() const -> std::string_view { return trace_; }
 
 private:
-  void capture_stack() {
+  auto capture_stack() -> void {
     auto trace = std::stacktrace::current();
     int cnt = 0;
     for (size_t i = 0; i < size(trace); ++i) {
@@ -115,9 +115,9 @@ private:
 };
 
 template <typename Func>
-void with_exception_handling(
+auto with_exception_handling(
   Func &&func, const std::source_location &loc = std::source_location::current()
-) {
+) -> void {
   try {
     std::forward<Func>(func)();
   } catch (const exception &e) {
@@ -167,19 +167,19 @@ void with_exception_handling(
 namespace exodus::Log {
 
 template <typename Format, typename... Args>
-inline void log_info(Format, Args &&...) noexcept {}
+inline auto log_info(Format, Args &&...) noexcept -> void {}
 
 template <typename Format, typename... Args>
-inline void log_warn(Format, Args &&...) noexcept {}
+inline auto log_warn(Format, Args &&...) noexcept -> void {}
 
 template <typename Format, typename... Args>
-inline void log_error(Format, Args &&...) noexcept {}
+inline auto log_error(Format, Args &&...) noexcept -> void {}
 
 template <typename Format, typename... Args>
-inline void log_fatal(Format, Args &&...) noexcept {}
+inline auto log_fatal(Format, Args &&...) noexcept -> void {}
 
 template <typename Func>
-inline void with_exception_handling(Func &&func) { // NOLINT
+inline auto with_exception_handling(Func &&func) -> void { // NOLINT
   func();
 }
 

@@ -188,7 +188,7 @@ auto make_module() -> Module {
 } // namespace
 
 #ifdef EXODUS_UNIT_TEST
-int main() {
+auto main() -> int {
   auto module = make_module();
   IRPrinter printer;
   const auto actual = printer.dump(module);

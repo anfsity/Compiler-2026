@@ -645,7 +645,7 @@ auto test_invalid_call() -> bool {
 } // namespace
 
 #ifdef EXODUS_UNIT_TEST
-int main() {
+auto main() -> int {
   auto run = [](const char *name, bool ok) -> int {
     if (!ok) {
       std::cerr << "Verifier test failed: " << name << "\n";

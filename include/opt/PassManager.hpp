@@ -13,10 +13,10 @@ template <typename IRUnitT>
 class Pass {
   struct Concept { // NOLINT
     virtual ~Concept() = default;
-    virtual PreservedAnalysis
-    run(IRUnitT &ir, AnalysisManager<IRUnitT> &am) = 0;
-    virtual std::string name() const = 0;
-    virtual std::string desc() const = 0;
+    virtual auto run(IRUnitT &ir, AnalysisManager<IRUnitT> &am)
+      -> PreservedAnalysis = 0;
+    virtual auto name() const -> std::string = 0;
+    virtual auto desc() const -> std::string = 0;
   };
 
   template <typename PassT>
@@ -28,12 +28,13 @@ class Pass {
     Model(PassT p, std::string n, std::string d)
         : pass(std::move(p)), _name(std::move(n)), _desc(std::move(d)) {}
 
-    PreservedAnalysis run(IRUnitT &ir, AnalysisManager<IRUnitT> &am) override {
+    auto run(IRUnitT &ir, AnalysisManager<IRUnitT> &am)
+      -> PreservedAnalysis override {
       return pass.run(ir, am);
     }
 
-    std::string name() const override { return _name; }
-    std::string desc() const override { return _desc; }
+    auto name() const -> std::string override { return _name; }
+    auto desc() const -> std::string override { return _desc; }
   };
 
   // type erase
@@ -48,12 +49,12 @@ public:
           )
         ) {}
 
-  PreservedAnalysis run(IRUnitT &ir, AnalysisManager<IRUnitT> &am) {
+  auto run(IRUnitT &ir, AnalysisManager<IRUnitT> &am) -> PreservedAnalysis {
     return self->run(ir, am);
   }
 
-  std::string name() const { return self->name(); }
-  std::string desc() const { return self->desc(); }
+  auto name() const -> std::string { return self->name(); }
+  auto desc() const -> std::string { return self->desc(); }
 };
 
 template <typename IRUnitT>
@@ -63,16 +64,17 @@ class PassManager {
 
 public:
   template <typename PassT>
-  void addPass(PassT p, std::string name, std::string desc) {
+  auto addPass(PassT p, std::string name, std::string desc) -> void {
     pipeline.emplace_back(std::move(p), std::move(name), std::move(desc));
   }
 
-  void
-  setAfterPassCallback(std::function<void(const std::string &, IRUnitT &)> cb) {
+  auto
+  setAfterPassCallback(std::function<void(const std::string &, IRUnitT &)> cb)
+    -> void {
     after_pass_cb = std::move(cb);
   }
 
-  PreservedAnalysis run(IRUnitT &ir, AnalysisManager<IRUnitT> &am) {
+  auto run(IRUnitT &ir, AnalysisManager<IRUnitT> &am) -> PreservedAnalysis {
     PreservedAnalysis combined_pa = PreservedAnalysis::all();
     for (auto &pass : pipeline) {
       Log::log_info("pass name: {}", pass.name());

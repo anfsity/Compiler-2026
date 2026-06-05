@@ -36,8 +36,8 @@ struct Value {
   Value &operator=(Value &&) = delete;
 
   virtual auto dump() const -> std::string = 0;
-  void addUse(Op *user) { users.push_back(user); }
-  void rmUse(Op *user) { users.remove(user); }
+  auto addUse(Op *user) -> void { users.push_back(user); }
+  auto rmUse(Op *user) -> void { users.remove(user); }
 };
 
 struct Constant : Value {

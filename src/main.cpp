@@ -25,7 +25,7 @@ using namespace exodus::opt;
 extern FILE *yyin;
 extern int yyparse(CompUnitAST &ast);
 
-int main(int argc, char **argv) {
+auto main(int argc, char **argv) -> int {
   std::string input_file;
   std::vector<std::string> pass_names;
   bool print_ir_after_all = false;
