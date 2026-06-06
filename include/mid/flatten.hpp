@@ -29,6 +29,7 @@ private:
   auto visit(high_ir::Function *f) -> std::unique_ptr<LinearFunction>;
   auto visit(const high_ir::Region &region) -> void;
   auto create_block(const std::string &name) -> Block *;
+  auto build_cfg() -> void;
 };
 
 inline auto Flattener::create_block(const std::string &name) -> Block * {
@@ -67,11 +68,31 @@ inline auto Flattener::visit(high_ir::Function *f)
   if (!f->is_decl) {
     cur_block = create_block("entry");
     visit(f->body);
+    build_cfg();
   }
 
   cur_func = nullptr;
   cur_block = nullptr;
   return lf;
+}
+
+inline auto Flattener::build_cfg() -> void {
+  for (auto &b_ptr : cur_func->blocks) {
+    Block *u = b_ptr.get();
+    if (u->insts.empty())
+      continue;
+
+    high_ir::Op *last = u->insts.back();
+    if (
+      last->code == high_ir::OpCode::Jump ||
+      last->code == high_ir::OpCode::Branch
+    ) {
+      for (Block *v : last->successors) {
+        u->succs.push_back(v);
+        v->preds.push_back(u);
+      }
+    }
+  }
 }
 
 inline auto Flattener::visit(const high_ir::Region &region) -> void {
@@ -98,6 +119,9 @@ inline auto Flattener::visit(const high_ir::Region &region) -> void {
       // Visit Then
       cur_block = then_b;
       visit(*payload.then_region);
+      // 为了防止产生不必要的死代码，比如 ret 之后再 jump，ret
+      // 之后指令都是无效的。 还发现了一个冗余，目前还没有对多次 ret
+      // 进行优化的说。
       if (
         cur_block->insts.empty() ||
         (cur_block->insts.back()->code != high_ir::OpCode::Ret &&
@@ -189,6 +213,12 @@ inline auto Flattener::visit(const high_ir::Region &region) -> void {
       break;
     }
     default:
+      if (
+        !cur_block->insts.empty() &&
+        cur_block->insts.back()->code == high_ir::OpCode::Ret
+      )
+        break;
+
       cur_block->insts.push_back(op);
       break;
     }
