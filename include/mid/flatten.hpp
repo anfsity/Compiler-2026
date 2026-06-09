@@ -37,17 +37,70 @@ private:
 
   auto visit(high_ir::Function *f) -> std::unique_ptr<LinearFunction>;
   auto visit(const high_ir::Region &region) -> void;
+  auto visit(high_ir::Op *op) -> void;
   auto create_block(const std::string &name) -> Block *;
   auto build_cfg() -> void;
+  static auto convert_opcode(high_ir::OpCode old_code) -> OpCode;
 
   auto convert_op(high_ir::Op *old_op) -> Op * {
-    auto *new_op = new_module->make_op(static_cast<OpCode>(old_op->code));
+    auto *new_op = new_module->make_op(convert_opcode(old_op->code));
     new_op->operands = old_op->operands;
     new_op->result = old_op->result;
     new_op->successors = old_op->successors;
+    if (old_op->code == high_ir::OpCode::Call) {
+      const auto &payload = std::get<high_ir::CallPayload>(old_op->payload);
+      new_op->payload = CallPayload{payload.func_name};
+    }
     return new_op;
   }
 };
+
+inline auto Flattener::convert_opcode(high_ir::OpCode old_code) -> OpCode {
+  switch (old_code) {
+    // clang-format off
+  case high_ir::OpCode::Add: return OpCode::Add;
+  case high_ir::OpCode::Sub: return OpCode::Sub;
+  case high_ir::OpCode::Mul: return OpCode::Mul;
+  case high_ir::OpCode::Div: return OpCode::Div;
+  case high_ir::OpCode::Mod: return OpCode::Mod;
+  case high_ir::OpCode::FAdd: return OpCode::FAdd;
+  case high_ir::OpCode::FSub: return OpCode::FSub;
+  case high_ir::OpCode::FMul: return OpCode::FMul;
+  case high_ir::OpCode::FDiv: return OpCode::FDiv;
+  case high_ir::OpCode::I2F: return OpCode::I2F;
+  case high_ir::OpCode::F2I: return OpCode::F2I;
+  case high_ir::OpCode::ZExt: return OpCode::ZExt;
+  case high_ir::OpCode::Eq: return OpCode::Eq;
+  case high_ir::OpCode::Ne: return OpCode::Ne;
+  case high_ir::OpCode::Lt: return OpCode::Lt;
+  case high_ir::OpCode::Gt: return OpCode::Gt;
+  case high_ir::OpCode::Le: return OpCode::Le;
+  case high_ir::OpCode::Ge: return OpCode::Ge;
+  case high_ir::OpCode::And: return OpCode::And;
+  case high_ir::OpCode::Or: return OpCode::Or;
+  case high_ir::OpCode::Xor: return OpCode::Xor;
+  case high_ir::OpCode::Shl: return OpCode::Shl;
+  case high_ir::OpCode::Shr: return OpCode::Shr;
+  case high_ir::OpCode::Alloca: return OpCode::Alloca;
+  case high_ir::OpCode::Load: return OpCode::Load;
+  case high_ir::OpCode::Store: return OpCode::Store;
+  case high_ir::OpCode::GetPtr: return OpCode::GetPtr;
+  case high_ir::OpCode::Call: return OpCode::Call;
+  case high_ir::OpCode::Ret: return OpCode::Ret;
+  case high_ir::OpCode::Jump: return OpCode::Jump;
+  case high_ir::OpCode::Branch: return OpCode::Branch;
+  case high_ir::OpCode::Memset: return OpCode::Memset;
+  case high_ir::OpCode::Condition:
+  case high_ir::OpCode::If:
+  case high_ir::OpCode::While:
+  case high_ir::OpCode::Break:
+  case high_ir::OpCode::Continue:
+  break;
+    // clang-format on
+  }
+  assert(false && "unsupported high IR opcode in mid IR flattener");
+  return OpCode::Ret;
+}
 
 inline auto Flattener::create_block(const std::string &name) -> Block * {
   auto b = std::make_unique<Block>(name + "_" + std::to_string(b_cnt++));
@@ -116,24 +169,42 @@ inline auto Flattener::visit(const high_ir::Region &region) -> void {
     // 的核心工具，我希望在构建过程中能够满足一个核心假设 「high ir
     // 没有多余分支，没有不可达指令，最小化嵌套」 这样，在 flatten
     // 过程中，就不需要考虑各种特例，为了构建 CFG 而弄得乱七八糟
-    switch (op->code) {
-    case high_ir::OpCode::If: {
-      auto &payload = std::get<high_ir::IfPayload>(op->payload);
-      auto *then_b = create_block("then");
-      auto *else_b = payload.else_region ? create_block("else") : nullptr;
-      auto *merge_b = create_block("merge");
+    visit(op);
+  }
+}
 
-      auto *br = new_module->make_op(OpCode::Branch);
-      br->operands.push_back(op->operands[0]);
-      br->successors.push_back(then_b);
-      br->successors.push_back(else_b ? else_b : merge_b);
-      cur_block->insts.push_back(br);
+inline auto Flattener::visit(high_ir::Op *op) -> void {
+  switch (op->code) {
+  case high_ir::OpCode::If: {
+    auto &payload = std::get<high_ir::IfPayload>(op->payload);
+    auto *then_b = create_block("then");
+    auto *else_b = payload.else_region ? create_block("else") : nullptr;
+    auto *merge_b = create_block("merge");
 
-      cur_block = then_b;
-      visit(*payload.then_region);
-      // 为了防止产生不必要的死代码，比如 ret 之后再 jump，ret
-      // 之后指令都是无效的。 还发现了一个冗余，目前还没有对多次 ret
-      // 进行优化的说。
+    auto *br = new_module->make_op(OpCode::Branch);
+    br->operands.push_back(op->operands[0]);
+    br->successors.push_back(then_b);
+    br->successors.push_back(else_b ? else_b : merge_b);
+    cur_block->insts.push_back(br);
+
+    cur_block = then_b;
+    visit(*payload.then_region);
+    // 为了防止产生不必要的死代码，比如 ret 之后再 jump，ret
+    // 之后指令都是无效的。
+    if (
+      cur_block->insts.empty() ||
+      (cur_block->insts.back()->code != OpCode::Ret &&
+       cur_block->insts.back()->code != OpCode::Jump &&
+       cur_block->insts.back()->code != OpCode::Branch)
+    ) {
+      auto *jmp = new_module->make_op(OpCode::Jump);
+      jmp->successors.push_back(merge_b);
+      cur_block->insts.push_back(jmp);
+    }
+
+    if (else_b) {
+      cur_block = else_b;
+      visit(*payload.else_region);
       if (
         cur_block->insts.empty() ||
         (cur_block->insts.back()->code != OpCode::Ret &&
@@ -144,91 +215,75 @@ inline auto Flattener::visit(const high_ir::Region &region) -> void {
         jmp->successors.push_back(merge_b);
         cur_block->insts.push_back(jmp);
       }
+    }
 
-      if (else_b) {
-        cur_block = else_b;
-        visit(*payload.else_region);
-        if (
-          cur_block->insts.empty() ||
-          (cur_block->insts.back()->code != OpCode::Ret &&
-           cur_block->insts.back()->code != OpCode::Jump &&
-           cur_block->insts.back()->code != OpCode::Branch)
-        ) {
-          auto *jmp = new_module->make_op(OpCode::Jump);
-          jmp->successors.push_back(merge_b);
-          cur_block->insts.push_back(jmp);
-        }
+    cur_block = merge_b;
+    break;
+  }
+  case high_ir::OpCode::While: {
+    auto &payload = std::get<high_ir::WhilePayload>(op->payload);
+    auto *cond_b = create_block("while_cond");
+    auto *body_b = create_block("while_body");
+    auto *exit_b = create_block("while_exit");
+
+    auto *jmp_to_cond = new_module->make_op(OpCode::Jump);
+    jmp_to_cond->successors.push_back(cond_b);
+    cur_block->insts.push_back(jmp_to_cond);
+
+    cur_block = cond_b;
+    for (auto *cond_op : *payload.cond_region) {
+      if (cond_op->code == high_ir::OpCode::Condition) {
+        auto *br = new_module->make_op(OpCode::Branch);
+        br->operands.push_back(cond_op->operands[0]);
+        br->successors.push_back(body_b);
+        br->successors.push_back(exit_b);
+        cur_block->insts.push_back(br);
+      } else {
+        visit(cond_op);
       }
-
-      cur_block = merge_b;
-      break;
     }
-    case high_ir::OpCode::While: {
-      auto &payload = std::get<high_ir::WhilePayload>(op->payload);
-      auto *cond_b = create_block("while_cond");
-      auto *body_b = create_block("while_body");
-      auto *exit_b = create_block("while_exit");
 
-      auto *jmp_to_cond = new_module->make_op(OpCode::Jump);
-      jmp_to_cond->successors.push_back(cond_b);
-      cur_block->insts.push_back(jmp_to_cond);
+    cur_block = body_b;
+    loop_stk.push_back({cond_b, exit_b});
+    visit(*payload.loop_region);
+    loop_stk.pop_back();
 
-      cur_block = cond_b;
-      for (auto *cond_op : *payload.cond_region) {
-        if (cond_op->code == high_ir::OpCode::Condition) {
-          auto *br = new_module->make_op(OpCode::Branch);
-          br->operands.push_back(cond_op->operands[0]);
-          br->successors.push_back(body_b);
-          br->successors.push_back(exit_b);
-          cur_block->insts.push_back(br);
-        } else {
-          cur_block->insts.push_back(convert_op(cond_op));
-        }
-      }
-
-      cur_block = body_b;
-      loop_stk.push_back({cond_b, exit_b});
-      visit(*payload.loop_region);
-      loop_stk.pop_back();
-
-      if (
-        cur_block->insts.empty() ||
-        (cur_block->insts.back()->code != OpCode::Ret &&
-         cur_block->insts.back()->code != OpCode::Jump &&
-         cur_block->insts.back()->code != OpCode::Branch)
-      ) {
-        auto *jmp_back = new_module->make_op(OpCode::Jump);
-        jmp_back->successors.push_back(cond_b);
-        cur_block->insts.push_back(jmp_back);
-      }
-
-      cur_block = exit_b;
-      break;
+    if (
+      cur_block->insts.empty() ||
+      (cur_block->insts.back()->code != OpCode::Ret &&
+       cur_block->insts.back()->code != OpCode::Jump &&
+       cur_block->insts.back()->code != OpCode::Branch)
+    ) {
+      auto *jmp_back = new_module->make_op(OpCode::Jump);
+      jmp_back->successors.push_back(cond_b);
+      cur_block->insts.push_back(jmp_back);
     }
-    case high_ir::OpCode::Break: {
-      assert(loop_stk.size());
-      auto *jmp = new_module->make_op(OpCode::Jump);
-      jmp->successors.push_back(loop_stk.back().second);
-      cur_block->insts.push_back(jmp);
-      break;
-    }
-    case high_ir::OpCode::Continue: {
-      assert(loop_stk.size());
-      auto *jmp = new_module->make_op(OpCode::Jump);
-      jmp->successors.push_back(loop_stk.back().first);
-      cur_block->insts.push_back(jmp);
-      break;
-    }
-    default:
-      if (
-        !cur_block->insts.empty() &&
-        cur_block->insts.back()->code == OpCode::Ret
-      )
-        break;
 
-      cur_block->insts.push_back(convert_op(op));
+    cur_block = exit_b;
+    break;
+  }
+  case high_ir::OpCode::Break: {
+    assert(loop_stk.size());
+    auto *jmp = new_module->make_op(OpCode::Jump);
+    jmp->successors.push_back(loop_stk.back().second);
+    cur_block->insts.push_back(jmp);
+    break;
+  }
+  case high_ir::OpCode::Continue: {
+    assert(loop_stk.size());
+    auto *jmp = new_module->make_op(OpCode::Jump);
+    jmp->successors.push_back(loop_stk.back().first);
+    cur_block->insts.push_back(jmp);
+    break;
+  }
+  default:
+    if (
+      !cur_block->insts.empty() && cur_block->insts.back()->code == OpCode::Ret
+    )
       break;
-    }
+
+    cur_block->insts.push_back(convert_op(op));
+    break;
   }
 }
 

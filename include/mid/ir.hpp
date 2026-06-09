@@ -10,6 +10,12 @@ using namespace exodus::ir;
 
 struct Block;
 
+struct EmptyPayload {};
+
+struct CallPayload {
+  std::string func_name;
+};
+
 enum class OpCode : uint8_t {
   // clang-format off
     Add, Sub, Mul, Div, Mod, FAdd, FSub, FMul, FDiv, // arithmetic
@@ -31,7 +37,11 @@ struct Op : OpBase {
   std::vector<Block *> successors;
   OpResult *result = nullptr;
 
-  Op(OpCode c) : code(c) {}
+  using Payload = std::variant<EmptyPayload, CallPayload>;
+
+  Payload payload;
+
+  Op(OpCode c, Payload p = EmptyPayload{}) : code(c), payload(std::move(p)) {}
 };
 
 struct Block {

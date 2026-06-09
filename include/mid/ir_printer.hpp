@@ -3,6 +3,7 @@
 #include "../helper/ir_printer_base.hpp"
 #include "flatten.hpp"
 #include "ir.hpp"
+#include <cassert>
 #include <string>
 
 namespace exodus::mid_ir {
@@ -56,74 +57,42 @@ struct LinearIRPrinter : public IRPrinterBase {
 
   auto opcode_to_str(OpCode oc) -> std::string {
     switch (oc) {
-    case OpCode::Add:
-      return "add";
-    case OpCode::Sub:
-      return "sub";
-    case OpCode::Mul:
-      return "mul";
-    case OpCode::Div:
-      return "div";
-    case OpCode::Mod:
-      return "mod";
-    case OpCode::FAdd:
-      return "fadd";
-    case OpCode::FSub:
-      return "fsub";
-    case OpCode::FMul:
-      return "fmul";
-    case OpCode::FDiv:
-      return "fdiv";
-    case OpCode::I2F:
-      return "i2f";
-    case OpCode::F2I:
-      return "f2i";
-    case OpCode::ZExt:
-      return "zext";
-    case OpCode::Eq:
-      return "eq";
-    case OpCode::Ne:
-      return "ne";
-    case OpCode::Lt:
-      return "lt";
-    case OpCode::Gt:
-      return "gt";
-    case OpCode::Le:
-      return "le";
-    case OpCode::Ge:
-      return "ge";
-    case OpCode::And:
-      return "and";
-    case OpCode::Or:
-      return "or";
-    case OpCode::Xor:
-      return "xor";
-    case OpCode::Shl:
-      return "shl";
-    case OpCode::Shr:
-      return "shr";
-    case OpCode::Alloca:
-      return "alloca";
-    case OpCode::Load:
-      return "load";
-    case OpCode::Store:
-      return "store";
-    case OpCode::GetPtr:
-      return "getptr";
-    case OpCode::Call:
-      return "call";
-    case OpCode::Ret:
-      return "ret";
-    case OpCode::Jump:
-      return "jump";
-    case OpCode::Branch:
-      return "branch";
-    case OpCode::Phi:
-      return "phi";
-    case OpCode::Memset:
-      return "memset";
-    default:
-      return "unknown";
+      // clang-format off
+    case OpCode::Add: return "add";
+    case OpCode::Sub: return "sub";
+    case OpCode::Mul: return "mul";
+    case OpCode::Div: return "div";
+    case OpCode::Mod: return "mod";
+    case OpCode::FAdd: return "fadd";
+    case OpCode::FSub: return "fsub";
+    case OpCode::FMul: return "fmul";
+    case OpCode::FDiv: return "fdiv";
+    case OpCode::I2F: return "i2f";
+    case OpCode::F2I: return "f2i";
+    case OpCode::ZExt: return "zext";
+    case OpCode::Eq: return "eq";
+    case OpCode::Ne: return "ne";
+    case OpCode::Lt: return "lt";
+    case OpCode::Gt: return "gt";
+    case OpCode::Le: return "le";
+    case OpCode::Ge: return "ge";
+    case OpCode::And: return "and";
+    case OpCode::Or: return "or";
+    case OpCode::Xor: return "xor";
+    case OpCode::Shl: return "shl";
+    case OpCode::Shr: return "shr";
+    case OpCode::Alloca: return "alloca";
+    case OpCode::Load: return "load";
+    case OpCode::Store: return "store";
+    case OpCode::GetPtr: return "getptr";
+    case OpCode::Call: return "call";
+    case OpCode::Ret: return "ret";
+    case OpCode::Jump: return "jump";
+    case OpCode::Branch: return "branch";
+    case OpCode::Phi: return "phi";
+    case OpCode::Memset: return "memset";
+    default: return "unknown";
+      // clang-format on
     }
   }
 
@@ -142,23 +111,33 @@ struct LinearIRPrinter : public IRPrinterBase {
       line += get_value_name(op.result) + " = ";
     }
 
-    line += opcode_to_str(op.code);
-    if (!op.operands.empty()) {
-      line += " " + join_operands(op.operands);
-    }
+    if (op.code == OpCode::Call) {
+      auto &cp = std::get<CallPayload>(op.payload);
+      line += fmt::format(
+        "call @{}({}) : ({})",
+        cp.func_name,
+        join_operands(op.operands),
+        join_operand_types(op.operands)
+      );
+    } else {
+      line += opcode_to_str(op.code);
+      if (!op.operands.empty()) {
+        line += " " + join_operands(op.operands);
+      }
 
-    // Add types for specific ops
-    if (op.code == OpCode::Alloca) {
-      auto ptr_type = std::static_pointer_cast<Ptr>(op.result->type);
-      line += " : " + ptr_type->target->to_string();
-    } else if (op.code == OpCode::Load || op.code == OpCode::Store) {
-      line += " : " + join_operand_types(op.operands);
-    } else if (
-      op.code == OpCode::GetPtr || is_compare_opcode(op.code) ||
-      is_cast_opcode(op.code)
-    ) {
-      if (!op.operands.empty())
-        line += " : " + op.operands[0]->type->to_string();
+      // Add types for specific ops
+      if (op.code == OpCode::Alloca) {
+        auto ptr_type = std::static_pointer_cast<Ptr>(op.result->type);
+        line += " : " + ptr_type->target->to_string();
+      } else if (op.code == OpCode::Load || op.code == OpCode::Store) {
+        line += " : " + join_operand_types(op.operands);
+      } else if (
+        op.code == OpCode::GetPtr || is_compare_opcode(op.code) ||
+        is_cast_opcode(op.code)
+      ) {
+        if (!op.operands.empty())
+          line += " : " + op.operands[0]->type->to_string();
+      }
     }
 
     if (op.result) {
@@ -167,8 +146,10 @@ struct LinearIRPrinter : public IRPrinterBase {
 
     // Add Mid-IR specific control flow info
     if (op.code == OpCode::Jump) {
+      assert(!op.successors.empty());
       line += " ^" + op.successors[0]->name;
     } else if (op.code == OpCode::Branch) {
+      assert(!op.successors.empty());
       line += fmt::format(
         ", ^{}, ^{}", op.successors[0]->name, op.successors[1]->name
       );

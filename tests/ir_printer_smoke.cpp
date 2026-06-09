@@ -1,5 +1,7 @@
 #include "../include/high/ir.hpp"
 #include "../include/high/ir_printer.hpp"
+#include "../include/mid/flatten.hpp"
+#include "../include/mid/ir_printer.hpp"
 #include "../include/type.hpp"
 
 #include <iostream>
@@ -185,6 +187,40 @@ auto make_module() -> Module {
   return module;
 }
 
+auto make_mid_call_module() -> Module {
+  Module module;
+
+  auto putch = std::make_unique<Function>();
+  putch->name = "putch";
+  putch->type = Func::get(Void::get(), {I32::get()});
+  putch->is_decl = true;
+  module.functions.push_back(std::move(putch));
+
+  auto getint = std::make_unique<Function>();
+  getint->name = "getint";
+  getint->type = Func::get(I32::get(), {});
+  getint->is_decl = true;
+  module.functions.push_back(std::move(getint));
+
+  auto main = std::make_unique<Function>();
+  main->name = "main";
+  main->type = Func::get(I32::get(), {});
+
+  auto *ten = module.ctx.make_const(I32::get(), 10);
+  make_op(
+    module, main->body, OpCode::Call, {ten}, nullptr, CallPayload{"putch"}
+  );
+
+  auto *call_res = make_result(module, I32::get());
+  make_op(
+    module, main->body, OpCode::Call, {}, call_res, CallPayload{"getint"}
+  );
+  make_op(module, main->body, OpCode::Ret, {call_res});
+
+  module.functions.push_back(std::move(main));
+  return module;
+}
+
 } // namespace
 
 #ifdef EXODUS_UNIT_TEST
@@ -226,6 +262,27 @@ auto main() -> int {
     std::cerr << "IR printer smoke test failed.\n\nExpected:\n"
               << expected << "\nActual:\n"
               << actual;
+    return 1;
+  }
+
+  auto mid_source = make_mid_call_module();
+  exodus::mid_ir::Flattener flattener(&mid_source);
+  auto mid_module = flattener.flatten();
+  exodus::mid_ir::LinearIRPrinter mid_printer;
+  const auto mid_actual = mid_printer.dump(*mid_module);
+  const std::string mid_expected = "decl @putch() : (i32) -> void\n"
+                                   "decl @getint() : () -> i32\n"
+                                   "func @main() : () -> i32 {\n"
+                                   "  ^entry_0:\n"
+                                   "    call @putch(10) : (i32)\n"
+                                   "    %0 = call @getint() : () -> i32\n"
+                                   "    ret %0\n"
+                                   "}\n";
+
+  if (mid_actual != mid_expected) {
+    std::cerr << "Mid IR printer smoke test failed.\n\nExpected:\n"
+              << mid_expected << "\nActual:\n"
+              << mid_actual;
     return 1;
   }
 
