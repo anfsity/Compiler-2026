@@ -7,9 +7,10 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace exodus::opt {
+namespace exodus::high_ir::opt {
 
 using namespace exodus::high_ir;
+using namespace exodus::opt;
 
 struct CP : RecursiveOpVisitor<CP> {
   std::unordered_map<Value *, Value *> env;
@@ -294,4 +295,4 @@ inline auto CP::try_fold(Op *op) -> void {
   }
 }
 
-} // namespace exodus::opt
+} // namespace exodus::high_ir::opt

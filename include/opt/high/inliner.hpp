@@ -11,9 +11,10 @@
 #include <iterator>
 #include <unordered_map>
 
-namespace exodus::opt {
+namespace exodus::high_ir::opt {
 
 using namespace exodus::high_ir;
+using namespace exodus::opt;
 
 // --- Inliner Pass ---
 class Inliner {
@@ -216,4 +217,4 @@ inline auto Inliner::inlineCall(
   return true;
 }
 
-} // namespace exodus::opt
+} // namespace exodus::high_ir::opt

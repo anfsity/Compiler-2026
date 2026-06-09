@@ -9,9 +9,10 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace exodus::opt {
+namespace exodus::high_ir::opt {
 
 using namespace exodus::high_ir;
+using namespace exodus::opt;
 
 struct SimpleDCE {
   IRRewriter rewriter;
@@ -49,7 +50,7 @@ inline auto SimpleDCE::isIntrinsicallyLive(Op *op) -> bool {
     if (ptr->kind == ValueKind::GlobalVar)
       return true;
     if (ptr->kind == ValueKind::OpResult) {
-      auto *creator = static_cast<OpResult *>(ptr)->creator;
+      auto *creator = static_cast<Op *>(static_cast<OpResult *>(ptr)->creator);
       if (creator && creator->code != OpCode::Alloca)
         return true;
       return false;
@@ -152,13 +153,14 @@ inline auto SimpleDCE::run(Function &f, FunctionAnalysisManager & /* FAM */)
 
     for (auto *v : op->operands) {
       if (v && v->kind == ValueKind::OpResult) {
-        mark(static_cast<OpResult *>(v)->creator);
+        mark(static_cast<Op *>(static_cast<OpResult *>(v)->creator));
       }
     }
 
     if (op->code == OpCode::Load) {
       Value *ptr = op->operands[0];
-      for (auto *user : ptr->users) {
+      for (auto *user_base : ptr->users) {
+        auto *user = static_cast<Op *>(user_base);
         if (user->code == OpCode::Store && user->operands[1] == ptr) {
           mark(user);
         }
@@ -194,4 +196,4 @@ inline auto SimpleDCE::run(Function &f, FunctionAnalysisManager & /* FAM */)
   return PreservedAnalysis::none();
 }
 
-} // namespace exodus::opt
+} // namespace exodus::high_ir::opt

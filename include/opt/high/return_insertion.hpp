@@ -4,9 +4,10 @@
 #include "../../high/visitor.hpp"
 #include "../AnalysisManager.hpp"
 
-namespace exodus::opt {
+namespace exodus::high_ir::opt {
 
 using namespace exodus::high_ir;
+using namespace exodus::opt;
 
 struct ReturnInsertion {
   Module *m;
@@ -51,4 +52,4 @@ struct ReturnInsertion {
   }
 };
 
-} // namespace exodus::opt
+} // namespace exodus::high_ir::opt

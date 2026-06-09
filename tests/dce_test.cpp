@@ -14,6 +14,7 @@
 
 using namespace exodus;
 using namespace exodus::high_ir;
+using namespace exodus::high_ir::opt;
 using namespace exodus::opt;
 
 #ifdef EXODUS_UNIT_TEST

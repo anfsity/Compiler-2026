@@ -47,7 +47,10 @@ target_compile_options(compiler_core PRIVATE
 )
 
 # executable
-add_executable(compiler main.cpp)
+add_executable(compiler
+    main.cpp
+    opt/high/registration.cpp
+)
 target_compile_options(compiler PRIVATE
     -Wall
     -Wno-register
