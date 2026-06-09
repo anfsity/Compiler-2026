@@ -30,9 +30,12 @@ inline auto IRRewriter::replaceAllUsesWith(Value *old_val, Value *new_val)
   if (!old_val || !new_val || old_val == new_val)
     return;
 
-  std::vector<Op *> users_copy(old_val->users.begin(), old_val->users.end());
+  std::vector<OpBase *> users_copy(
+    old_val->users.begin(), old_val->users.end()
+  );
 
-  for (auto *user : users_copy) {
+  for (auto *user_base : users_copy) {
+    auto *user = static_cast<Op *>(user_base);
     for (auto &operand : user->operands) {
       if (operand == old_val) {
         operand = new_val;

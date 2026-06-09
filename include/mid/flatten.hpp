@@ -9,8 +9,17 @@ namespace exodus::mid_ir {
 
 struct MidModule {
   high_ir::IRContext *ctx = nullptr;
+  std::vector<std::unique_ptr<Op>> ops;
   std::vector<high_ir::GlobalVar *> globals;
   std::vector<std::unique_ptr<LinearFunction>> functions;
+
+  template <typename... Args>
+  auto make_op(Args &&...args) -> Op * {
+    auto obj = std::make_unique<Op>(std::forward<Args>(args)...);
+    auto *ptr = obj.get();
+    ops.emplace_back(std::move(obj));
+    return ptr;
+  }
 };
 
 struct Flattener {
@@ -30,6 +39,14 @@ private:
   auto visit(const high_ir::Region &region) -> void;
   auto create_block(const std::string &name) -> Block *;
   auto build_cfg() -> void;
+
+  auto convert_op(high_ir::Op *old_op) -> Op * {
+    auto *new_op = new_module->make_op(static_cast<OpCode>(old_op->code));
+    new_op->operands = old_op->operands;
+    new_op->result = old_op->result;
+    new_op->successors = old_op->successors;
+    return new_op;
+  }
 };
 
 inline auto Flattener::create_block(const std::string &name) -> Block * {
@@ -82,11 +99,8 @@ inline auto Flattener::build_cfg() -> void {
     if (u->insts.empty())
       continue;
 
-    high_ir::Op *last = u->insts.back();
-    if (
-      last->code == high_ir::OpCode::Jump ||
-      last->code == high_ir::OpCode::Branch
-    ) {
+    Op *last = u->insts.back();
+    if (last->code == OpCode::Jump || last->code == OpCode::Branch) {
       for (Block *v : last->successors) {
         u->succs.push_back(v);
         v->preds.push_back(u);
@@ -109,14 +123,12 @@ inline auto Flattener::visit(const high_ir::Region &region) -> void {
       auto *else_b = payload.else_region ? create_block("else") : nullptr;
       auto *merge_b = create_block("merge");
 
-      // br res, then_block, else_block/merge_block
-      auto *br = new_module->ctx->make_op(high_ir::OpCode::Branch);
+      auto *br = new_module->make_op(OpCode::Branch);
       br->operands.push_back(op->operands[0]);
       br->successors.push_back(then_b);
       br->successors.push_back(else_b ? else_b : merge_b);
       cur_block->insts.push_back(br);
 
-      // Visit Then
       cur_block = then_b;
       visit(*payload.then_region);
       // 为了防止产生不必要的死代码，比如 ret 之后再 jump，ret
@@ -124,26 +136,25 @@ inline auto Flattener::visit(const high_ir::Region &region) -> void {
       // 进行优化的说。
       if (
         cur_block->insts.empty() ||
-        (cur_block->insts.back()->code != high_ir::OpCode::Ret &&
-         cur_block->insts.back()->code != high_ir::OpCode::Jump &&
-         cur_block->insts.back()->code != high_ir::OpCode::Branch)
+        (cur_block->insts.back()->code != OpCode::Ret &&
+         cur_block->insts.back()->code != OpCode::Jump &&
+         cur_block->insts.back()->code != OpCode::Branch)
       ) {
-        auto *jmp = new_module->ctx->make_op(high_ir::OpCode::Jump);
+        auto *jmp = new_module->make_op(OpCode::Jump);
         jmp->successors.push_back(merge_b);
         cur_block->insts.push_back(jmp);
       }
 
-      // Visit Else
       if (else_b) {
         cur_block = else_b;
         visit(*payload.else_region);
         if (
           cur_block->insts.empty() ||
-          (cur_block->insts.back()->code != high_ir::OpCode::Ret &&
-           cur_block->insts.back()->code != high_ir::OpCode::Jump &&
-           cur_block->insts.back()->code != high_ir::OpCode::Branch)
+          (cur_block->insts.back()->code != OpCode::Ret &&
+           cur_block->insts.back()->code != OpCode::Jump &&
+           cur_block->insts.back()->code != OpCode::Branch)
         ) {
-          auto *jmp = new_module->ctx->make_op(high_ir::OpCode::Jump);
+          auto *jmp = new_module->make_op(OpCode::Jump);
           jmp->successors.push_back(merge_b);
           cur_block->insts.push_back(jmp);
         }
@@ -158,39 +169,35 @@ inline auto Flattener::visit(const high_ir::Region &region) -> void {
       auto *body_b = create_block("while_body");
       auto *exit_b = create_block("while_exit");
 
-      // Jump to cond
-      auto *jmp_to_cond = new_module->ctx->make_op(high_ir::OpCode::Jump);
+      auto *jmp_to_cond = new_module->make_op(OpCode::Jump);
       jmp_to_cond->successors.push_back(cond_b);
       cur_block->insts.push_back(jmp_to_cond);
 
-      // Visit cond_region
       cur_block = cond_b;
       for (auto *cond_op : *payload.cond_region) {
         if (cond_op->code == high_ir::OpCode::Condition) {
-          auto *br = new_module->ctx->make_op(high_ir::OpCode::Branch);
+          auto *br = new_module->make_op(OpCode::Branch);
           br->operands.push_back(cond_op->operands[0]);
           br->successors.push_back(body_b);
           br->successors.push_back(exit_b);
           cur_block->insts.push_back(br);
         } else {
-          cur_block->insts.push_back(cond_op);
+          cur_block->insts.push_back(convert_op(cond_op));
         }
       }
 
-      // Visit body_region
       cur_block = body_b;
       loop_stk.push_back({cond_b, exit_b});
       visit(*payload.loop_region);
       loop_stk.pop_back();
 
-      // Jump back to cond
       if (
         cur_block->insts.empty() ||
-        (cur_block->insts.back()->code != high_ir::OpCode::Ret &&
-         cur_block->insts.back()->code != high_ir::OpCode::Jump &&
-         cur_block->insts.back()->code != high_ir::OpCode::Branch)
+        (cur_block->insts.back()->code != OpCode::Ret &&
+         cur_block->insts.back()->code != OpCode::Jump &&
+         cur_block->insts.back()->code != OpCode::Branch)
       ) {
-        auto *jmp_back = new_module->ctx->make_op(high_ir::OpCode::Jump);
+        auto *jmp_back = new_module->make_op(OpCode::Jump);
         jmp_back->successors.push_back(cond_b);
         cur_block->insts.push_back(jmp_back);
       }
@@ -200,14 +207,14 @@ inline auto Flattener::visit(const high_ir::Region &region) -> void {
     }
     case high_ir::OpCode::Break: {
       assert(loop_stk.size());
-      auto *jmp = new_module->ctx->make_op(high_ir::OpCode::Jump);
+      auto *jmp = new_module->make_op(OpCode::Jump);
       jmp->successors.push_back(loop_stk.back().second);
       cur_block->insts.push_back(jmp);
       break;
     }
     case high_ir::OpCode::Continue: {
       assert(loop_stk.size());
-      auto *jmp = new_module->ctx->make_op(high_ir::OpCode::Jump);
+      auto *jmp = new_module->make_op(OpCode::Jump);
       jmp->successors.push_back(loop_stk.back().first);
       cur_block->insts.push_back(jmp);
       break;
@@ -215,11 +222,11 @@ inline auto Flattener::visit(const high_ir::Region &region) -> void {
     default:
       if (
         !cur_block->insts.empty() &&
-        cur_block->insts.back()->code == high_ir::OpCode::Ret
+        cur_block->insts.back()->code == OpCode::Ret
       )
         break;
 
-      cur_block->insts.push_back(op);
+      cur_block->insts.push_back(convert_op(op));
       break;
     }
   }
