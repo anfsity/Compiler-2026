@@ -7,21 +7,6 @@
 
 namespace exodus::mid_ir {
 
-struct MidModule {
-  high_ir::IRContext *ctx = nullptr;
-  std::vector<std::unique_ptr<Op>> ops;
-  std::vector<high_ir::GlobalVar *> globals;
-  std::vector<std::unique_ptr<LinearFunction>> functions;
-
-  template <typename... Args>
-  auto make_op(Args &&...args) -> Op * {
-    auto obj = std::make_unique<Op>(std::forward<Args>(args)...);
-    auto *ptr = obj.get();
-    ops.emplace_back(std::move(obj));
-    return ptr;
-  }
-};
-
 struct Flattener {
   Flattener(high_ir::Module *m) : old_module(m) {}
   auto flatten() -> std::unique_ptr<MidModule>;

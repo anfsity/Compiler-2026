@@ -182,7 +182,7 @@ auto test_array_and_folding() -> std::string {
     unit.items.emplace_back(std::move(main_func));
   }
 
-  IRContext ctx;
+  high_ir::IRContext ctx;
   IRBuilder builder(&ctx);
   auto module = builder.build(unit);
 
@@ -251,7 +251,7 @@ auto test_complex_initializers() -> std::string {
     unit.items.emplace_back(var_decl(I32::get(), std::move(defs), false));
   }
 
-  IRContext ctx;
+  high_ir::IRContext ctx;
   IRBuilder builder(&ctx);
   auto module = builder.build(unit);
   IRPrinter printer;

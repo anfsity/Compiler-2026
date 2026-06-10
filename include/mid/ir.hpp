@@ -16,6 +16,10 @@ struct CallPayload {
   std::string func_name;
 };
 
+struct PhiPayload {
+  std::vector<std::pair<Block *, Value *>> incoming;
+};
+
 enum class OpCode : uint8_t {
   // clang-format off
     Add, Sub, Mul, Div, Mod, FAdd, FSub, FMul, FDiv, // arithmetic
@@ -37,7 +41,7 @@ struct Op : OpBase {
   std::vector<Block *> successors;
   OpResult *result = nullptr;
 
-  using Payload = std::variant<EmptyPayload, CallPayload>;
+  using Payload = std::variant<EmptyPayload, CallPayload, PhiPayload>;
 
   Payload payload;
 
@@ -61,6 +65,21 @@ struct LinearFunction {
 
   std::list<std::unique_ptr<Block>> blocks;
   bool is_decl = false;
+};
+
+struct MidModule {
+  exodus::ir::IRContext *ctx = nullptr;
+  std::vector<std::unique_ptr<Op>> ops;
+  std::vector<exodus::ir::GlobalVar *> globals;
+  std::vector<std::unique_ptr<LinearFunction>> functions;
+
+  template <typename... Args>
+  auto make_op(Args &&...args) -> Op * {
+    auto obj = std::make_unique<Op>(std::forward<Args>(args)...);
+    auto *ptr = obj.get();
+    ops.emplace_back(std::move(obj));
+    return ptr;
+  }
 };
 
 } // namespace exodus::mid_ir

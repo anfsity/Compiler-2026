@@ -92,4 +92,57 @@ struct InitVal {
   std::variant<int, float, ZeroInit, InitList> data;
 };
 
+struct GlobalVar {
+  std::string name;
+  std::shared_ptr<Type> type;
+  InitVal init;
+  bool is_const = false;
+  GlobalAddr *addr = nullptr;
+};
+
+struct IRContext {
+  std::vector<std::unique_ptr<Value>> values;
+
+  template <typename T, typename... Args>
+  auto make_value(Args &&...args) -> T * {
+    auto obj = std::make_unique<T>(std::forward<Args>(args)...);
+    auto *ptr = obj.get();
+    values.emplace_back(std::move(obj));
+    return ptr;
+  }
+
+  auto make_const(const std::shared_ptr<Type> &t, Constant::Data v)
+    -> Constant * {
+    if (t->is_f32()) {
+      if (std::holds_alternative<int>(v)) {
+        return make_value<Constant>(t, static_cast<float>(std::get<int>(v)));
+      }
+    } else {
+      if (std::holds_alternative<float>(v)) {
+        return make_value<Constant>(t, static_cast<int>(std::get<float>(v)));
+      }
+    }
+    return make_value<Constant>(t, v);
+  }
+
+  auto make_const(const std::shared_ptr<Type> &t, const InitVal &iv)
+    -> Constant * {
+    if (std::holds_alternative<int>(iv.data)) {
+      return make_const(t, std::get<int>(iv.data));
+    } else if (std::holds_alternative<float>(iv.data)) {
+      return make_const(t, std::get<float>(iv.data));
+    } else if (std::holds_alternative<ZeroInit>(iv.data)) {
+      return make_zero(t);
+    }
+    return nullptr;
+  }
+
+  auto make_zero(const std::shared_ptr<Type> &t) -> Constant * {
+    if (t->is_f32()) {
+      return make_value<Constant>(t, 0.0f);
+    }
+    return make_value<Constant>(t, 0);
+  }
+};
+
 } // namespace exodus::ir

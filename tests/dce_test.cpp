@@ -19,7 +19,7 @@ using namespace exodus::opt;
 
 #ifdef EXODUS_UNIT_TEST
 auto main() -> int {
-  IRContext ctx;
+  high_ir::IRContext ctx;
   Function f;
   f.name = "test";
   f.is_decl = false;
