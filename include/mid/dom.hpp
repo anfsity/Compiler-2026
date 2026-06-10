@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../opt/AnalysisManager.hpp"
 #include "ir.hpp"
 #include <numeric>
 #include <unordered_map>
@@ -65,8 +66,18 @@ struct DomTree {
   auto get_df(Block *b) -> const std::vector<Block *> & {
     return nodes.at(b).df;
   }
-
   auto dominate(Block *a, Block *b) -> bool;
+
+  auto dump_dot() -> std::string {
+    std::string res = "digraph DomTree {\n";
+    for (auto &[b, node] : nodes) {
+      if (node.idom) {
+        res += fmt::format("  \"{}\" -> \"{}\";\n", node.idom->name, b->name);
+      }
+    }
+    res += "}\n";
+    return res;
+  }
 
 private:
   auto reset(size_t n) -> void;
@@ -81,6 +92,18 @@ private:
   std::vector<Block *> vertex;
   std::vector<std::vector<int>> bucket;
   int timer = 0;
+};
+
+struct DominanceAnalysis {
+  using Result = DomTree;
+  auto run(
+    LinearFunction &func,
+    [[maybe_unused]] exodus::opt::LinearFunctionAnalysisManager &am
+  ) -> Result {
+    DomTree dt;
+    dt.compute(func);
+    return dt;
+  }
 };
 
 inline auto DomTree::compute(LinearFunction &func) -> void {

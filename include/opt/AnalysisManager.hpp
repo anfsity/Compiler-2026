@@ -109,4 +109,10 @@ private:
 using FunctionAnalysisManager = AnalysisManager<high_ir::Function>;
 using ModuleAnalysisManager = AnalysisManager<high_ir::Module>;
 
+// mid-IR
+namespace mid_ir {
+struct LinearFunction;
+}
+using LinearFunctionAnalysisManager = AnalysisManager<mid_ir::LinearFunction>;
+
 } // namespace exodus::opt
