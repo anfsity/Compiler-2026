@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../base/rewriter.hpp"
 #include "ir.hpp"
 #include <algorithm>
 #include <unordered_map>
@@ -8,43 +9,22 @@
 
 namespace exodus::high_ir {
 
-class IRRewriter {
-  std::unordered_set<Op *> to_erase;
-  std::unordered_map<Op *, Region *> to_replace;
-
-public:
-  auto replaceAllUsesWith(Value *old_val, Value *new_val) -> void;
+struct IRRewriter : ir::RewriterBase<Op> {
   auto replaceOpWithRegion(Op *op, Region &r) -> void;
   auto replaceOp(Op *old_op, Value *new_val) -> void;
-  auto eraseOp(Op *op) -> void;
   auto eraseRegion(Region &r) -> void;
+
   auto finalize(Region &r) -> void;
-  auto finalize(Function &f) -> void;
-  auto clear() -> void;
-  auto empty() const -> bool;
-  auto size() const -> size_t;
-};
+  auto finalize(Function &f) -> void { finalize(f.body); }
 
-inline auto IRRewriter::replaceAllUsesWith(Value *old_val, Value *new_val)
-  -> void {
-  if (!old_val || !new_val || old_val == new_val)
-    return;
-
-  std::vector<OpBase *> users_copy(
-    old_val->users.begin(), old_val->users.end()
-  );
-
-  for (auto *user_base : users_copy) {
-    auto *user = static_cast<Op *>(user_base);
-    for (auto &operand : user->operands) {
-      if (operand == old_val) {
-        operand = new_val;
-        new_val->addUse(user);
-      }
-    }
+  auto clear() -> void {
+    RewriterBase::clear();
+    to_replace.clear();
   }
-  old_val->users.clear();
-}
+
+private:
+  std::unordered_map<Op *, Region *> to_replace;
+};
 
 inline auto IRRewriter::replaceOpWithRegion(Op *op, Region &r) -> void {
   if (!op)
@@ -64,17 +44,6 @@ inline auto IRRewriter::replaceOp(Op *old_op, Value *new_val) -> void {
     replaceAllUsesWith(old_op->result, new_val);
   }
   eraseOp(old_op);
-}
-
-inline auto IRRewriter::eraseOp(Op *op) -> void {
-  if (!op)
-    return;
-  for (auto *operand : op->operands) {
-    if (operand) {
-      operand->rmUse(op);
-    }
-  }
-  to_erase.insert(op);
 }
 
 inline auto IRRewriter::eraseRegion(Region &r) -> void {
@@ -124,13 +93,5 @@ inline auto IRRewriter::finalize(Region &r) -> void {
     }
   }
 }
-
-inline auto IRRewriter::finalize(Function &f) -> void { finalize(f.body); }
-
-inline auto IRRewriter::clear() -> void { to_erase.clear(); }
-
-inline auto IRRewriter::empty() const -> bool { return to_erase.empty(); }
-
-inline auto IRRewriter::size() const -> size_t { return to_erase.size(); }
 
 } // namespace exodus::high_ir
