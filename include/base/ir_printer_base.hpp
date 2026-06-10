@@ -1,7 +1,7 @@
 #pragma once
 
-#include "../base/ir.hpp"
 #include "../helper/overload.hpp"
+#include "ir.hpp"
 #include <string>
 #include <unordered_map>
 #include <vector>

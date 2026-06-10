@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../helper/ir_printer_base.hpp"
+#include "../base/ir_printer_base.hpp"
 #include "ir.hpp"
 #include <string>
 
