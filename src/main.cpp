@@ -145,7 +145,7 @@ auto main(int argc, char **argv) -> int {
   auto mid_module = flattener.flatten();
 
   if (!verifier.verify(*module)) {
-    fmt::print(stderr, "Verifier: IR is invalid in modlue!\n");
+    fmt::print(stderr, "Verifier: IR is invalid in module!\n");
   }
 
   fmt::print("\n--- Final High IR ---\n");
