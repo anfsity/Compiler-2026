@@ -1,9 +1,9 @@
-#include "../include/high/ast.hpp"
-#include "../include/high/ast_base.hpp"
-#include "../include/high/ir.hpp"
-#include "../include/high/ir_builder.hpp"
-#include "../include/high/ir_printer.hpp"
-#include "../include/type.hpp"
+#include "../src/high/ast.hpp"
+#include "../src/high/ast_base.hpp"
+#include "../src/high/ir.hpp"
+#include "../src/high/ir_builder.hpp"
+#include "../src/high/ir_printer.hpp"
+#include "../src/type.hpp"
 
 #include <iostream>
 #include <memory>

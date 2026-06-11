@@ -6,9 +6,9 @@
 #ifndef FMT_HEADER_ONLY
 #define FMT_HEADER_ONLY
 #endif
-#include "../3rd-party/fmt/color.h"
-#include "../3rd-party/fmt/core.h"
-#include "../3rd-party/fmt/format.h"
+#include "../../3rd-party/fmt/color.h"
+#include "../../3rd-party/fmt/core.h"
+#include "../../3rd-party/fmt/format.h"
 
 #include <chrono>
 #include <concepts>

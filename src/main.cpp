@@ -5,17 +5,17 @@
 #include <type_traits>
 #include <vector>
 
-#include "../include/fmt/base.h"
-#include "../include/high/ast_base.hpp"
-#include "../include/high/ir.hpp"
-#include "../include/high/ir_builder.hpp"
-#include "../include/high/ir_printer.hpp"
-#include "../include/high/verifier.hpp"
-#include "../include/mid/flatten.hpp"
-#include "../include/mid/ir_printer.hpp"
-#include "../include/opt/AnalysisManager.hpp"
-#include "../include/opt/PassBuilder.hpp"
-#include "../include/opt/PassManager.hpp"
+#include "../3rd-party/fmt/base.h"
+#include "high/ast_base.hpp"
+#include "high/ir.hpp"
+#include "high/ir_builder.hpp"
+#include "high/ir_printer.hpp"
+#include "high/verifier.hpp"
+#include "mid/flatten.hpp"
+#include "mid/ir_printer.hpp"
+#include "opt/AnalysisManager.hpp"
+#include "opt/PassBuilder.hpp"
+#include "opt/PassManager.hpp"
 
 using namespace exodus::ast;
 using namespace exodus::high_ir;

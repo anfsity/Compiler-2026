@@ -104,9 +104,7 @@ struct VarDeclAST : Sourcelocation {
   std::vector<std::unique_ptr<VarDefAST>> defs;
   bool is_const;
   VarDeclAST(
-    std::shared_ptr<Type> t,
-    std::vector<std::unique_ptr<VarDefAST>> d,
-    bool c
+    std::shared_ptr<Type> t, std::vector<std::unique_ptr<VarDefAST>> d, bool c
   );
 };
 
@@ -155,8 +153,7 @@ inline ExprStmtAST::ExprStmtAST(Expr e) : expr(std::move(e)) {}
 inline AssignStmtAST::AssignStmtAST(std::unique_ptr<LvalAST> l, Expr e)
     : lval(std::move(l)), expr(std::move(e)) {}
 
-inline BlockSAST::BlockSAST(std::vector<BlockItem> i)
-    : items(std::move(i)) {}
+inline BlockSAST::BlockSAST(std::vector<BlockItem> i) : items(std::move(i)) {}
 
 inline IfStmtAST::IfStmtAST(Expr c, Stmt t, std::optional<Stmt> e)
     : cond(std::move(c)), then_body(std::move(t)), else_body(std::move(e)) {}

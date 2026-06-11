@@ -1,8 +1,8 @@
-#include "../include/high/ir.hpp"
-#include "../include/opt/high/sdce.hpp"
-#include "fmt/base.h"              // for print
-#include "opt/AnalysisManager.hpp" // for FunctionAnalysisManager
-#include "type.hpp"                // for I32, Bool, Type
+#include "../src/high/ir.hpp"
+#include "../src/opt/AnalysisManager.hpp" // for FunctionAnalysisManager
+#include "../src/opt/high/sdce.hpp"
+#include "../src/type.hpp" // for I32, Bool, Type
+#include "fmt/base.h"      // for print
 #include <cassert>
 #include <list>     // for list, _List_iterator
 #include <memory>   // for shared_ptr, unique_ptr, make...

@@ -1,6 +1,6 @@
-#include "../include/high/ir.hpp"
-#include "../include/high/verifier.hpp"
-#include "../include/type.hpp"
+#include "../src/high/ir.hpp"
+#include "../src/high/verifier.hpp"
+#include "../src/type.hpp"
 
 #include <iostream>
 #include <list>

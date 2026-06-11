@@ -4,8 +4,8 @@
  */
 
 %{
-#include "../../include/helper/log.hpp"
-#include "../../include/high/ast.hpp"
+#include "../../src/helper/log.hpp"
+#include "../../src/high/ast.hpp"
 
 #include <iostream>
 #include <memory>
@@ -187,7 +187,7 @@ static auto call_expr(std::string *name, std::vector<Expr> args, const Loc &loc)
 %}
 
 %code requires {
-#include "../../include/high/ast_base.hpp"
+#include "../../src/high/ast_base.hpp"
 
 namespace exodus { namespace ast { struct BlockSAST; } }
 namespace exodus { namespace ast { struct FuncDefAST; } }

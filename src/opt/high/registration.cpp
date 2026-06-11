@@ -1,8 +1,8 @@
-#include "../../../include/opt/PassRegistry.hpp"
-#include "../../../include/opt/high/constant_propagation.hpp"
-#include "../../../include/opt/high/inliner.hpp"
-#include "../../../include/opt/high/return_insertion.hpp"
-#include "../../../include/opt/high/sdce.hpp"
+#include "../PassRegistry.hpp"
+#include "constant_propagation.hpp"
+#include "inliner.hpp"
+#include "return_insertion.hpp"
+#include "sdce.hpp"
 
 namespace exodus::high_ir::opt {
 

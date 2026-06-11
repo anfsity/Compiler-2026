@@ -1,4 +1,4 @@
-#include "../include/mid/dom.hpp"
+#include "../src/mid/dom.hpp"
 #include <cassert>
 #include <iostream>
 

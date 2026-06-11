@@ -1,8 +1,8 @@
-#include "../include/high/ir.hpp"
-#include "../include/high/ir_printer.hpp"
-#include "../include/mid/flatten.hpp"
-#include "../include/mid/ir_printer.hpp"
-#include "../include/type.hpp"
+#include "../src/high/ir.hpp"
+#include "../src/high/ir_printer.hpp"
+#include "../src/mid/flatten.hpp"
+#include "../src/mid/ir_printer.hpp"
+#include "../src/type.hpp"
 
 #include <iostream>
 #include <memory>

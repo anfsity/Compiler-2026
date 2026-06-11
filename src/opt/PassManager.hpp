@@ -1,7 +1,7 @@
 #pragma once
 
+#include "../helper/log.hpp"
 #include "AnalysisManager.hpp"
-#include "helper/log.hpp"
 #include <functional>
 #include <memory>
 #include <string>
