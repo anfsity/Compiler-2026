@@ -61,10 +61,14 @@ struct DomTree {
   }
 
   auto get_children(Block *b) -> const std::vector<Block *> & {
-    return nodes.at(b).children;
+    static const std::vector<Block *> empty;
+    auto it = nodes.find(b);
+    return it == nodes.end() ? empty : it->second.children;
   }
   auto get_df(Block *b) -> const std::vector<Block *> & {
-    return nodes.at(b).df;
+    static const std::vector<Block *> empty;
+    auto it = nodes.find(b);
+    return it == nodes.end() ? empty : it->second.df;
   }
   auto dominate(Block *a, Block *b) -> bool;
 

@@ -112,6 +112,18 @@ auto LinearIRPrinter::dump(const Op &op) -> std::string {
       join_operands(op.operands),
       join_operand_types(op.operands)
     );
+
+  } else if (op.code == OpCode::Phi) {
+    auto &pp = std::get<PhiPayload>(op.payload);
+    line += "phi ";
+    for (size_t i = 0; i < pp.incoming.size(); ++i) {
+      auto &[block, value] = pp.incoming[i];
+      line += fmt::format("[ {}, ^{} ]", get_value_name(value), block->name);
+      if (i + 1 < pp.incoming.size()) {
+        line += ", ";
+      }
+    }
+
   } else {
     line += opcode_to_str(op.code);
     if (!op.operands.empty()) {
@@ -141,6 +153,7 @@ auto LinearIRPrinter::dump(const Op &op) -> std::string {
   if (op.code == OpCode::Jump) {
     assert(!op.successors.empty());
     line += " ^" + op.successors[0]->name;
+
   } else if (op.code == OpCode::Branch) {
     assert(!op.successors.empty());
     line +=
