@@ -1,11 +1,13 @@
 #pragma once
 
 #include "../high/ir.hpp"
+#include "../mid/ir.hpp"
 #include <functional>
 #include <memory>
 #include <typeindex>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 namespace exodus::opt {
 
@@ -77,10 +79,10 @@ struct AnalysisManager {
 
   template <typename PassT>
   auto getResult(IRUnitT &ir) -> typename PassT::Result & {
-    auto it = cache.find(typeid(PassT));
+    CacheKey key{&ir, typeid(PassT)};
+    auto it = cache.find(key);
     if (it == cache.end()) {
-      it = cache.emplace(typeid(PassT), generators.at(typeid(PassT))(ir, *this))
-             .first;
+      it = cache.emplace(key, generators.at(typeid(PassT))(ir, *this)).first;
     }
     return it->second.template get<PassT>();
   }
@@ -90,7 +92,7 @@ struct AnalysisManager {
       return;
     auto it = cache.begin();
     while (it != cache.end()) {
-      if (it->second.invalidate(&ir, pa)) {
+      if (it->first.ir == &ir && it->second.invalidate(&ir, pa)) {
         it = cache.erase(it);
       } else {
         ++it;
@@ -101,18 +103,32 @@ struct AnalysisManager {
   auto clear() -> void { cache.clear(); }
 
 private:
+  struct CacheKey {
+    IRUnitT *ir;
+    std::type_index pass;
+
+    auto operator==(const CacheKey &other) const -> bool {
+      return ir == other.ir && pass == other.pass;
+    }
+  };
+
+  struct CacheKeyHash {
+    auto operator()(const CacheKey &key) const -> size_t {
+      return std::hash<IRUnitT *>{}(key.ir) ^
+             (std::hash<std::type_index>{}(key.pass) << 1);
+    }
+  };
+
   using Generator = std::function<AnalysisResult(IRUnitT &, AnalysisManager &)>;
   std::unordered_map<std::type_index, Generator> generators;
-  std::unordered_map<std::type_index, AnalysisResult> cache;
+  std::unordered_map<CacheKey, AnalysisResult, CacheKeyHash> cache;
 };
 
 using FunctionAnalysisManager = AnalysisManager<high_ir::Function>;
 using ModuleAnalysisManager = AnalysisManager<high_ir::Module>;
 
 // mid-IR
-namespace mid_ir {
-struct LinearFunction;
-}
-using LinearFunctionAnalysisManager = AnalysisManager<mid_ir::LinearFunction>;
+using LinearFunctionAnalysisManager =
+  AnalysisManager<::exodus::mid_ir::LinearFunction>;
 
 } // namespace exodus::opt

@@ -11,6 +11,7 @@
 #include "high/ir_builder.hpp"
 #include "high/ir_printer.hpp"
 #include "high/verifier.hpp"
+#include "mid/dom.hpp"
 #include "mid/flatten.hpp"
 #include "mid/ir_printer.hpp"
 #include "opt/AnalysisManager.hpp"
@@ -22,10 +23,20 @@ using namespace exodus::high_ir;
 using namespace exodus::mid_ir;
 using namespace exodus::opt;
 
+namespace exodus::high_ir::opt {
+void registerPasses();
+}
+namespace exodus::mid_ir::opt {
+void registerPasses();
+}
+
 extern FILE *yyin;
 extern int yyparse(CompUnitAST &ast);
 
 auto main(int argc, char **argv) -> int {
+  exodus::high_ir::opt::registerPasses();
+  exodus::mid_ir::opt::registerPasses();
+
   std::string input_file;
   std::vector<std::string> pass_names;
   bool print_ir_after_all = false;
@@ -134,18 +145,49 @@ auto main(int argc, char **argv) -> int {
         auto pass = pb.createModulePass(name);
         pass.run(*module, mam);
         instrumentation(name, *module);
-      } else {
+      } else if (!pb.isLinearFunctionPass(name)) {
         fmt::print(stderr, "Warning: Unknown pass '{}'\n", name);
       }
     }
+  }
+
+  if (!verifier.verify(*module)) {
+    fmt::print(stderr, "Verifier: IR is invalid in module!\n");
   }
 
   // --- Lowering Phase ---
   Flattener flattener(module.get());
   auto mid_module = flattener.flatten();
 
-  if (!verifier.verify(*module)) {
-    fmt::print(stderr, "Verifier: IR is invalid in module!\n");
+  // --- Mid IR Optimization Phase ---
+  pb = PassBuilder(module.get(), mid_module.get());
+  LinearFunctionAnalysisManager lfam;
+  lfam.registerPass<DominanceAnalysis>();
+
+  auto run_full_mid_pipeline = [&]() {
+    auto lfpm = pb.buildLinearFunctionPipeline();
+    lfpm.setAfterPassCallback(instrumentation);
+    for (auto &f : mid_module->functions) {
+      if (!f->is_decl) {
+        lfpm.run(*f, lfam);
+      }
+    }
+  };
+
+  if (pass_names.empty()) {
+    run_full_mid_pipeline();
+  } else {
+    for (const auto &name : pass_names) {
+      if (pb.isLinearFunctionPass(name)) {
+        auto pass = pb.createLinearFunctionPass(name);
+        for (auto &f : mid_module->functions) {
+          if (!f->is_decl) {
+            pass.run(*f, lfam);
+            instrumentation(name, *f);
+          }
+        }
+      }
+    }
   }
 
   fmt::print("\n--- Final High IR ---\n");

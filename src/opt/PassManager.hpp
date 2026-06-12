@@ -77,7 +77,7 @@ public:
   auto run(IRUnitT &ir, AnalysisManager<IRUnitT> &am) -> PreservedAnalysis {
     PreservedAnalysis combined_pa = PreservedAnalysis::all();
     for (auto &pass : pipeline) {
-      Log::log_info("pass name: {}", pass.name());
+      ::exodus::Log::log_info("pass name: {}", pass.name());
 
       PreservedAnalysis pa = pass.run(ir, am);
 
@@ -97,5 +97,6 @@ public:
 
 using ModulePassManager = PassManager<high_ir::Module>;
 using FunctionPassManager = PassManager<high_ir::Function>;
+using LinearFunctionPassManager = PassManager<::exodus::mid_ir::LinearFunction>;
 
 } // namespace exodus::opt

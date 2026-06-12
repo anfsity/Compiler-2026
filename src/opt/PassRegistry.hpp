@@ -15,6 +15,8 @@ public:
     std::function<Pass<high_ir::Function>(high_ir::Module *)>;
   using ModulePassCreator =
     std::function<Pass<high_ir::Module>(high_ir::Module *)>;
+  using LinearFunctionPassCreator = std::function<
+    Pass<::exodus::mid_ir::LinearFunction>(::exodus::mid_ir::MidModule *)>;
 
   template <typename CreatorT>
   struct PassInfo {
@@ -29,23 +31,33 @@ public:
   }
 
   auto registerFunctionPass(
-    std::string id, std::string desc, FunctionPassCreator creator
+    std::string &id, std::string desc, FunctionPassCreator creator
   ) -> void {
     if (!function_passes.count(id)) {
       function_order.push_back(id);
     }
-    function_passes[std::move(id)] =
+    function_passes[id] =
       PassInfo<FunctionPassCreator>{std::move(desc), std::move(creator)};
   }
 
   auto registerModulePass(
-    std::string id, std::string desc, ModulePassCreator creator
+    std::string &id, std::string desc, ModulePassCreator creator
   ) -> void {
     if (!module_passes.count(id)) {
       module_order.push_back(id);
     }
-    module_passes[std::move(id)] =
+    module_passes[id] =
       PassInfo<ModulePassCreator>{std::move(desc), std::move(creator)};
+  }
+
+  auto registerLinearFunctionPass(
+    std::string &id, std::string desc, LinearFunctionPassCreator creator
+  ) -> void {
+    if (!linear_function_passes.count(id)) {
+      linear_function_order.push_back(id);
+    }
+    linear_function_passes[id] =
+      PassInfo<LinearFunctionPassCreator>{std::move(desc), std::move(creator)};
   }
 
   auto getFunctionPasses() const
@@ -58,6 +70,11 @@ public:
     return module_passes;
   }
 
+  auto getLinearFunctionPasses() const
+    -> const std::map<std::string, PassInfo<LinearFunctionPassCreator>> & {
+    return linear_function_passes;
+  }
+
   auto getFunctionOrder() const -> const std::vector<std::string> & {
     return function_order;
   }
@@ -66,13 +83,20 @@ public:
     return module_order;
   }
 
+  auto getLinearFunctionOrder() const -> const std::vector<std::string> & {
+    return linear_function_order;
+  }
+
 private:
   PassRegistry() = default;
 
   std::map<std::string, PassInfo<FunctionPassCreator>> function_passes;
   std::map<std::string, PassInfo<ModulePassCreator>> module_passes;
+  std::map<std::string, PassInfo<LinearFunctionPassCreator>>
+    linear_function_passes;
   std::vector<std::string> function_order;
   std::vector<std::string> module_order;
+  std::vector<std::string> linear_function_order;
 };
 
 template <typename PassT>
@@ -96,6 +120,21 @@ struct RegisterModulePass {
     PassRegistry::instance().registerModulePass(
       pass_id, pass_desc, [pass_id, pass_desc](high_ir::Module *m) {
         return Pass<high_ir::Module>(PassT(m), pass_id, pass_desc);
+      }
+    );
+  }
+};
+
+template <typename PassT>
+struct RegisterLinearFunctionPass {
+  RegisterLinearFunctionPass(std::string id, std::string desc) {
+    auto pass_id = std::move(id);
+    auto pass_desc = std::move(desc);
+    PassRegistry::instance().registerLinearFunctionPass(
+      pass_id, pass_desc, [pass_id, pass_desc](exodus::mid_ir::MidModule *m) {
+        return Pass<::exodus::mid_ir::LinearFunction>(
+          PassT(m), pass_id, pass_desc
+        );
       }
     );
   }
