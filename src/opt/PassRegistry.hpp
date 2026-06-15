@@ -30,7 +30,7 @@ public:
     return inst;
   }
 
-  auto registerFunctionPass(
+  auto register_function_pass(
     std::string &id, std::string desc, FunctionPassCreator creator
   ) -> void {
     if (!function_passes.count(id)) {
@@ -40,7 +40,7 @@ public:
       PassInfo<FunctionPassCreator>{std::move(desc), std::move(creator)};
   }
 
-  auto registerModulePass(
+  auto register_module_pass(
     std::string &id, std::string desc, ModulePassCreator creator
   ) -> void {
     if (!module_passes.count(id)) {
@@ -50,7 +50,7 @@ public:
       PassInfo<ModulePassCreator>{std::move(desc), std::move(creator)};
   }
 
-  auto registerLinearFunctionPass(
+  auto register_linear_function_pass(
     std::string &id, std::string desc, LinearFunctionPassCreator creator
   ) -> void {
     if (!linear_function_passes.count(id)) {
@@ -60,30 +60,30 @@ public:
       PassInfo<LinearFunctionPassCreator>{std::move(desc), std::move(creator)};
   }
 
-  auto getFunctionPasses() const
+  auto get_function_passes() const
     -> const std::map<std::string, PassInfo<FunctionPassCreator>> & {
     return function_passes;
   }
 
-  auto getModulePasses() const
+  auto get_module_passes() const
     -> const std::map<std::string, PassInfo<ModulePassCreator>> & {
     return module_passes;
   }
 
-  auto getLinearFunctionPasses() const
+  auto get_linear_function_passes() const
     -> const std::map<std::string, PassInfo<LinearFunctionPassCreator>> & {
     return linear_function_passes;
   }
 
-  auto getFunctionOrder() const -> const std::vector<std::string> & {
+  auto get_function_order() const -> const std::vector<std::string> & {
     return function_order;
   }
 
-  auto getModuleOrder() const -> const std::vector<std::string> & {
+  auto get_module_order() const -> const std::vector<std::string> & {
     return module_order;
   }
 
-  auto getLinearFunctionOrder() const -> const std::vector<std::string> & {
+  auto get_linear_function_order() const -> const std::vector<std::string> & {
     return linear_function_order;
   }
 
@@ -104,7 +104,7 @@ struct RegisterFunctionPass {
   RegisterFunctionPass(std::string id, std::string desc) {
     auto pass_id = std::move(id);
     auto pass_desc = std::move(desc);
-    PassRegistry::instance().registerFunctionPass(
+    PassRegistry::instance().register_function_pass(
       pass_id, pass_desc, [pass_id, pass_desc](high_ir::Module *m) {
         return Pass<high_ir::Function>(PassT(m), pass_id, pass_desc);
       }
@@ -117,7 +117,7 @@ struct RegisterModulePass {
   RegisterModulePass(std::string id, std::string desc) {
     auto pass_id = std::move(id);
     auto pass_desc = std::move(desc);
-    PassRegistry::instance().registerModulePass(
+    PassRegistry::instance().register_module_pass(
       pass_id, pass_desc, [pass_id, pass_desc](high_ir::Module *m) {
         return Pass<high_ir::Module>(PassT(m), pass_id, pass_desc);
       }
@@ -130,7 +130,7 @@ struct RegisterLinearFunctionPass {
   RegisterLinearFunctionPass(std::string id, std::string desc) {
     auto pass_id = std::move(id);
     auto pass_desc = std::move(desc);
-    PassRegistry::instance().registerLinearFunctionPass(
+    PassRegistry::instance().register_linear_function_pass(
       pass_id, pass_desc, [pass_id, pass_desc](exodus::mid_ir::MidModule *m) {
         return Pass<::exodus::mid_ir::LinearFunction>(
           PassT(m), pass_id, pass_desc

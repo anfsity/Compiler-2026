@@ -19,6 +19,6 @@ static exodus::opt::RegisterFunctionPass<CP>
 static exodus::opt::RegisterFunctionPass<SimpleDCE>
   reg_simple_dce("simple_dce", "simple dead code elimination");
 
-auto registerPasses() -> void {}
+auto register_passes() -> void {}
 
 } // namespace exodus::high_ir::opt

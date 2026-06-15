@@ -64,13 +64,13 @@ class PassManager {
 
 public:
   template <typename PassT>
-  auto addPass(PassT p, std::string name, std::string desc) -> void {
+  auto add_pass(PassT p, std::string name, std::string desc) -> void {
     pipeline.emplace_back(std::move(p), std::move(name), std::move(desc));
   }
 
-  auto
-  setAfterPassCallback(std::function<void(const std::string &, IRUnitT &)> cb)
-    -> void {
+  auto set_after_pass_callback(
+    std::function<void(const std::string &, IRUnitT &)> cb
+  ) -> void {
     after_pass_cb = std::move(cb);
   }
 

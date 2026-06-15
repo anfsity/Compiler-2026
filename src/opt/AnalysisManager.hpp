@@ -71,14 +71,14 @@ private:
 template <typename IRUnitT>
 struct AnalysisManager {
   template <typename PassT>
-  auto registerPass() -> void {
+  auto register_pass() -> void {
     generators[typeid(PassT)] = [](IRUnitT &ir, AnalysisManager &am) {
       return AnalysisResult(PassT{}, PassT{}.run(ir, am));
     };
   }
 
   template <typename PassT>
-  auto getResult(IRUnitT &ir) -> typename PassT::Result & {
+  auto get_result(IRUnitT &ir) -> typename PassT::Result & {
     CacheKey key{&ir, typeid(PassT)};
     auto it = cache.find(key);
     if (it == cache.end()) {

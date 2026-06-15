@@ -7,7 +7,7 @@ namespace exodus::mid_ir {
 auto Mem2Reg::run(
   LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager &am
 ) -> exodus::opt::PreservedAnalysis {
-  auto &dom = am.getResult<DominanceAnalysis>(func);
+  auto &dom = am.get_result<DominanceAnalysis>(func);
 
   auto allocas = collect_promotable_allocas(func);
   if (allocas.empty())

@@ -24,10 +24,10 @@ using namespace exodus::mid_ir;
 using namespace exodus::opt;
 
 namespace exodus::high_ir::opt {
-auto registerPasses() -> void;
+auto register_passes() -> void;
 }
 namespace exodus::mid_ir::opt {
-auto registerPasses() -> void;
+auto register_passes() -> void;
 }
 
 extern FILE *yyin;
@@ -41,8 +41,8 @@ struct Compiler {
   };
 
   auto run(int argc, char **argv) -> int {
-    exodus::high_ir::opt::registerPasses();
-    exodus::mid_ir::opt::registerPasses();
+    exodus::high_ir::opt::register_passes();
+    exodus::mid_ir::opt::register_passes();
 
     if (!parse_args(argc, argv)) {
       return 1;
@@ -152,10 +152,10 @@ private:
     };
 
     if (options.pass_names.empty()) {
-      auto fpm = pb.buildFunctionPipeline();
-      auto mpm = pb.buildModulePipeline();
-      fpm.setAfterPassCallback(instrumentation);
-      mpm.setAfterPassCallback(instrumentation);
+      auto fpm = pb.build_function_pipeline();
+      auto mpm = pb.build_module_pipeline();
+      fpm.set_after_pass_callback(instrumentation);
+      mpm.set_after_pass_callback(instrumentation);
 
       for (auto &f : module->functions) {
         if (!f->is_decl)
@@ -168,16 +168,16 @@ private:
       }
     } else {
       for (const auto &name : options.pass_names) {
-        if (pb.isFunctionPass(name)) {
-          auto pass = pb.createFunctionPass(name);
+        if (pb.is_function_pass(name)) {
+          auto pass = pb.create_function_pass(name);
           for (auto &f : module->functions) {
             if (!f->is_decl) {
               pass.run(*f, fam);
               instrument(name, *f);
             }
           }
-        } else if (pb.isModulePass(name)) {
-          auto pass = pb.createModulePass(name);
+        } else if (pb.is_module_pass(name)) {
+          auto pass = pb.create_module_pass(name);
           pass.run(*module, mam);
           instrument(name, *module);
         }
@@ -203,15 +203,15 @@ private:
   auto run_mid_opt() -> void {
     PassBuilder pb(module.get(), mid_module.get());
     LinearFunctionAnalysisManager lfam;
-    lfam.registerPass<DominanceAnalysis>();
+    lfam.register_pass<DominanceAnalysis>();
 
     auto instrumentation = [&](const std::string &name, const auto &unit) {
       this->instrument(name, unit);
     };
 
     if (options.pass_names.empty()) {
-      auto lfpm = pb.buildLinearFunctionPipeline();
-      lfpm.setAfterPassCallback(instrumentation);
+      auto lfpm = pb.build_linear_function_pipeline();
+      lfpm.set_after_pass_callback(instrumentation);
       for (auto &f : mid_module->functions) {
         if (!f->is_decl) {
           lfpm.run(*f, lfam);
@@ -219,8 +219,8 @@ private:
       }
     } else {
       for (const auto &name : options.pass_names) {
-        if (pb.isLinearFunctionPass(name)) {
-          auto pass = pb.createLinearFunctionPass(name);
+        if (pb.is_linear_function_pass(name)) {
+          auto pass = pb.create_linear_function_pass(name);
           for (auto &f : mid_module->functions) {
             if (!f->is_decl) {
               pass.run(*f, lfam);

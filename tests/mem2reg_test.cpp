@@ -48,7 +48,7 @@ auto test_basic_mem2reg() -> void {
   func.blocks.push_back(std::move(entry));
 
   exodus::opt::LinearFunctionAnalysisManager am;
-  am.registerPass<DominanceAnalysis>();
+  am.register_pass<DominanceAnalysis>();
 
   Mem2Reg m2r(&module);
   m2r.run(func, am);
@@ -145,7 +145,7 @@ auto test_diamond_mem2reg() -> void {
   func.blocks.push_back(std::move(merge));
 
   exodus::opt::LinearFunctionAnalysisManager am;
-  am.registerPass<DominanceAnalysis>();
+  am.register_pass<DominanceAnalysis>();
 
   Mem2Reg m2r(&module);
   m2r.run(func, am);
@@ -209,7 +209,7 @@ auto test_mem2reg_after_flattened_creator_update() -> void {
   func.blocks.push_back(std::move(entry));
 
   exodus::opt::LinearFunctionAnalysisManager am;
-  am.registerPass<DominanceAnalysis>();
+  am.register_pass<DominanceAnalysis>();
 
   Mem2Reg m2r(&module);
   m2r.run(func, am);
