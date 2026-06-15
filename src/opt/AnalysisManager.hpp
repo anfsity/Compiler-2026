@@ -103,7 +103,7 @@ struct AnalysisManager {
   auto clear() -> void { cache.clear(); }
 
 private:
-  struct CacheKey {
+  struct CacheKey { // NOLINT
     IRUnitT *ir;
     std::type_index pass;
 

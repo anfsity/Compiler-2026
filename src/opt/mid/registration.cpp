@@ -6,6 +6,6 @@ namespace exodus::mid_ir::opt {
 static exodus::opt::RegisterLinearFunctionPass<Mem2Reg>
   reg_mem2reg("mem2reg", "memory to register promotion");
 
-void registerPasses() {}
+auto registerPasses() -> void {}
 
 } // namespace exodus::mid_ir::opt
