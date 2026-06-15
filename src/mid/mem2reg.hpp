@@ -20,12 +20,10 @@ struct Mem2Reg {
 
 private:
   MidModule *module;
-  std::unordered_map<Block *, int> block2idx;
   std::unordered_map<Op *, Op *> phi2alloca;
   std::unordered_map<Op *, std::vector<Op *>> alloca2phis;
 
-  auto initialize_block_indices(LinearFunction &func) -> void;
-
+  // 只被 load 和 store 使用的 alloca 是可以提升的
   auto collect_promotable_allocas(LinearFunction &func) -> std::vector<Op *>;
 
   auto insert_phi(

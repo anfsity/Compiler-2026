@@ -2,6 +2,8 @@
 
 namespace exodus::mid_ir {
 
+// TODO: 活跃变量分析
+// TODO: pured SSA
 auto Mem2Reg::run(
   LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager &am
 ) -> exodus::opt::PreservedAnalysis {
@@ -11,8 +13,6 @@ auto Mem2Reg::run(
   if (allocas.empty())
     return exodus::opt::PreservedAnalysis::all();
 
-  initialize_block_indices(func);
-
   // Pre-calculate alloca stores to avoid scanning the function for each
   // alloca
   std::unordered_map<Op *, std::vector<Block *>> alloca_stores;
@@ -20,6 +20,7 @@ auto Mem2Reg::run(
     for (auto *op : b->insts) {
       if (op->code == OpCode::Store) {
         Value *addr = op->operands[1];
+
         if (addr->kind == ValueKind::OpResult) {
           auto *creator = static_cast<OpResult *>(addr)->creator;
           alloca_stores[static_cast<Op *>(creator)].push_back(b.get());
@@ -44,14 +45,6 @@ auto Mem2Reg::run(
   cleanup(func, allocas, rewriter);
 
   return exodus::opt::PreservedAnalysis::none();
-}
-
-auto Mem2Reg::initialize_block_indices(LinearFunction &func) -> void {
-  block2idx.clear();
-  int idx = 0;
-  for (auto &b : func.blocks) {
-    block2idx[b.get()] = idx++;
-  }
 }
 
 auto Mem2Reg::collect_promotable_allocas(LinearFunction &func)
@@ -102,13 +95,13 @@ auto Mem2Reg::insert_phi(
   Op *alloca,
   const std::vector<Block *> &stores
 ) -> void {
-  int num_blocks = static_cast<int>(block2idx.size());
+  int num_blocks = static_cast<int>(func.blocks.size());
   std::vector<bool> has_phi(num_blocks, false);
   std::vector<bool> processed(num_blocks, false);
   std::vector<Block *> worklist;
 
   for (Block *b : stores) {
-    int idx = block2idx[b];
+    int idx = b->id;
     if (!processed[idx]) {
       processed[idx] = true;
       worklist.push_back(b);
@@ -121,7 +114,7 @@ auto Mem2Reg::insert_phi(
   for (size_t i = 0; i < worklist.size(); ++i) {
     Block *b = worklist[i];
     for (Block *df_block : dom.get_df(b)) {
-      int df_idx = block2idx[df_block];
+      int df_idx = df_block->id;
       if (!has_phi[df_idx]) {
         auto *phi = module->make_op(OpCode::Phi, PhiPayload{});
         phi->result = module->ctx->make_value<OpResult>(target_type, phi);
@@ -151,6 +144,7 @@ auto Mem2Reg::rename(
   for (auto *op : b->insts) {
     if (op->code != OpCode::Phi)
       break;
+
     if (phi2alloca.count(op)) {
       auto *alloca = phi2alloca[op];
       stacks[alloca].push(op->result);
@@ -165,6 +159,7 @@ auto Mem2Reg::rename(
       Value *addr = op->operands[0];
       if (addr->kind == ValueKind::OpResult) {
         auto *creator = static_cast<OpResult *>(addr)->creator;
+
         if (stacks.count(static_cast<Op *>(creator))) {
           auto *alloca = static_cast<Op *>(creator);
           Value *new_val = stacks[alloca].top();
@@ -172,10 +167,12 @@ auto Mem2Reg::rename(
           rewriter.replaceAllUsesWith(op->result, new_val);
         }
       }
+
     } else if (op->code == OpCode::Store) {
       Value *addr = op->operands[1];
       if (addr->kind == ValueKind::OpResult) {
         auto *creator = static_cast<OpResult *>(addr)->creator;
+
         if (stacks.count(static_cast<Op *>(creator))) {
           auto *alloca = static_cast<Op *>(creator);
           stacks[alloca].push(op->operands[0]);
@@ -190,6 +187,7 @@ auto Mem2Reg::rename(
     for (auto *op : succ->insts) {
       if (op->code != OpCode::Phi)
         break;
+
       if (phi2alloca.count(op)) {
         auto *alloca = phi2alloca[op];
         auto &payload = std::get<PhiPayload>(op->payload);
@@ -220,11 +218,14 @@ auto Mem2Reg::cleanup(
       bool remove = false;
       if (alloca_set.count(op)) {
         remove = true;
+
       } else if (op->code == OpCode::Load || op->code == OpCode::Store) {
         Value *addr =
           (op->code == OpCode::Load) ? op->operands[0] : op->operands[1];
+
         if (addr->kind == ValueKind::OpResult) {
           auto *creator = static_cast<OpResult *>(addr)->creator;
+
           if (alloca_set.count(static_cast<Op *>(creator))) {
             remove = true;
           }

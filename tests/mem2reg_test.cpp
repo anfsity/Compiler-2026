@@ -12,7 +12,7 @@ auto test_basic_mem2reg() -> void {
   module.ctx = &ctx;
 
   LinearFunction func;
-  auto entry = std::make_unique<Block>("entry");
+  auto entry = std::make_unique<Block>(0, "entry");
   Block *p_entry = entry.get();
 
   auto i32 = exodus::I32::get();
@@ -82,10 +82,10 @@ auto test_diamond_mem2reg() -> void {
   auto p_i32 = exodus::Ptr::get(i32);
 
   LinearFunction func;
-  auto entry = std::make_unique<Block>("entry");
-  auto then_bb = std::make_unique<Block>("then");
-  auto else_bb = std::make_unique<Block>("else");
-  auto merge = std::make_unique<Block>("merge");
+  auto entry = std::make_unique<Block>(0, "entry");
+  auto then_bb = std::make_unique<Block>(1, "then");
+  auto else_bb = std::make_unique<Block>(2, "else");
+  auto merge = std::make_unique<Block>(3, "merge");
 
   Block *p_entry = entry.get();
   Block *p_then = then_bb.get();
@@ -173,7 +173,7 @@ auto test_mem2reg_after_flattened_creator_update() -> void {
   module.ctx = &ctx;
 
   LinearFunction func;
-  auto entry = std::make_unique<Block>("entry");
+  auto entry = std::make_unique<Block>(0, "entry");
   Block *p_entry = entry.get();
 
   auto i32 = exodus::I32::get();

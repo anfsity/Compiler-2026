@@ -49,13 +49,14 @@ struct Op : OpBase {
 };
 
 struct Block {
+  int id;
   std::string name;
   std::list<Op *> insts;
 
   std::vector<Block *> preds;
   std::vector<Block *> succs;
 
-  Block(std::string n) : name(std::move(n)) {}
+  Block(int _id, std::string n) : id(_id), name(std::move(n)) {}
 };
 
 struct LinearFunction {

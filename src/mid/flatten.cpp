@@ -70,7 +70,8 @@ auto Flattener::convert_op(high_ir::Op *old_op) -> Op * {
 }
 
 auto Flattener::create_block(const std::string &name) -> Block * {
-  auto b = std::make_unique<Block>(name + "_" + std::to_string(b_cnt++));
+  int id = b_cnt++;
+  auto b = std::make_unique<Block>(id, name + "_" + std::to_string(id));
   auto *ptr = b.get();
   cur_func->blocks.push_back(std::move(b));
   return ptr;

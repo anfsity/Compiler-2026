@@ -9,10 +9,10 @@ auto test_diamond() -> void {
   // A -> Exit
   // B -> Exit
   LinearFunction func;
-  auto entry = std::make_unique<Block>("entry");
-  auto a = std::make_unique<Block>("A");
-  auto b = std::make_unique<Block>("B");
-  auto exit = std::make_unique<Block>("exit");
+  auto entry = std::make_unique<Block>(0, "entry");
+  auto a = std::make_unique<Block>(1, "A");
+  auto b = std::make_unique<Block>(2, "B");
+  auto exit = std::make_unique<Block>(3, "exit");
 
   Block *p_entry = entry.get();
   Block *p_a = a.get();
@@ -62,10 +62,10 @@ auto test_loop() -> void {
   // Header -> Body, Exit
   // Body -> Header
   LinearFunction func;
-  auto entry = std::make_unique<Block>("entry");
-  auto header = std::make_unique<Block>("header");
-  auto body = std::make_unique<Block>("body");
-  auto exit = std::make_unique<Block>("exit");
+  auto entry = std::make_unique<Block>(0, "entry");
+  auto header = std::make_unique<Block>(1, "header");
+  auto body = std::make_unique<Block>(2, "body");
+  auto exit = std::make_unique<Block>(3, "exit");
 
   Block *p_entry = entry.get();
   Block *p_header = header.get();
@@ -104,10 +104,10 @@ auto test_unreachable() -> void {
   // Entry -> A
   // Unreachable -> B
   LinearFunction func;
-  auto entry = std::make_unique<Block>("entry");
-  auto a = std::make_unique<Block>("A");
-  auto unreachable = std::make_unique<Block>("unreachable");
-  auto b = std::make_unique<Block>("B");
+  auto entry = std::make_unique<Block>(0, "entry");
+  auto a = std::make_unique<Block>(1, "A");
+  auto unreachable = std::make_unique<Block>(2, "unreachable");
+  auto b = std::make_unique<Block>(3, "B");
 
   Block *p_entry = entry.get();
   Block *p_a = a.get();
