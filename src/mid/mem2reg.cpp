@@ -41,6 +41,7 @@ auto Mem2Reg::run(
   }
 
   MidIRRewriter rewriter;
+  rewriter.set_scope(func);
   rename(func.blocks.front().get(), dom, stacks, rewriter);
   cleanup(func, allocas, rewriter);
 
@@ -164,7 +165,7 @@ auto Mem2Reg::rename(
           auto *alloca = static_cast<Op *>(creator);
           Value *new_val = stacks[alloca].top();
 
-          rewriter.replaceAllUsesWith(op->result, new_val);
+          rewriter.replace_all_uses_with(op->result, new_val);
         }
       }
 

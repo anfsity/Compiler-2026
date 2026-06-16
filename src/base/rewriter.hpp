@@ -8,7 +8,7 @@ namespace exodus::ir {
 
 template <typename OpT>
 struct RewriterBase {
-  auto replaceAllUsesWith(Value *old_val, Value *new_val) -> void;
+  auto replace_all_uses_with(Value *old_val, Value *new_val) -> void;
 
   auto eraseOp(OpT *op) -> void;
 
@@ -22,7 +22,8 @@ protected:
 
 template <typename OpT>
 inline auto
-RewriterBase<OpT>::replaceAllUsesWith(Value *old_val, Value *new_val) -> void {
+RewriterBase<OpT>::replace_all_uses_with(Value *old_val, Value *new_val)
+  -> void {
   if (!old_val || !new_val || old_val == new_val)
     return;
 
