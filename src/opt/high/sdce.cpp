@@ -4,7 +4,44 @@ namespace exodus::high_ir::opt {
 
 SimpleDCE::SimpleDCE(Module * /* m */) {}
 
-auto SimpleDCE::isIntrinsicallyLive(Op *op) -> bool {
+auto SimpleDCE::get_addr_root(Value *v) -> Value * {
+  while (v && v->kind == ValueKind::OpResult) {
+    auto *creator = static_cast<Op *>(static_cast<OpResult *>(v)->creator);
+    if (
+      !creator || creator->code != OpCode::GetPtr || creator->operands.empty()
+    ) {
+      break;
+    }
+    v = creator->operands[0];
+  }
+  return v;
+}
+
+auto SimpleDCE::mark_stores_to(Value *ptr) -> void {
+  Value *root = get_addr_root(ptr);
+  for (auto &[user, _] : parents) {
+    if (
+      user->code == OpCode::Store && get_addr_root(user->operands[1]) == root
+    ) {
+      mark(user);
+    }
+  }
+}
+
+auto SimpleDCE::mark_implicit_get_ptr_stores(Op *op) -> void {
+  if (op->code != OpCode::GetPtr || !op->result || op->operands.empty()) {
+    return;
+  }
+
+  auto plan = ir::analyze_getptr(
+    op->operands[0]->type, op->result->type, op->operands.size() - 1
+  );
+  if (plan.reads_memory) {
+    mark_stores_to(op->operands[0]);
+  }
+}
+
+auto SimpleDCE::is_intrinsically_live(Op *op) -> bool {
   switch (op->code) {
   case OpCode::Ret:
   case OpCode::Call:
@@ -36,21 +73,21 @@ auto SimpleDCE::isIntrinsicallyLive(Op *op) -> bool {
   }
 }
 
-auto SimpleDCE::buildParentMap(Region &r, Op *parent) -> void {
+auto SimpleDCE::build_parent_map(Region &r, Op *parent) -> void {
   for (auto *op : r) {
     parents[op] = parent;
     if (op->code == OpCode::If) {
       auto &p = std::get<IfPayload>(op->payload);
       if (p.then_region)
-        buildParentMap(*p.then_region, op);
+        build_parent_map(*p.then_region, op);
       if (p.else_region)
-        buildParentMap(*p.else_region, op);
+        build_parent_map(*p.else_region, op);
     } else if (op->code == OpCode::While) {
       auto &p = std::get<WhilePayload>(op->payload);
       if (p.cond_region)
-        buildParentMap(*p.cond_region, op);
+        build_parent_map(*p.cond_region, op);
       if (p.loop_region)
-        buildParentMap(*p.loop_region, op);
+        build_parent_map(*p.loop_region, op);
     }
   }
 }
@@ -61,28 +98,28 @@ auto SimpleDCE::mark(Op *op) -> void {
   }
 }
 
-auto SimpleDCE::initialMark(Region &r) -> void {
+auto SimpleDCE::initial_mark(Region &r) -> void {
   for (auto *op : r) {
-    if (isIntrinsicallyLive(op)) {
+    if (is_intrinsically_live(op)) {
       mark(op);
     }
     if (op->code == OpCode::If) {
       auto &p = std::get<IfPayload>(op->payload);
       if (p.then_region)
-        initialMark(*p.then_region);
+        initial_mark(*p.then_region);
       if (p.else_region)
-        initialMark(*p.else_region);
+        initial_mark(*p.else_region);
     } else if (op->code == OpCode::While) {
       auto &p = std::get<WhilePayload>(op->payload);
       if (p.cond_region)
-        initialMark(*p.cond_region);
+        initial_mark(*p.cond_region);
       if (p.loop_region)
-        initialMark(*p.loop_region);
+        initial_mark(*p.loop_region);
     }
   }
 }
 
-auto SimpleDCE::collectDead(Region &r) -> void {
+auto SimpleDCE::collect_dead(Region &r) -> void {
   for (auto *op : r) {
     if (!liveset.count(op)) {
       rewriter.eraseOp(op);
@@ -90,15 +127,15 @@ auto SimpleDCE::collectDead(Region &r) -> void {
     if (op->code == OpCode::If) {
       auto &p = std::get<IfPayload>(op->payload);
       if (p.then_region)
-        collectDead(*p.then_region);
+        collect_dead(*p.then_region);
       if (p.else_region)
-        collectDead(*p.else_region);
+        collect_dead(*p.else_region);
     } else if (op->code == OpCode::While) {
       auto &p = std::get<WhilePayload>(op->payload);
       if (p.cond_region)
-        collectDead(*p.cond_region);
+        collect_dead(*p.cond_region);
       if (p.loop_region)
-        collectDead(*p.loop_region);
+        collect_dead(*p.loop_region);
     }
   }
 }
@@ -113,8 +150,8 @@ auto SimpleDCE::run(Function &f, FunctionAnalysisManager & /* FAM */)
   liveset.clear();
   worklist.clear();
 
-  buildParentMap(f.body);
-  initialMark(f.body);
+  build_parent_map(f.body);
+  initial_mark(f.body);
 
   while (!worklist.empty()) {
     Op *op = worklist.front();
@@ -127,13 +164,11 @@ auto SimpleDCE::run(Function &f, FunctionAnalysisManager & /* FAM */)
     }
 
     if (op->code == OpCode::Load) {
-      Value *ptr = op->operands[0];
-      for (auto *user_base : ptr->users) {
-        auto *user = static_cast<Op *>(user_base);
-        if (user->code == OpCode::Store && user->operands[1] == ptr) {
-          mark(user);
-        }
-      }
+      mark_stores_to(op->operands[0]);
+    }
+
+    if (op->code == OpCode::GetPtr) {
+      mark_implicit_get_ptr_stores(op);
     }
 
     if (auto it = parents.find(op); it != parents.end()) {
@@ -153,7 +188,7 @@ auto SimpleDCE::run(Function &f, FunctionAnalysisManager & /* FAM */)
     }
   }
 
-  collectDead(f.body);
+  collect_dead(f.body);
 
   if (rewriter.empty()) {
     return PreservedAnalysis::all();

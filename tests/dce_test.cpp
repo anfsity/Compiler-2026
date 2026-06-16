@@ -190,6 +190,57 @@ auto main() -> int {
     fmt::print("Test 6 passed: Dead While removed.\n");
   }
 
+  // Test 7: implicit-load getptr keeps the store feeding a pointer slot.
+  {
+    f.body.clear();
+    auto i32 = I32::get();
+    auto arr3 = Array::get(i32, 3);
+    auto arr3_ptr = Ptr::get(arr3);
+    auto arr3_ptr_ptr = Ptr::get(arr3_ptr);
+
+    auto *slot_alloca = ctx.make_op(OpCode::Alloca);
+    slot_alloca->result = ctx.make_value<OpResult>(arr3_ptr_ptr, slot_alloca);
+    f.body.push_back(slot_alloca);
+
+    auto *arg = ctx.make_value<Argument>(arr3_ptr, 0);
+    auto *store = ctx.make_op(OpCode::Store);
+    store->operands = {arg, slot_alloca->result};
+    arg->addUse(store);
+    slot_alloca->result->addUse(store);
+    f.body.push_back(store);
+
+    auto *idx0 = ctx.make_const(i32, 0);
+    auto *getptr = ctx.make_op(OpCode::GetPtr);
+    getptr->operands = {slot_alloca->result, idx0, idx0};
+    slot_alloca->result->addUse(getptr);
+    idx0->addUse(getptr);
+    idx0->addUse(getptr);
+    getptr->result = ctx.make_value<OpResult>(Ptr::get(i32), getptr);
+    f.body.push_back(getptr);
+
+    auto *load = ctx.make_op(OpCode::Load);
+    load->operands = {getptr->result};
+    getptr->result->addUse(load);
+    load->result = ctx.make_value<OpResult>(i32, load);
+    f.body.push_back(load);
+
+    auto *ret = ctx.make_op(OpCode::Ret);
+    ret->operands = {load->result};
+    load->result->addUse(ret);
+    f.body.push_back(ret);
+
+    SimpleDCE dce(nullptr);
+    FunctionAnalysisManager fam;
+    dce.run(f, fam);
+
+    bool kept_store = false;
+    for (auto *op : f.body) {
+      kept_store |= op == store;
+    }
+    assert(kept_store);
+    fmt::print("Test 7 passed: implicit-load getptr keeps store.\n");
+  }
+
   return 0;
 }
 #endif

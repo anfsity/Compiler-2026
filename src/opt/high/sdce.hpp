@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../base/getptr.hpp"
 #include "../../helper/log.hpp"
 #include "../../high/ir.hpp"
 #include "../../high/rewriter.hpp"
@@ -22,12 +23,16 @@ struct SimpleDCE {
 
   SimpleDCE(Module * /* m */);
 
-  static auto isIntrinsicallyLive(Op *op) -> bool;
+  static auto is_intrinsically_live(Op *op) -> bool;
 
-  auto buildParentMap(Region &r, Op *parent = nullptr) -> void;
+  static auto get_addr_root(Value *v) -> Value *;
+  auto mark_stores_to(Value *ptr) -> void;
+  auto mark_implicit_get_ptr_stores(Op *op) -> void;
+
+  auto build_parent_map(Region &r, Op *parent = nullptr) -> void;
   auto mark(Op *op) -> void;
-  auto initialMark(Region &r) -> void;
-  auto collectDead(Region &r) -> void;
+  auto initial_mark(Region &r) -> void;
+  auto collect_dead(Region &r) -> void;
 
   auto run(Function &f, FunctionAnalysisManager & /* FAM */)
     -> PreservedAnalysis;
