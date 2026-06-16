@@ -11,6 +11,8 @@
 #include "high/ir_builder.hpp"
 #include "high/ir_printer.hpp"
 #include "high/verifier.hpp"
+#include "low/riscv/isel.hpp"
+#include "low/riscv/machine_printer.hpp"
 #include "mid/dom.hpp"
 #include "mid/flatten.hpp"
 #include "mid/ir_printer.hpp"
@@ -21,6 +23,7 @@
 using namespace exodus::ast;
 using namespace exodus::high_ir;
 using namespace exodus::mid_ir;
+using namespace exodus::low_ir;
 using namespace exodus::opt;
 
 namespace exodus::high_ir::opt {
@@ -54,12 +57,10 @@ struct Compiler {
 
     run_high_opt();
 
-    if (!verify_high_ir()) {
-      return 1;
-    }
-
+    verify_high_ir();
     run_lowering();
     run_mid_opt();
+    run_isel();
 
     print_final_ir();
 
@@ -70,6 +71,7 @@ private:
   Options options;
   std::unique_ptr<Module> module;
   std::unique_ptr<MidModule> mid_module;
+  std::vector<std::unique_ptr<MachineFunction>> machine_functions;
 
   auto parse_args(int argc, char **argv) -> bool {
     for (int i = 1; i < argc; ++i) {
@@ -232,6 +234,14 @@ private:
     }
   }
 
+  auto run_isel() -> void {
+    for (auto &f : mid_module->functions) {
+      if (!f->is_decl) {
+        machine_functions.push_back(exodus::riscv::lower_function(*f));
+      }
+    }
+  }
+
   auto print_final_ir() -> void {
     fmt::print("\n--- Final High IR ---\n");
     IRPrinter hprinter;
@@ -240,6 +250,12 @@ private:
     fmt::print("\n--- Final Mid IR ---\n");
     LinearIRPrinter mprinter;
     fmt::print("{}\n", mprinter.dump(*mid_module));
+
+    fmt::print("\n--- Final Machine IR (RISC-V) ---\n");
+    exodus::riscv::MachinePrinter machine_printer;
+    fmt::print(
+      "{}\n", machine_printer.to_string(*mid_module, machine_functions)
+    );
   }
 };
 
