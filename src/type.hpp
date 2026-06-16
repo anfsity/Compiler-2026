@@ -36,6 +36,7 @@ struct Type : std::enable_shared_from_this<Type> {
   virtual auto is_func() const -> bool { return kind == Kind::Func; };
 
   virtual auto to_string() const -> std::string = 0;
+  virtual auto byte_size() const -> int = 0;
 
   auto ptr_to() -> std::shared_ptr<Type>;
   auto array_of(int n) -> std::shared_ptr<Type>;
@@ -50,6 +51,7 @@ struct I32 : Type {
   }
 
   auto to_string() const -> std::string override { return "i32"; }
+  auto byte_size() const -> int override { return 4; }
 };
 
 struct Float : Type {
@@ -61,6 +63,7 @@ struct Float : Type {
   }
 
   auto to_string() const -> std::string override { return "f32"; }
+  auto byte_size() const -> int override { return 4; }
 };
 
 struct Void : Type {
@@ -72,6 +75,7 @@ struct Void : Type {
   }
 
   auto to_string() const -> std::string override { return "void"; }
+  auto byte_size() const -> int override { return 0; }
 };
 
 struct Bool : Type {
@@ -83,6 +87,7 @@ struct Bool : Type {
   }
 
   auto to_string() const -> std::string override { return "i1"; }
+  auto byte_size() const -> int override { return 4; }
 };
 
 struct Func : Type {
@@ -115,6 +120,8 @@ struct Func : Type {
     }
     return fmt::format("({}) -> {}", ptrs, ret_type->to_string());
   }
+
+  auto byte_size() const -> int override { return 0; }
 };
 
 struct Ptr : Type {
@@ -136,6 +143,8 @@ struct Ptr : Type {
   auto to_string() const -> std::string override {
     return fmt::format("{}*", target->to_string());
   }
+
+  auto byte_size() const -> int override { return 4; }
 };
 
 struct Array : Type {
@@ -155,6 +164,8 @@ struct Array : Type {
     }
     return res;
   }
+
+  auto byte_size() const -> int override { return len * base->byte_size(); }
 
   static auto get(const std::shared_ptr<Type> &_base, int _len)
     -> std::shared_ptr<Type> {

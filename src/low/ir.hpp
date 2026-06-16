@@ -32,6 +32,9 @@ struct MachineOperand {
   static auto fimm(float val) -> MachineOperand { return {FImm, val}; }
   static auto fi(int idx) -> MachineOperand { return {FrameIdx, idx}; }
   static auto mbb(MachineBasicBlock *b) -> MachineOperand { return {MBB, b}; }
+  static auto global(std::string s) -> MachineOperand {
+    return {Global, std::move(s)};
+  }
   static auto symbol(std::string s) -> MachineOperand { return {Symbol, s}; }
 
   auto is_reg() const -> bool { return kind == Reg; }
@@ -85,21 +88,44 @@ struct MachineFunction {
   std::string name;
   std::list<std::unique_ptr<MachineBasicBlock>> blocks;
 
+  enum class FrameSlotKind : uint8_t {
+    Local,
+    Spill,
+    OutgoingArg,
+    IncomingArg,
+  };
+
   struct FrameSlot {
     int id;
     int size;
     int align;
     int offset;
+    FrameSlotKind kind;
+    int arg_index;
   };
 
   std::vector<FrameSlot> stack_slots;
   int vreg_cnt = 128;
 
   auto new_vreg() -> int { return vreg_cnt++; }
-  auto add_stack_slot(int size, int align = 4) -> int {
+  auto add_stack_slot(
+    int size,
+    int align = 4,
+    FrameSlotKind kind = FrameSlotKind::Local,
+    int arg_index = -1
+  ) -> int {
     int id = static_cast<int>(stack_slots.size());
-    stack_slots.push_back({id, size, align, 0});
+    stack_slots.push_back({id, size, align, 0, kind, arg_index});
     return id;
+  }
+  auto add_spill_slot(int size, int align = 4) -> int {
+    return add_stack_slot(size, align, FrameSlotKind::Spill);
+  }
+  auto add_outgoing_arg_slot(int arg_index, int size, int align = 4) -> int {
+    return add_stack_slot(size, align, FrameSlotKind::OutgoingArg, arg_index);
+  }
+  auto add_incoming_arg_slot(int arg_index, int size, int align = 4) -> int {
+    return add_stack_slot(size, align, FrameSlotKind::IncomingArg, arg_index);
   }
 };
 

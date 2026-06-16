@@ -34,6 +34,7 @@ file(GLOB_RECURSE CORE_SOURCES
     "base/*.cpp"
     "FE/*.cpp"
     "high/*.cpp"
+    "low/*.cpp"
     "mid/*.cpp"
     "opt/*.cpp"
     "helper/*.cpp"
