@@ -10,9 +10,9 @@
 namespace exodus::high_ir {
 
 struct IRRewriter : ir::RewriterBase<Op> {
-  auto replaceOpWithRegion(Op *op, Region &r) -> void;
-  auto replaceOp(Op *old_op, Value *new_val) -> void;
-  auto eraseRegion(Region &r) -> void;
+  auto replace_op_with_region(Op *op, Region &r) -> void;
+  auto replace_op(Op *old_op, Value *new_val) -> void;
+  auto erase_region(Region &r) -> void;
 
   auto finalize(Region &r) -> void;
   auto finalize(Function &f) -> void { finalize(f.body); }

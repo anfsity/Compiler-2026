@@ -166,7 +166,7 @@ auto Inliner::inlineCall(
     load_op->result = m->ctx.make_value<OpResult>(func_type->ret_type, load_op);
 
     IRRewriter rewriter;
-    rewriter.replaceAllUsesWith(call_op->result, load_op->result);
+    rewriter.replace_all_uses_with(call_op->result, load_op->result);
     r.insert(it, cloned_body.begin(), cloned_body.end());
     r.insert(it, load_op);
   } else {

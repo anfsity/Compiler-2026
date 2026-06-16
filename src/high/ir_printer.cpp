@@ -164,6 +164,7 @@ auto IRPrinter::dump(const Op &op) -> std::string {
         }
         return res + "\n";
       },
+
       [&](const WhilePayload &whp) -> std::string {
         std::string res = fmt::format(
           "{}{} {{\n{}{}}} {{\n{}{}}}",
@@ -176,6 +177,7 @@ auto IRPrinter::dump(const Op &op) -> std::string {
         );
         return res + "\n";
       },
+
       [&](const auto &) -> std::string { return prefix + line + "\n"; }
     },
     op.payload

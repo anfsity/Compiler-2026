@@ -2,7 +2,7 @@
 
 namespace exodus::high_ir {
 
-auto IRRewriter::replaceOpWithRegion(Op *op, Region &r) -> void {
+auto IRRewriter::replace_op_with_region(Op *op, Region &r) -> void {
   if (!op)
     return;
 
@@ -15,25 +15,25 @@ auto IRRewriter::replaceOpWithRegion(Op *op, Region &r) -> void {
   to_replace[op] = &r;
 }
 
-auto IRRewriter::replaceOp(Op *old_op, Value *new_val) -> void {
+auto IRRewriter::replace_op(Op *old_op, Value *new_val) -> void {
   if (old_op->result) {
-    replaceAllUsesWith(old_op->result, new_val);
+    replace_all_uses_with(old_op->result, new_val);
   }
   eraseOp(old_op);
 }
 
-auto IRRewriter::eraseRegion(Region &r) -> void {
+auto IRRewriter::erase_region(Region &r) -> void {
   for (auto &op : r) {
     eraseOp(op);
     if (op->code == OpCode::If) {
       auto &p = std::get<IfPayload>(op->payload);
-      eraseRegion(*p.then_region);
+      erase_region(*p.then_region);
       if (p.else_region)
-        eraseRegion(*p.else_region);
+        erase_region(*p.else_region);
     } else if (op->code == OpCode::While) {
       auto &p = std::get<WhilePayload>(op->payload);
-      eraseRegion(*p.cond_region);
-      eraseRegion(*p.loop_region);
+      erase_region(*p.cond_region);
+      erase_region(*p.loop_region);
     }
   }
 }

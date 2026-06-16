@@ -40,17 +40,17 @@ auto CP::visit(Op *op) -> void {
     auto value = std::get<int>(static_cast<Constant *>(op->operands[0])->val);
     auto &p = std::get<IfPayload>(op->payload);
     if (value) {
-      rewriter.replaceOpWithRegion(op, *p.then_region);
+      rewriter.replace_op_with_region(op, *p.then_region);
       if (p.else_region)
-        rewriter.eraseRegion(*p.else_region);
+        rewriter.erase_region(*p.else_region);
       visit(*p.then_region);
 
     } else {
       if (p.else_region) {
-        rewriter.replaceOpWithRegion(op, *p.else_region);
+        rewriter.replace_op_with_region(op, *p.else_region);
         visit(*p.else_region);
       }
-      rewriter.eraseRegion(*p.then_region);
+      rewriter.erase_region(*p.then_region);
     }
     return;
   }
@@ -84,7 +84,7 @@ auto CP::visit(Op *op, OpTag<OpCode::Alloca>) -> void {
 auto CP::visit(Op *op, OpTag<OpCode::Load>) -> void {
   Value *ptr = op->operands[0];
   if (env.count(ptr)) {
-    rewriter.replaceOp(op, env[ptr]);
+    rewriter.replace_op(op, env[ptr]);
     changed = true;
   }
 }
@@ -229,7 +229,7 @@ auto CP::try_fold(Op *op) -> void {
   }
 
   if (res) {
-    rewriter.replaceOp(op, ctx->make_const(op->result->type, *res));
+    rewriter.replace_op(op, ctx->make_const(op->result->type, *res));
     changed = true;
   }
 }
