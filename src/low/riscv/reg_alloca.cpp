@@ -782,7 +782,9 @@ auto ensure_spill_slots(
 ) -> void {
   for (auto &interval : intervals) {
     if (interval.spilled && interval.spill_slot < 0) {
-      interval.spill_slot = function.add_spill_slot(interval.storage_size);
+      auto align = interval.storage_size >= 8 ? 8 : 4;
+      interval.spill_slot =
+        function.add_spill_slot(interval.storage_size, align);
     }
   }
 }
