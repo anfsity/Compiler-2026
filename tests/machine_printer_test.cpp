@@ -1,3 +1,4 @@
+#ifdef EXODUS_UNIT_TEST
 #include "../3rd-party/fmt/core.h"
 #include "../src/low/riscv/isel.hpp"
 #include "../src/low/riscv/machine_printer.hpp"
@@ -10,8 +11,6 @@ using namespace exodus::ir;
 using namespace exodus::low_ir;
 using namespace exodus::mid_ir;
 using namespace exodus::riscv;
-
-#ifdef EXODUS_UNIT_TEST
 
 auto require(bool condition) -> void {
   if (!condition) {

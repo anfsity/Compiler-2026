@@ -1,10 +1,9 @@
+#ifdef EXODUS_UNIT_TEST
 #include "../src/low/riscv/reg_alloca.hpp"
 #include <cstdlib>
 
 using namespace exodus::low_ir;
 using namespace exodus::riscv;
-
-#ifdef EXODUS_UNIT_TEST
 
 auto require(bool condition) -> void {
   if (!condition) {

@@ -1,3 +1,4 @@
+#ifdef EXODUS_UNIT_TEST
 #include "../src/mid/dom.hpp"
 #include "../src/mid/mem2reg.hpp"
 #include <cassert>
@@ -5,8 +6,6 @@
 
 using namespace exodus::mid_ir;
 using namespace exodus::ir;
-
-#ifdef EXODUS_UNIT_TEST
 
 auto test_basic_mem2reg() -> void {
   IRContext ctx;

@@ -1,10 +1,9 @@
+#ifdef EXODUS_UNIT_TEST
 #include "../src/mid/dom.hpp"
 #include <cassert>
 #include <iostream>
 
 using namespace exodus::mid_ir;
-
-#ifdef EXODUS_UNIT_TEST
 
 auto test_diamond() -> void {
   // Entry -> A, B

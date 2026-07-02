@@ -1,3 +1,4 @@
+#ifdef EXODUS_UNIT_TEST
 #include "../src/high/ir.hpp"
 #include "../src/high/ir_printer.hpp"
 #include "../src/mid/flatten.hpp"
@@ -14,8 +15,6 @@
 
 using namespace exodus;
 using namespace exodus::high_ir;
-
-#ifdef EXODUS_UNIT_TEST
 
 namespace {
 auto init(int value) -> InitVal { return InitVal{value}; }

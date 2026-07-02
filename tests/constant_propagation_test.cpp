@@ -1,3 +1,4 @@
+#ifdef EXODUS_UNIT_TEST
 #include "../src/opt/AnalysisManager.hpp"
 #include "../src/opt/high/constant_propagation.hpp"
 #include "../src/type.hpp"
@@ -8,8 +9,6 @@ using namespace exodus;
 using namespace exodus::high_ir;
 using namespace exodus::high_ir::opt;
 using namespace exodus::opt;
-
-#ifdef EXODUS_UNIT_TEST
 
 auto test_mutable_global_load_is_not_folded() -> void {
   Module module;
