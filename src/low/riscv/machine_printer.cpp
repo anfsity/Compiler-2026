@@ -8,16 +8,20 @@
 
 namespace exodus::riscv {
 
+namespace {
+
 using namespace std::string_view_literals;
 using namespace exodus::low_ir;
 
-static auto get_op_name(int op) -> std::string {
+auto get_op_name(int op) -> std::string {
   static const std::unordered_map<int, std::string_view> names = {
     {PHI, "PHI"sv},
     {COPY, "COPY"sv},
     {ADD, "ADD"sv},
+    {ADDW, "ADDW"sv},
     {ADDI, "ADDI"sv},
     {SUB, "SUB"sv},
+    {SUBW, "SUBW"sv},
     {LUI, "LUI"sv},
     {AUIPC, "AUIPC"sv},
     {SLL, "SLL"sv},
@@ -37,11 +41,13 @@ static auto get_op_name(int op) -> std::string {
     {SLTU, "SLTU"sv},
     {SLTIU, "SLTIU"sv},
     {LW, "LW"sv},
+    {LD, "LD"sv},
     {LH, "LH"sv},
     {LB, "LB"sv},
     {LHU, "LHU"sv},
     {LBU, "LBU"sv},
     {SW, "SW"sv},
+    {SD, "SD"sv},
     {SH, "SH"sv},
     {SB, "SB"sv},
     {BEQ, "BEQ"sv},
@@ -53,12 +59,15 @@ static auto get_op_name(int op) -> std::string {
     {JAL, "JAL"sv},
     {JALR, "JALR"sv},
     {MUL, "MUL"sv},
+    {MULW, "MULW"sv},
     {MULH, "MULH"sv},
     {MULHSU, "MULHSU"sv},
     {MULHU, "MULHU"sv},
     {DIV, "DIV"sv},
+    {DIVW, "DIVW"sv},
     {DIVU, "DIVU"sv},
     {REM, "REM"sv},
+    {REMW, "REMW"sv},
     {REMU, "REMU"sv},
     {FLW, "FLW"sv},
     {FSW, "FSW"sv},
@@ -91,11 +100,11 @@ static auto get_op_name(int op) -> std::string {
   return "OP_" + std::to_string(op);
 }
 
-static auto block_label(const MachineBasicBlock &mbb) -> std::string {
+auto block_label(const MachineBasicBlock &mbb) -> std::string {
   return mbb.name.empty() ? "L" + std::to_string(mbb.id) : mbb.name;
 }
 
-static auto print_operand(const MachineOperand &mo) -> std::string {
+auto print_operand(const MachineOperand &mo) -> std::string {
   switch (mo.kind) {
   case MachineOperand::Reg: {
     int id = mo.get_reg();
@@ -119,7 +128,7 @@ static auto print_operand(const MachineOperand &mo) -> std::string {
   return "?";
 }
 
-static auto print_inst(const MachineInst &mi) -> std::string {
+auto print_inst(const MachineInst &mi) -> std::string {
   std::vector<std::string> defs, uses;
   for (const auto &mo : mi.operands) {
     if (mo.is_def()) {
@@ -141,7 +150,7 @@ static auto print_inst(const MachineInst &mi) -> std::string {
   return line;
 }
 
-static auto print_block(const MachineBasicBlock &mbb) -> std::string {
+auto print_block(const MachineBasicBlock &mbb) -> std::string {
   std::string res = fmt::format("{}:", block_label(mbb));
 
   if (!mbb.preds.empty() || !mbb.succs.empty()) {
@@ -178,6 +187,8 @@ static auto frame_slot_kind_name(MachineFunction::FrameSlotKind kind)
   }
   return "unknown"sv;
 }
+
+} // namespace
 
 auto MachinePrinter::to_string(
   const mid_ir::MidModule &module,

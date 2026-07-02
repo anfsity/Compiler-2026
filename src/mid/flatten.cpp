@@ -1,7 +1,7 @@
 #include "flatten.hpp"
 
 namespace exodus::mid_ir {
-
+namespace {
 auto convert_opcode(high_ir::OpCode old_code) -> OpCode {
   switch (old_code) {
     // clang-format off
@@ -48,6 +48,8 @@ auto convert_opcode(high_ir::OpCode old_code) -> OpCode {
   assert(false && "unsupported high IR opcode in mid IR flattener");
   return OpCode::Ret;
 }
+
+} // namespace
 
 auto Flattener::convert_op(high_ir::Op *old_op) -> Op * {
   auto *new_op = new_module->make_op(convert_opcode(old_op->code));
@@ -137,6 +139,14 @@ auto Flattener::visit(const high_ir::Region &region) -> void {
     // 没有多余分支，没有不可达指令，最小化嵌套」 这样，在 flatten
     // 过程中，就不需要考虑各种特例，为了构建 CFG 而弄得乱七八糟
     visit(op);
+    if (
+      !cur_block->insts.empty() &&
+      (cur_block->insts.back()->code == OpCode::Ret ||
+       cur_block->insts.back()->code == OpCode::Jump ||
+       cur_block->insts.back()->code == OpCode::Branch)
+    ) {
+      break;
+    }
   }
 }
 

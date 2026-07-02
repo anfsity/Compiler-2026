@@ -474,8 +474,15 @@ auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
           args.emplace_back(arg_val);
         }
 
+        auto func_name = call->name;
+        if (call->name == "starttime" || call->name == "stoptime") {
+          func_name =
+            call->name == "starttime" ? "_sysy_starttime" : "_sysy_stoptime";
+          args.emplace_back(ctx->make_const(I32::get(), call->line));
+        }
+
         Op *op = emit(OpCode::Call, func_type->ret_type, std::move(args));
-        op->payload = CallPayload{call->name};
+        op->payload = CallPayload{func_name};
         return op->result;
       }
     },

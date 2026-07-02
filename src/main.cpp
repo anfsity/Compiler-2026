@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <string>
@@ -11,8 +12,10 @@
 #include "high/ir_builder.hpp"
 #include "high/ir_printer.hpp"
 #include "high/verifier.hpp"
+#include "low/riscv/asm_printer.hpp"
 #include "low/riscv/isel.hpp"
 #include "low/riscv/machine_printer.hpp"
+#include "low/riscv/reg_alloca.hpp"
 #include "mid/dom.hpp"
 #include "mid/flatten.hpp"
 #include "mid/ir_printer.hpp"
@@ -41,6 +44,8 @@ struct Compiler {
     std::string input_file;
     std::vector<std::string> pass_names;
     bool print_ir_after_all = false;
+    bool dump_ra = false;
+    bool emit_ra = false;
   };
 
   auto run(int argc, char **argv) -> int {
@@ -80,6 +85,10 @@ private:
         options.pass_names.push_back(arg.substr(2));
       } else if (arg == "-print-ir-after-all") {
         options.print_ir_after_all = true;
+      } else if (arg == "-dump-ra") {
+        options.dump_ra = true;
+      } else if (arg == "-emit-ra") {
+        options.emit_ra = true;
       } else {
         options.input_file = arg;
       }
@@ -88,7 +97,8 @@ private:
     if (options.input_file.empty()) {
       fmt::print(
         stderr,
-        "Usage: {} <input_file> [-Opass1 -Opass2 ...] [-print-ir-after-all]\n",
+        "Usage: {} <input_file> [-Opass1 -Opass2 ...] [-print-ir-after-all] "
+        "[-dump-ra] [-emit-ra]\n",
         argv[0]
       );
       return false;
@@ -237,7 +247,9 @@ private:
   auto run_isel() -> void {
     for (auto &f : mid_module->functions) {
       if (!f->is_decl) {
-        machine_functions.push_back(exodus::riscv::lower_function(*f));
+        auto mf = exodus::riscv::lower_function(*f);
+        exodus::riscv::run_ra(*mf, options.dump_ra, true);
+        machine_functions.push_back(std::move(mf));
       }
     }
   }
@@ -251,11 +263,21 @@ private:
     LinearIRPrinter mprinter;
     fmt::print("{}\n", mprinter.dump(*mid_module));
 
-    fmt::print("\n--- Final Machine IR (RISC-V) ---\n");
-    exodus::riscv::MachinePrinter machine_printer;
-    fmt::print(
-      "{}\n", machine_printer.to_string(*mid_module, machine_functions)
-    );
+    if (options.emit_ra || options.dump_ra) {
+      fmt::print("\n--- Final Machine IR (RISC-V) ---\n");
+      exodus::riscv::MachinePrinter machine_printer;
+      fmt::print(
+        "{}\n", machine_printer.to_string(*mid_module, machine_functions)
+      );
+    }
+
+    fmt::print("\n--- Final RISC-V Assembly ---\n");
+    exodus::riscv::AsmPrinter asm_printer;
+    auto fin_asm = asm_printer.to_string(*mid_module, machine_functions);
+    fmt::print("{}\n", fin_asm);
+
+    std::ofstream out("./output/output.s");
+    out << fin_asm;
   }
 };
 

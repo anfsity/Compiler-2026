@@ -60,6 +60,10 @@ auto float_bits(float value) -> int {
   return bits;
 }
 
+auto storage_size(const std::shared_ptr<Type> &type) -> int {
+  return type->is_ptr() ? 8 : type->byte_size();
+}
+
 auto materialize_int_constant(LoweringContext &ctx, int value, Seq &seq)
   -> int {
   auto reg = ctx.function->new_vreg();
@@ -81,7 +85,6 @@ auto materialize_global_addr(LoweringContext &ctx, GlobalAddr *global, Seq &seq)
   seq.emit(LA)
     .add_reg(reg, true, false)
     .add_operand(low_ir::MachineOperand::symbol(global->name));
-  ctx.value_regs[global] = reg;
   return reg;
 }
 
@@ -95,9 +98,6 @@ auto use_reg(LoweringContext &ctx, Value *value, Seq &seq) -> int {
   }
 
   if (value->kind == ValueKind::GlobalVar) {
-    if (auto it = ctx.value_regs.find(value); it != ctx.value_regs.end()) {
-      return it->second;
-    }
     return materialize_global_addr(ctx, static_cast<GlobalAddr *>(value), seq);
   }
 
@@ -111,15 +111,15 @@ auto use_reg(LoweringContext &ctx, Value *value, Seq &seq) -> int {
 auto select_binary_opcode(mid_ir::OpCode code) -> int {
   switch (code) {
   case mid_ir::OpCode::Add:
-    return ADD;
+    return ADDW;
   case mid_ir::OpCode::Sub:
-    return SUB;
+    return SUBW;
   case mid_ir::OpCode::Mul:
-    return MUL;
+    return MULW;
   case mid_ir::OpCode::Div:
-    return DIV;
+    return DIVW;
   case mid_ir::OpCode::Mod:
-    return REM;
+    return REMW;
   case mid_ir::OpCode::And:
     return AND;
   case mid_ir::OpCode::Or:
@@ -244,7 +244,7 @@ auto select_alloca(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   Seq seq;
   auto dst = def_reg(ctx, op.result);
   auto ptr_type = std::static_pointer_cast<Ptr>(op.result->type);
-  auto slot = ctx.function->add_stack_slot(ptr_type->target->byte_size());
+  auto slot = ctx.function->add_stack_slot(storage_size(ptr_type->target));
   seq.emit(ADDI).add_reg(dst, true, false).add_reg(SP).add_fi(slot);
   return seq.take();
 }
@@ -253,7 +253,9 @@ auto select_load(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   Seq seq;
   auto dst = def_reg(ctx, op.result);
   auto addr = use_reg(ctx, op.operands[0], seq);
-  auto opcode = op.result->type->is_f32() ? FLW : LW;
+  auto opcode = op.result->type->is_f32()   ? FLW
+                : op.result->type->is_ptr() ? LD
+                                            : LW;
   seq.emit(opcode).add_reg(dst, true, false).add_reg(addr).add_imm(0);
   return seq.take();
 }
@@ -262,7 +264,9 @@ auto select_store(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   Seq seq;
   auto value = use_reg(ctx, op.operands[0], seq);
   auto addr = use_reg(ctx, op.operands[1], seq);
-  auto opcode = op.operands[0]->type->is_f32() ? FSW : SW;
+  auto opcode = op.operands[0]->type->is_f32()   ? FSW
+                : op.operands[0]->type->is_ptr() ? SD
+                                                 : SW;
   seq.emit(opcode).add_reg(value).add_reg(addr).add_imm(0);
   return seq.take();
 }
@@ -291,7 +295,7 @@ auto select_getptr(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   for (const auto &step : plan.steps) {
     if (step.kind == ir::GetPtrStep::Kind::ImplicitLoad) {
       auto loaded = ctx.function->new_vreg();
-      seq.emit(LW).add_reg(loaded, true, false).add_reg(cur).add_imm(0);
+      seq.emit(LD).add_reg(loaded, true, false).add_reg(cur).add_imm(0);
       cur = loaded;
       continue;
     }
@@ -304,7 +308,7 @@ auto select_getptr(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
       step.scale > 0 && (step.scale & (step.scale - 1)) == 0 &&
       step.scale <= (1 << 10)
     ) {
-      auto shift = 0;
+      int shift = 0;
       for (auto size = step.scale; size > 1; size >>= 1) {
         ++shift;
       }
@@ -341,7 +345,7 @@ auto select_call(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
           .add_reg(src);
       } else {
         auto slot = ctx.function->add_outgoing_arg_slot(
-          static_cast<int>(arg_index), operand->type->byte_size()
+          static_cast<int>(arg_index), 8, 8
         );
         seq.emit(FSW).add_reg(src).add_fi(slot).add_imm(0);
       }
@@ -353,9 +357,12 @@ auto select_call(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
           .add_reg(src);
       } else {
         auto slot = ctx.function->add_outgoing_arg_slot(
-          static_cast<int>(arg_index), operand->type->byte_size()
+          static_cast<int>(arg_index), 8, 8
         );
-        seq.emit(SW).add_reg(src).add_fi(slot).add_imm(0);
+        seq.emit(operand->type->is_ptr() ? SD : SW)
+          .add_reg(src)
+          .add_fi(slot)
+          .add_imm(0);
       }
       ++int_arg;
     }
@@ -478,7 +485,7 @@ auto bind_arguments(LoweringContext &ctx, const mid_ir::LinearFunction &f)
           .add_reg(arg_reg_for_type(arg->type, float_arg));
       } else {
         auto slot = ctx.function->add_incoming_arg_slot(
-          static_cast<int>(arg_index), arg->type->byte_size()
+          static_cast<int>(arg_index), 8, 8
         );
         seq.emit(FLW).add_reg(dst, true, false).add_fi(slot).add_imm(0);
       }
@@ -490,9 +497,12 @@ auto bind_arguments(LoweringContext &ctx, const mid_ir::LinearFunction &f)
           .add_reg(arg_reg_for_type(arg->type, int_arg));
       } else {
         auto slot = ctx.function->add_incoming_arg_slot(
-          static_cast<int>(arg_index), arg->type->byte_size()
+          static_cast<int>(arg_index), 8, 8
         );
-        seq.emit(LW).add_reg(dst, true, false).add_fi(slot).add_imm(0);
+        seq.emit(arg->type->is_ptr() ? LD : LW)
+          .add_reg(dst, true, false)
+          .add_fi(slot)
+          .add_imm(0);
       }
       ++int_arg;
     }

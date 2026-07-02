@@ -132,14 +132,15 @@ enum Opcode : uint16_t {
   SLL, SLLI, SRL, SRLI, SRA, SRAI,
   AND, ANDI, OR, ORI, XOR, XORI,
   SLT, SLTI, SLTU, SLTIU,
-  LW, LH, LB, LHU, LBU,
-  SW, SH, SB,
+  LW, LH, LB, LHU, LBU, LD,
+  SW, SH, SB, SD,
   BEQ, BNE, BLT, BGE, BLTU, BGEU,
   JAL, JALR,
 
-  // [RV32M 乘除法] 256-383
+  // [RV64 word / RV32M 乘除法] 256-383
   MUL = 256, MULH, MULHSU, MULHU,
   DIV, DIVU, REM, REMU,
+  ADDW, SUBW, MULW, DIVW, REMW,
 
   // [RV32F 单精度浮点] 384-511
   FLW = 384, FSW,
