@@ -42,6 +42,7 @@ extern int yyparse(CompUnitAST &ast);
 struct Compiler {
   struct Options {
     std::string input_file;
+    std::string output_file;
     std::vector<std::string> pass_names;
     bool print_ir_after_all = false;
     bool dump_ra = false;
@@ -67,7 +68,9 @@ struct Compiler {
     run_mid_opt();
     run_isel();
 
-    print_final_ir();
+    if (!print_final_ir()) {
+      return 1;
+    }
 
     return 0;
   }
@@ -81,7 +84,17 @@ private:
   auto parse_args(int argc, char **argv) -> bool {
     for (int i = 1; i < argc; ++i) {
       std::string arg = argv[i];
-      if (arg.size() > 2 && arg.substr(0, 2) == "-O") {
+      if (arg == "-S") {
+        // Assembly output is the only supported output mode.
+      } else if (arg == "-o") {
+        if (i + 1 >= argc) {
+          fmt::print(stderr, "Error: -o requires an output file\n");
+          return false;
+        }
+        options.output_file = argv[++i];
+      } else if (arg == "-O1") {
+        // Contest optimization mode uses the existing default pipeline.
+      } else if (arg.size() > 2 && arg.substr(0, 2) == "-O") {
         options.pass_names.push_back(arg.substr(2));
       } else if (arg == "-print-ir-after-all") {
         options.print_ir_after_all = true;
@@ -97,8 +110,8 @@ private:
     if (options.input_file.empty()) {
       fmt::print(
         stderr,
-        "Usage: {} <input_file> [-Opass1 -Opass2 ...] [-print-ir-after-all] "
-        "[-dump-ra] [-emit-ra]\n",
+        "Usage: {} <input_file> [-S] [-o <output_file>] [-O1] "
+        "[-Opass1 -Opass2 ...] [-print-ir-after-all] [-dump-ra] [-emit-ra]\n",
         argv[0]
       );
       return false;
@@ -254,30 +267,24 @@ private:
     }
   }
 
-  auto print_final_ir() -> void {
-    fmt::print("\n--- Final High IR ---\n");
-    IRPrinter hprinter;
-    fmt::print("{}\n", hprinter.dump(*module));
-
-    fmt::print("\n--- Final Mid IR ---\n");
-    LinearIRPrinter mprinter;
-    fmt::print("{}\n", mprinter.dump(*mid_module));
-
-    if (options.emit_ra || options.dump_ra) {
-      fmt::print("\n--- Final Machine IR (RISC-V) ---\n");
-      exodus::riscv::MachinePrinter machine_printer;
-      fmt::print(
-        "{}\n", machine_printer.to_string(*mid_module, machine_functions)
-      );
-    }
-
-    fmt::print("\n--- Final RISC-V Assembly ---\n");
+  auto print_final_ir() -> bool {
     exodus::riscv::AsmPrinter asm_printer;
     auto fin_asm = asm_printer.to_string(*mid_module, machine_functions);
-    fmt::print("{}\n", fin_asm);
 
-    std::ofstream out("./output/output.s");
-    out << fin_asm;
+    if (!options.output_file.empty()) {
+      std::ofstream out(options.output_file);
+      if (!out) {
+        fmt::print(
+          stderr, "Error: Could not open output file {}\n", options.output_file
+        );
+        return false;
+      }
+      out << fin_asm << '\n';
+      return true;
+    }
+
+    fmt::print("{}\n", fin_asm);
+    return true;
   }
 };
 
