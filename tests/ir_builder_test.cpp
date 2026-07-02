@@ -15,6 +15,8 @@
 using namespace exodus;
 using namespace exodus::high_ir;
 
+#ifdef EXODUS_UNIT_TEST
+
 namespace {
 
 // --- AST Helpers ---
@@ -260,7 +262,6 @@ auto test_complex_initializers() -> std::string {
 
 } // namespace
 
-#ifdef EXODUS_UNIT_TEST
 auto main() -> int {
   {
     const std::string actual = test_array_and_folding();

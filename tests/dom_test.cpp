@@ -4,6 +4,8 @@
 
 using namespace exodus::mid_ir;
 
+#ifdef EXODUS_UNIT_TEST
+
 auto test_diamond() -> void {
   // Entry -> A, B
   // A -> Exit
@@ -138,7 +140,6 @@ auto test_unreachable() -> void {
   std::cout << "test_unreachable passed!\n";
 }
 
-#ifdef EXODUS_UNIT_TEST
 auto main() -> int {
   test_diamond();
   test_loop();

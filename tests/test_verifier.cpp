@@ -13,6 +13,8 @@
 using namespace exodus;
 using namespace exodus::high_ir;
 
+#ifdef EXODUS_UNIT_TEST
+
 namespace {
 
 auto make_function(
@@ -644,7 +646,6 @@ auto test_invalid_call() -> bool {
 
 } // namespace
 
-#ifdef EXODUS_UNIT_TEST
 auto main() -> int {
   auto run = [](const char *name, bool ok) -> int {
     if (!ok) {

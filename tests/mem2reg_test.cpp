@@ -6,6 +6,8 @@
 using namespace exodus::mid_ir;
 using namespace exodus::ir;
 
+#ifdef EXODUS_UNIT_TEST
+
 auto test_basic_mem2reg() -> void {
   IRContext ctx;
   MidModule module;
@@ -225,7 +227,6 @@ auto test_mem2reg_after_flattened_creator_update() -> void {
   std::cout << "test_mem2reg_after_flattened_creator_update passed!\n";
 }
 
-#ifdef EXODUS_UNIT_TEST
 int main() {
   test_basic_mem2reg();
   test_diamond_mem2reg();

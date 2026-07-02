@@ -8,6 +8,8 @@ using namespace exodus::low_ir;
 using namespace exodus::mid_ir;
 using namespace exodus::riscv;
 
+#ifdef EXODUS_UNIT_TEST
+
 auto require(bool condition) -> void {
   if (!condition) {
     std::abort();
@@ -444,7 +446,6 @@ auto test_select_array_parameter_slot_preserves_stride() -> void {
   std::cout << "test_select_array_parameter_slot_preserves_stride passed!\n";
 }
 
-#ifdef EXODUS_UNIT_TEST
 int main() {
   test_select_add_and_ret();
   test_select_multidim_getptr_stride();

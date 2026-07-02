@@ -15,6 +15,8 @@
 using namespace exodus;
 using namespace exodus::high_ir;
 
+#ifdef EXODUS_UNIT_TEST
+
 namespace {
 auto init(int value) -> InitVal { return InitVal{value}; }
 auto init(float value) -> InitVal { return InitVal{value}; }
@@ -223,7 +225,6 @@ auto make_mid_call_module() -> Module {
 
 } // namespace
 
-#ifdef EXODUS_UNIT_TEST
 auto main() -> int {
   auto module = make_module();
   IRPrinter printer;
