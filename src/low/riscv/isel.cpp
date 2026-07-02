@@ -64,6 +64,14 @@ auto storage_size(const std::shared_ptr<Type> &type) -> int {
   return type->is_ptr() ? 8 : type->byte_size();
 }
 
+auto storage_align(const std::shared_ptr<Type> &type) -> int {
+  if (type->is_ptr())
+    return 8;
+  if (type->is_array())
+    return storage_align(static_cast<Array *>(type.get())->base);
+  return 4;
+}
+
 auto materialize_int_constant(LoweringContext &ctx, int value, Seq &seq)
   -> int {
   auto reg = ctx.function->new_vreg();
@@ -244,7 +252,9 @@ auto select_alloca(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   Seq seq;
   auto dst = def_reg(ctx, op.result);
   auto ptr_type = std::static_pointer_cast<Ptr>(op.result->type);
-  auto slot = ctx.function->add_stack_slot(storage_size(ptr_type->target));
+  auto slot = ctx.function->add_stack_slot(
+    storage_size(ptr_type->target), storage_align(ptr_type->target)
+  );
   seq.emit(ADDI).add_reg(dst, true, false).add_reg(SP).add_fi(slot);
   return seq.take();
 }
