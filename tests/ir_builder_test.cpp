@@ -1,3 +1,4 @@
+#ifdef EXODUS_UNIT_TEST
 #include "../src/high/ast.hpp"
 #include "../src/high/ast_base.hpp"
 #include "../src/high/ir.hpp"
@@ -14,8 +15,6 @@
 
 using namespace exodus;
 using namespace exodus::high_ir;
-
-#ifdef EXODUS_UNIT_TEST
 
 namespace {
 

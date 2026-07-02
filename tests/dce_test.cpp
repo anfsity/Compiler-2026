@@ -1,8 +1,9 @@
+#ifdef EXODUS_UNIT_TEST
+#include "../3rd-party/fmt/base.h" // for print
 #include "../src/high/ir.hpp"
 #include "../src/opt/AnalysisManager.hpp" // for FunctionAnalysisManager
 #include "../src/opt/high/sdce.hpp"
 #include "../src/type.hpp" // for I32, Bool, Type
-#include "fmt/base.h"      // for print
 #include <cassert>
 #include <list>     // for list, _List_iterator
 #include <memory>   // for shared_ptr, unique_ptr, make...
@@ -17,7 +18,6 @@ using namespace exodus::high_ir;
 using namespace exodus::high_ir::opt;
 using namespace exodus::opt;
 
-#ifdef EXODUS_UNIT_TEST
 auto main() -> int {
   high_ir::IRContext ctx;
   Function f;

@@ -1,3 +1,4 @@
+#ifdef EXODUS_UNIT_TEST
 #include "../src/low/riscv/isel.hpp"
 #include <cstdlib>
 #include <iostream>
@@ -7,8 +8,6 @@ using namespace exodus::ir;
 using namespace exodus::low_ir;
 using namespace exodus::mid_ir;
 using namespace exodus::riscv;
-
-#ifdef EXODUS_UNIT_TEST
 
 auto require(bool condition) -> void {
   if (!condition) {
