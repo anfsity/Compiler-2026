@@ -13,7 +13,7 @@ auto CP::run(Function &f, FunctionAnalysisManager & /* FAM */)
   changed = false;
 
   for (auto &g : m->globals) {
-    if (!g->is_const && (g->type->is_i32() || g->type->is_f32())) {
+    if (g->is_const && (g->type->is_i32() || g->type->is_f32())) {
       safe_globals.insert(g->addr);
       if (g->addr) {
         if (
