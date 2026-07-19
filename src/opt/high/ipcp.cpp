@@ -41,34 +41,34 @@ auto IPCP::run(Module &, ModuleAnalysisManager &) -> PreservedAnalysis {
   IRRewriter rewriter;
   bool changed = false;
 
-  for (auto &function_ptr : module->functions) {
-    Function *function = function_ptr.get();
+  for (auto &fptr : module->functions) {
+    Function *function = fptr.get();
     if (function->is_decl || call_graph.isRecursive(function))
       continue;
     auto sites_it = call_sites.find(function->name);
     if (sites_it == call_sites.end() || sites_it->second.empty())
       continue;
 
-    for (size_t arg_index = 0; arg_index < function->args.size(); ++arg_index) {
+    for (size_t i = 0; i < function->args.size(); ++i) {
       Value *constant = nullptr;
       bool known = true;
       for (auto *call : sites_it->second) {
         if (
-          arg_index >= call->operands.size() ||
-          call->operands[arg_index]->kind != ValueKind::Constant
+          i >= call->operands.size() ||
+          call->operands[i]->kind != ValueKind::Constant
         ) {
           known = false;
           break;
         }
         if (!constant)
-          constant = call->operands[arg_index];
-        else if (!same_constant(constant, call->operands[arg_index])) {
+          constant = call->operands[i];
+        else if (!same_constant(constant, call->operands[i])) {
           known = false;
           break;
         }
       }
-      if (known && constant && !function->args[arg_index]->users.empty()) {
-        rewriter.replace_all_uses_with(function->args[arg_index], constant);
+      if (known && constant && !function->args[i]->users.empty()) {
+        rewriter.replace_all_uses_with(function->args[i], constant);
         changed = true;
       }
     }
