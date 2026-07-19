@@ -242,7 +242,7 @@ private:
       lfpm.set_after_pass_callback(instrumentation);
       for (auto &f : mid_module->functions) {
         if (!f->is_decl) {
-          lfpm.run(*f, lfam);
+          lfpm.run_to_fixed_point(*f, lfam);
         }
       }
     } else {
