@@ -97,7 +97,6 @@ auto operand_storage_size(const low_ir::MachineInst &inst, size_t index)
     ) {
       return 8;
     }
-    return 4;
   default:
     return 4;
   }
@@ -274,6 +273,7 @@ auto compute_liveness(low_ir::MachineFunction &function) -> LivenessInfo {
     liveness.live_out[mbb];
   }
 
+  // simple dce
   bool changed = true;
   while (changed) {
     changed = false;
@@ -317,6 +317,7 @@ auto build_intervals(low_ir::MachineFunction &function)
   auto layout = compute_block_layout(function);
   auto liveness = compute_liveness(function);
 
+  // 逆序遍历
   for (const auto &block_layout : layout) {
     auto live = liveness.live_out[block_layout.block];
     auto pos = block_layout.end;
@@ -356,7 +357,11 @@ auto build_intervals(low_ir::MachineFunction &function)
         );
         auto operand_pos =
           it->opcode == PHI && operand.is_def() ? block_layout.start : pos;
-        append_segment(interval, operand_pos);
+        if (it->opcode == PHI && operand.is_def()) {
+          append_segment(interval, block_layout.start, pos + 1);
+        } else {
+          append_segment(interval, operand_pos);
+        }
         if (operand.is_def()) {
           interval.def_positions.push_back(operand_pos);
           defs.push_back(reg);
@@ -376,6 +381,7 @@ auto build_intervals(low_ir::MachineFunction &function)
     }
   }
 
+  // 类型，大小传播
   bool changed = true;
   while (changed) {
     changed = false;
@@ -481,6 +487,7 @@ auto build_intervals(low_ir::MachineFunction &function)
     }
   }
 
+  // 合并区间
   std::vector<LiveInterval> intervals;
   intervals.reserve(by_reg.size());
   for (auto &[_, interval] : by_reg) {
@@ -615,59 +622,70 @@ auto choose_split_point(const LiveInterval &interval) -> SplitPoint {
 }
 
 auto plan_split(const LiveInterval &interval) -> SplitPlan {
-  (void)interval;
-  return {};
+  auto point = choose_split_point(interval);
+  if (
+    interval.segments.size() < 2 ||
+    point.pos <= interval.segments.front().end ||
+    point.pos >= interval_end(interval)
+  ) {
+    return {};
+  }
+
+  return {true, point};
 }
 
 auto split_interval(const LiveInterval &interval) -> std::vector<LiveInterval> {
-  auto split_plan = plan_split(interval);
-  if (!split_plan.should_split)
-    return {interval};
-
-  LiveInterval left = interval;
-  LiveInterval right = interval;
-  left.segments.clear();
-  left.def_positions.clear();
-  left.use_positions.clear();
-  right.segments.clear();
-  right.def_positions.clear();
-  right.use_positions.clear();
-
-  for (auto segment : interval.segments) {
-    if (segment.end <= split_plan.point.pos) {
-      left.segments.push_back(segment);
-    } else if (segment.start >= split_plan.point.pos) {
-      right.segments.push_back(segment);
-    } else {
-      left.segments.push_back({segment.start, split_plan.point.pos});
-      right.segments.push_back({split_plan.point.pos, segment.end});
-    }
-  }
-
-  for (auto pos : interval.def_positions) {
-    if (pos < split_plan.point.pos) {
-      left.def_positions.push_back(pos);
-    } else {
-      right.def_positions.push_back(pos);
-    }
-  }
-  for (auto pos : interval.use_positions) {
-    if (pos < split_plan.point.pos) {
-      left.use_positions.push_back(pos);
-    } else {
-      right.use_positions.push_back(pos);
-    }
-  }
-
   std::vector<LiveInterval> pieces;
-  if (!left.segments.empty()) {
-    pieces.push_back(std::move(left));
+  std::vector<LiveInterval> pending{interval};
+  while (!pending.empty()) {
+    auto current = std::move(pending.back());
+    pending.pop_back();
+
+    auto split_plan = plan_split(current);
+    if (!split_plan.should_split) {
+      current.split_plan = {};
+      pieces.push_back(std::move(current));
+      continue;
+    }
+
+    LiveInterval left = current;
+    LiveInterval right = current;
+    left.segments.clear();
+    left.def_positions.clear();
+    left.use_positions.clear();
+    right.segments.clear();
+    right.def_positions.clear();
+    right.use_positions.clear();
+
+    for (auto segment : current.segments) {
+      if (segment.end <= split_plan.point.pos) {
+        left.segments.push_back(segment);
+      } else if (segment.start >= split_plan.point.pos) {
+        right.segments.push_back(segment);
+      } else {
+        left.segments.push_back({segment.start, split_plan.point.pos});
+        right.segments.push_back({split_plan.point.pos, segment.end});
+      }
+    }
+
+    for (auto pos : current.def_positions) {
+      (pos < split_plan.point.pos ? left.def_positions : right.def_positions)
+        .push_back(pos);
+    }
+    for (auto pos : current.use_positions) {
+      (pos < split_plan.point.pos ? left.use_positions : right.use_positions)
+        .push_back(pos);
+    }
+
+    if (!right.segments.empty()) {
+      pending.push_back(std::move(right));
+    }
+    if (!left.segments.empty()) {
+      pending.push_back(std::move(left));
+    }
   }
-  if (!right.segments.empty()) {
-    pieces.push_back(std::move(right));
-  }
-  return pieces.empty() ? std::vector<LiveInterval>{interval}
-                        : std::move(pieces);
+
+  return pieces.empty() ? std::vector<LiveInterval>{interval} : pieces;
 }
 
 auto ensure_spill_slots(
@@ -780,12 +798,24 @@ auto apply_assignments(
 auto ensure_spill_slots(
   low_ir::MachineFunction &function, std::vector<LiveInterval> &intervals
 ) -> void {
+  std::unordered_map<int, int> slot_by_vreg;
   for (auto &interval : intervals) {
-    if (interval.spilled && interval.spill_slot < 0) {
+    if (!interval.spilled)
+      continue;
+
+    if (
+      auto found = slot_by_vreg.find(interval.vreg); found != slot_by_vreg.end()
+    ) {
+      interval.spill_slot = found->second;
+      continue;
+    }
+
+    if (interval.spill_slot < 0) {
       auto align = interval.storage_size >= 8 ? 8 : 4;
       interval.spill_slot =
         function.add_spill_slot(interval.storage_size, align);
     }
+    slot_by_vreg[interval.vreg] = interval.spill_slot;
   }
 }
 
@@ -1162,6 +1192,7 @@ auto collect_ssa_data_flow_moves(
   low_ir::MachineFunction &function, std::vector<LiveInterval> &intervals
 ) -> std::vector<EdgeMoves> {
   auto layout = compute_block_layout(function);
+  auto liveness = compute_liveness(function);
   std::unordered_map<low_ir::MachineBasicBlock *, BlockLayout> by_block;
   for (auto block_layout : layout) {
     by_block[block_layout.block] = block_layout;
@@ -1183,6 +1214,33 @@ auto collect_ssa_data_flow_moves(
     }
     found->moves.push_back(move);
   };
+
+  for (auto &block : function.blocks) {
+    auto from_layout = by_block[block.get()];
+    auto src_pos = from_layout.end > from_layout.start ? from_layout.end - 1
+                                                       : from_layout.start;
+    for (auto *succ : block->succs) {
+      auto to_layout = by_block[succ];
+      std::vector<int> live_across;
+      for (auto vreg : liveness.live_out[block.get()]) {
+        if (liveness.live_in[succ].count(vreg)) {
+          live_across.push_back(vreg);
+        }
+      }
+      std::sort(live_across.begin(), live_across.end());
+
+      for (auto vreg : live_across) {
+        auto src = location_for(intervals, vreg, src_pos);
+        auto dst = location_for(intervals, vreg, to_layout.start);
+        if (
+          src.kind != Location::Kind::Invalid &&
+          dst.kind != Location::Kind::Invalid
+        ) {
+          add_edge_move(block.get(), succ, {dst, src});
+        }
+      }
+    }
+  }
 
   for (auto &block : function.blocks) {
     for (auto it = block->insts.begin(); it != block->insts.end(); ++it) {
@@ -1368,6 +1426,17 @@ auto run_ra(low_ir::MachineFunction &function, bool dump_ra, bool emit_ra)
     auto pieces = detail::split_interval(interval);
     split_intervals.insert(split_intervals.end(), pieces.begin(), pieces.end());
   }
+  std::sort(
+    split_intervals.begin(),
+    split_intervals.end(),
+    [](const auto &lhs, const auto &rhs) {
+      if (interval_start(lhs) != interval_start(rhs))
+        return interval_start(lhs) < interval_start(rhs);
+      if (interval_end(lhs) != interval_end(rhs))
+        return interval_end(lhs) < interval_end(rhs);
+      return lhs.vreg < rhs.vreg;
+    }
+  );
   for (auto &interval : split_intervals) {
     detail::compute_spill_cost(interval);
     interval.split_plan = detail::plan_split(interval);
