@@ -8,8 +8,17 @@ Inliner::Inliner(Module *_m) : m(_m) {
   }
 }
 
-auto Inliner::run(Module &, ModuleAnalysisManager &) -> PreservedAnalysis {
+auto Inliner::run(Module &module, ModuleAnalysisManager &mam)
+  -> PreservedAnalysis {
   call_graph.build(*m);
+  mam.register_pass<FunctionEffectsAnalysis>();
+  function_effects = mam.get_result<FunctionEffectsAnalysis>(module);
+  call_counts.clear();
+  for (const auto &[caller, node] : call_graph.getNodes()) {
+    (void)caller;
+    for (auto *callee : node.callees)
+      ++call_counts[callee];
+  }
 
   bool changed = false;
   // Bottom-up processing: Leaf functions (those that call no one or only
@@ -99,19 +108,36 @@ auto Inliner::tryInlineInRegion(Region &r, Function &caller, int depth)
   return false;
 }
 
-auto Inliner::shouldInline(Op &call_op, Function &callee, Function &, int depth)
-  -> bool {
+auto Inliner::shouldInline(
+  Op &call_op, Function &callee, Function &caller, int depth
+) -> bool {
   if (callee.is_decl)
     return false;
-  // TODO: 对广义编译期函数进行  优化。
-  if (call_graph.isRecursive(&callee))
+  if (
+    &callee == &caller || call_graph.isRecursive(&callee) ||
+    call_op.operands.size() != callee.args.size()
+  )
     return false;
 
   int cost = CostModel::calculate(callee, &call_op.operands);
-  if (cost < 15)
+  if (cost < 30)
     return true; // Wrapper or very small function heuristic
 
-  int threshold = 225 + (depth * 150);
+  int threshold = 180 - (depth * 40);
+  auto effect_it = function_effects.find(&callee);
+  if (effect_it != function_effects.end()) {
+    const auto &effects = effect_it->second;
+    if (effects.has_unknown_effect)
+      threshold -= 70;
+    else if (effects.writes.empty())
+      threshold += effects.reads.empty() ? 70 : 35;
+  }
+  for (auto *operand : call_op.operands) {
+    if (operand && operand->kind == ValueKind::Constant)
+      threshold += 10;
+  }
+  if (call_counts[&callee] > 4)
+    threshold -= 40;
   return cost < threshold;
 }
 
@@ -127,6 +153,28 @@ auto Inliner::inlineCall(
   }
 
   auto func_type = std::static_pointer_cast<Func>(callee.type);
+  Region cloned_body = cloner.cloneRegion(callee.body);
+
+  // The common single-return form can be inlined directly.  This avoids the
+  // temporary alloca/load pair and immediately exposes constants to users.
+  if (!cloned_body.empty() && cloned_body.back()->code == OpCode::Ret) {
+    Op *ret_op = cloned_body.back();
+    Value *return_value =
+      ret_op->operands.empty() ? nullptr : ret_op->operands.front();
+    for (auto *operand : ret_op->operands)
+      operand->rmUse(ret_op);
+    cloned_body.pop_back();
+    if (call_op->result && return_value) {
+      IRRewriter rewriter;
+      rewriter.replace_all_uses_with(call_op->result, return_value);
+    }
+    r.insert(it, cloned_body.begin(), cloned_body.end());
+    for (auto *operand : call_op->operands)
+      operand->rmUse(call_op);
+    r.erase(it);
+    return true;
+  }
+
   Value *ret_alloca = nullptr;
   if (!func_type->ret_type->is_void()) {
     Op *alloca_op = m->ctx.make_op(OpCode::Alloca);
@@ -135,8 +183,6 @@ auto Inliner::inlineCall(
     ret_alloca = alloca_op->result;
     r.insert(it, alloca_op);
   }
-
-  Region cloned_body = cloner.cloneRegion(callee.body);
 
   struct RetToStore : RecursiveOpVisitor<RetToStore> {
     Value *ret_alloca;
@@ -148,16 +194,17 @@ auto Inliner::inlineCall(
   RetToStore rts(ret_alloca);
   rts.visit(cloned_body);
 
+  IRRewriter ret_rewriter;
   for (auto *ret_op : rts.to_replace) {
     if (!ret_op->operands.empty() && ret_alloca) {
       ret_op->code = OpCode::Store;
       ret_op->operands.push_back(ret_alloca);
       ret_alloca->addUse(ret_op);
     } else {
-      ret_op->code = OpCode::Add; // Dummy op code
-      ret_op->operands.clear();
+      ret_rewriter.eraseOp(ret_op);
     }
   }
+  ret_rewriter.finalize(cloned_body);
 
   if (call_op->result && ret_alloca) {
     Op *load_op = m->ctx.make_op(OpCode::Load);
@@ -173,6 +220,8 @@ auto Inliner::inlineCall(
     r.insert(it, cloned_body.begin(), cloned_body.end());
   }
 
+  for (auto *operand : call_op->operands)
+    operand->rmUse(call_op);
   r.erase(it);
   return true;
 }

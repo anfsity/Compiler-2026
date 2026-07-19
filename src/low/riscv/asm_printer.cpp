@@ -300,21 +300,21 @@ auto emit_inst(
   case XOR:
   case SLL:
   case SRA: {
-    const char *name = inst.opcode == ADD    ? "add"
-                       : inst.opcode == ADDW ? "addw"
-                       : inst.opcode == SUB  ? "sub"
-                       : inst.opcode == SUBW ? "subw"
-                       : inst.opcode == MUL  ? "mul"
-                       : inst.opcode == MULW ? "mulw"
-                       : inst.opcode == DIV  ? "div"
-                       : inst.opcode == DIVW ? "divw"
-                       : inst.opcode == REM  ? "rem"
-                       : inst.opcode == REMW ? "remw"
-                       : inst.opcode == AND  ? "and"
-                       : inst.opcode == OR   ? "or"
-                       : inst.opcode == XOR  ? "xor"
-                       : inst.opcode == SLL  ? "sll"
-                                             : "sra";
+    std::string_view name = inst.opcode == ADD    ? "add"
+                            : inst.opcode == ADDW ? "addw"
+                            : inst.opcode == SUB  ? "sub"
+                            : inst.opcode == SUBW ? "subw"
+                            : inst.opcode == MUL  ? "mul"
+                            : inst.opcode == MULW ? "mulw"
+                            : inst.opcode == DIV  ? "div"
+                            : inst.opcode == DIVW ? "divw"
+                            : inst.opcode == REM  ? "rem"
+                            : inst.opcode == REMW ? "remw"
+                            : inst.opcode == AND  ? "and"
+                            : inst.opcode == OR   ? "or"
+                            : inst.opcode == XOR  ? "xor"
+                            : inst.opcode == SLL  ? "sll"
+                                                  : "sra";
     out += fmt::format(
       "    {} {}, {}, {}\n",
       name,
@@ -342,13 +342,13 @@ auto emit_inst(
   case ORI:
   case XORI:
   case SLTIU: {
-    const char *name = inst.opcode == SLLI   ? "slli"
-                       : inst.opcode == SRLI ? "srli"
-                       : inst.opcode == SRAI ? "srai"
-                       : inst.opcode == ANDI ? "andi"
-                       : inst.opcode == ORI  ? "ori"
-                       : inst.opcode == XORI ? "xori"
-                                             : "sltiu";
+    std::string_view name = inst.opcode == SLLI   ? "slli"
+                            : inst.opcode == SRLI ? "srli"
+                            : inst.opcode == SRAI ? "srai"
+                            : inst.opcode == ANDI ? "andi"
+                            : inst.opcode == ORI  ? "ori"
+                            : inst.opcode == XORI ? "xori"
+                                                  : "sltiu";
     out += fmt::format(
       "    {} {}, {}, {}\n",
       name,
@@ -398,12 +398,12 @@ auto emit_inst(
   case BGE:
   case BLTU:
   case BGEU: {
-    const char *name = inst.opcode == BEQ    ? "beq"
-                       : inst.opcode == BNE  ? "bne"
-                       : inst.opcode == BLT  ? "blt"
-                       : inst.opcode == BGE  ? "bge"
-                       : inst.opcode == BLTU ? "bltu"
-                                             : "bgeu";
+    std::string_view name = inst.opcode == BEQ    ? "beq"
+                            : inst.opcode == BNE  ? "bne"
+                            : inst.opcode == BLT  ? "blt"
+                            : inst.opcode == BGE  ? "bge"
+                            : inst.opcode == BLTU ? "bltu"
+                                                  : "bgeu";
     out += fmt::format(
       "    {} {}, {}, {}\n",
       name,
@@ -429,10 +429,10 @@ auto emit_inst(
   case FSUB_S:
   case FMUL_S:
   case FDIV_S: {
-    const char *name = inst.opcode == FADD_S   ? "fadd.s"
-                       : inst.opcode == FSUB_S ? "fsub.s"
-                       : inst.opcode == FMUL_S ? "fmul.s"
-                                               : "fdiv.s";
+    std::string_view name = inst.opcode == FADD_S   ? "fadd.s"
+                            : inst.opcode == FSUB_S ? "fsub.s"
+                            : inst.opcode == FMUL_S ? "fmul.s"
+                                                    : "fdiv.s";
     out += fmt::format(
       "    {} {}, {}, {}\n",
       name,
@@ -445,9 +445,9 @@ auto emit_inst(
   case FEQ_S:
   case FLT_S:
   case FLE_S: {
-    const char *name = inst.opcode == FEQ_S   ? "feq.s"
-                       : inst.opcode == FLT_S ? "flt.s"
-                                              : "fle.s";
+    std::string_view name = inst.opcode == FEQ_S   ? "feq.s"
+                            : inst.opcode == FLT_S ? "flt.s"
+                                                   : "fle.s";
     out += fmt::format(
       "    {} {}, {}, {}\n",
       name,

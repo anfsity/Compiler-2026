@@ -7,6 +7,7 @@
 #include "../../high/visitor.hpp"
 #include "../AnalysisManager.hpp"
 #include "cost_model.hpp"
+#include "function_analysis.hpp"
 #include <cstdint>
 #include <iterator>
 #include <unordered_map>
@@ -20,6 +21,8 @@ using namespace exodus::opt;
 class Inliner {
   Module *m;
   std::unordered_map<std::string, Function *> func_map;
+  std::unordered_map<Function *, OpEffects> function_effects;
+  std::unordered_map<Function *, size_t> call_counts;
   CallGraph call_graph;
 
 public:

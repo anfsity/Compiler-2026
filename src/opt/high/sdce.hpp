@@ -1,7 +1,7 @@
 #pragma once
 
-#include "../../base/getptr.hpp"
 #include "../../helper/log.hpp"
+#include "../../high/effects.hpp"
 #include "../../high/ir.hpp"
 #include "../../high/rewriter.hpp"
 #include "../../high/visitor.hpp"
@@ -19,15 +19,16 @@ struct SimpleDCE {
   IRRewriter rewriter;
   std::unordered_map<Op *, Op *> parents;
   std::unordered_set<Op *> liveset;
+  std::unordered_set<Value *> escaped_allocas;
   std::deque<Op *> worklist;
 
   SimpleDCE(Module * /* m */);
 
   static auto is_intrinsically_live(Op *op) -> bool;
 
-  static auto get_addr_root(Value *v) -> Value *;
   auto mark_stores_to(Value *ptr) -> void;
-  auto mark_implicit_get_ptr_stores(Op *op) -> void;
+  auto collect_escaped_allocas() -> void;
+  auto mark_memory_dependencies(Op *op) -> void;
 
   auto build_parent_map(Region &r, Op *parent = nullptr) -> void;
   auto mark(Op *op) -> void;

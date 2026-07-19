@@ -93,6 +93,19 @@ public:
     }
     return combined_pa;
   }
+
+  auto run_to_fixed_point(
+    IRUnitT &ir, AnalysisManager<IRUnitT> &am, size_t max_iterations = 8
+  ) -> PreservedAnalysis {
+    bool changed = false;
+    for (size_t iteration = 0; iteration < max_iterations; ++iteration) {
+      auto pa = run(ir, am);
+      if (pa.all_preserved())
+        break;
+      changed = true;
+    }
+    return changed ? PreservedAnalysis::none() : PreservedAnalysis::all();
+  }
 };
 
 using ModulePassManager = PassManager<high_ir::Module>;

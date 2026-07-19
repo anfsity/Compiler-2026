@@ -241,6 +241,76 @@ auto main() -> int {
     fmt::print("Test 7 passed: implicit-load getptr keeps store.\n");
   }
 
+  // Test 8: A live region must not inherit dependencies from its dead loads.
+  {
+    f.body.clear();
+
+    auto *alloca = ctx.make_op(OpCode::Alloca);
+    alloca->result = ctx.make_value<OpResult>(I32::get()->ptr_to(), alloca);
+    f.body.push_back(alloca);
+
+    auto *store = ctx.make_op(OpCode::Store);
+    store->operands = {ctx.make_const(I32::get(), 1), alloca->result};
+    alloca->result->addUse(store);
+    f.body.push_back(store);
+
+    auto then_region = std::make_unique<Region>();
+    auto *dead_load = ctx.make_op(OpCode::Load);
+    dead_load->operands = {alloca->result};
+    alloca->result->addUse(dead_load);
+    dead_load->result = ctx.make_value<OpResult>(I32::get(), dead_load);
+    then_region->push_back(dead_load);
+
+    auto *call = ctx.make_op(OpCode::Call, CallPayload{"side_effect"});
+    then_region->push_back(call);
+
+    auto *if_op = ctx.make_op(OpCode::If);
+    if_op->operands = {ctx.make_const(Bool::get(), 1)};
+    if_op->operands[0]->addUse(if_op);
+    if_op->payload = IfPayload{std::move(then_region), std::nullopt};
+    f.body.push_back(if_op);
+
+    SimpleDCE dce(nullptr);
+    FunctionAnalysisManager fam;
+    dce.run(f, fam);
+
+    assert(f.body.size() == 1);
+    assert(f.body.front() == if_op);
+    auto &payload = std::get<IfPayload>(if_op->payload);
+    assert(payload.then_region->size() == 1);
+    assert(payload.then_region->front() == call);
+    fmt::print("Test 8 passed: dead region load does not retain store.\n");
+  }
+
+  // Test 9: An unknown call can observe a local object passed by pointer.
+  {
+    f.body.clear();
+
+    auto *alloca = ctx.make_op(OpCode::Alloca);
+    alloca->result = ctx.make_value<OpResult>(I32::get()->ptr_to(), alloca);
+    f.body.push_back(alloca);
+
+    auto *store = ctx.make_op(OpCode::Store);
+    store->operands = {ctx.make_const(I32::get(), 7), alloca->result};
+    alloca->result->addUse(store);
+    f.body.push_back(store);
+
+    auto *call = ctx.make_op(OpCode::Call, CallPayload{"reads_pointer"});
+    call->operands = {alloca->result};
+    alloca->result->addUse(call);
+    f.body.push_back(call);
+
+    SimpleDCE dce(nullptr);
+    FunctionAnalysisManager fam;
+    dce.run(f, fam);
+
+    assert(f.body.size() == 3);
+    assert(f.body.front() == alloca);
+    assert(*std::next(f.body.begin()) == store);
+    assert(f.body.back() == call);
+    fmt::print("Test 9 passed: pointer call keeps local store.\n");
+  }
+
   return 0;
 }
 #endif
