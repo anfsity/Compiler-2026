@@ -2,11 +2,15 @@
 #include "constant_propagation.hpp"
 #include "inliner.hpp"
 #include "inst_simplify.hpp"
+#include "ipcp.hpp"
 #include "region_simplify.hpp"
 #include "return_insertion.hpp"
 #include "sdce.hpp"
 
 namespace exodus::high_ir::opt {
+
+static exodus::opt::RegisterModulePass<IPCP>
+  reg_ipcp("ipcp", "interprocedural constant propagation");
 
 static exodus::opt::RegisterModulePass<Inliner>
   reg_inliner("inliner", "function inlining");

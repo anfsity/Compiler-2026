@@ -20,6 +20,8 @@ struct CP : RecursiveOpVisitor<CP> {
   IRRewriter rewriter;
   IRContext *ctx;
   Module *m;
+  std::unordered_map<std::string, Function *> functions;
+  std::unordered_map<Function *, OpEffects> function_effects;
   bool changed = false;
 
   using RecursiveOpVisitor<CP>::visit;
@@ -44,6 +46,7 @@ struct CP : RecursiveOpVisitor<CP> {
   auto visit(Op *op, OpTag<OpCode::While>) -> void;
 
   auto invalidate_writes(const OpEffects &effects) -> void;
+  auto resolved_effects(const Region &region) const -> OpEffects;
   auto clear_global_env() -> void;
 
   template <typename T>

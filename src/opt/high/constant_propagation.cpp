@@ -11,6 +11,10 @@ auto CP::run(Function &f, FunctionAnalysisManager & /* FAM */)
   safe_globals.clear();
   rewriter.clear();
   changed = false;
+  functions.clear();
+  for (auto &function : m->functions)
+    functions.emplace(function->name, function.get());
+  function_effects = get_function_effects(*m);
 
   for (auto &g : m->globals) {
     if (g->is_const && (g->type->is_i32() || g->type->is_f32())) {
@@ -68,14 +72,25 @@ auto CP::visit(Op *op, OpTag<OpCode::Store>) -> void {
 
 auto CP::visit(Op *op, OpTag<OpCode::Call>) -> void {
   RecursiveOpVisitor<CP>::visit(op, OpTag<OpCode::Call>{});
+  const auto &payload = std::get<CallPayload>(op->payload);
+  auto function = functions.find(payload.func_name);
+  if (function != functions.end() && !function->second->is_decl) {
+    auto summary = function_effects.find(function->second);
+    if (summary != function_effects.end()) {
+      invalidate_writes(
+        get_call_effects(*op, *function->second, summary->second)
+      );
+      return;
+    }
+  }
   invalidate_writes(get_op_effects(*op));
 }
 
 auto CP::visit(Op *op, OpTag<OpCode::If>) -> void {
   auto &p = std::get<IfPayload>(op->payload);
-  auto effects = get_region_effects(*p.then_region);
+  auto effects = resolved_effects(*p.then_region);
   if (p.else_region)
-    effects.merge(get_region_effects(*p.else_region));
+    effects.merge(resolved_effects(*p.else_region));
 
   auto saved_env = env;
   visit(*p.then_region);
@@ -91,8 +106,8 @@ auto CP::visit(Op *op, OpTag<OpCode::If>) -> void {
 
 auto CP::visit(Op *op, OpTag<OpCode::While>) -> void {
   auto &p = std::get<WhilePayload>(op->payload);
-  auto effects = get_region_effects(*p.cond_region);
-  effects.merge(get_region_effects(*p.loop_region));
+  auto effects = resolved_effects(*p.cond_region);
+  effects.merge(resolved_effects(*p.loop_region));
 
   auto saved_allocas = safe_allocas;
   auto saved_globals = safe_globals;
@@ -122,6 +137,10 @@ auto CP::invalidate_writes(const OpEffects &effects) -> void {
     env.erase(value);
   if (effects.has_unknown_effect)
     clear_global_env();
+}
+
+auto CP::resolved_effects(const Region &region) const -> OpEffects {
+  return get_resolved_region_effects(region, functions, function_effects);
 }
 
 auto CP::clear_global_env() -> void {

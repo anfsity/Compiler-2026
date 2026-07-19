@@ -62,10 +62,23 @@ struct CostModel : RecursiveOpVisitor<CostModel> {
   auto visit(Op *op, OpTag<OpCode::FMul>) -> void { check_fold(op, 15); }
   auto visit(Op *op, OpTag<OpCode::FDiv>) -> void { check_fold(op, 15); }
 
+  auto visit(Op *op, OpTag<OpCode::Eq>) -> void { check_fold(op, 3); }
+  auto visit(Op *op, OpTag<OpCode::Ne>) -> void { check_fold(op, 3); }
+  auto visit(Op *op, OpTag<OpCode::Lt>) -> void { check_fold(op, 3); }
+  auto visit(Op *op, OpTag<OpCode::Gt>) -> void { check_fold(op, 3); }
+  auto visit(Op *op, OpTag<OpCode::Le>) -> void { check_fold(op, 3); }
+  auto visit(Op *op, OpTag<OpCode::Ge>) -> void { check_fold(op, 3); }
+  auto visit(Op *op, OpTag<OpCode::And>) -> void { check_fold(op, 3); }
+  auto visit(Op *op, OpTag<OpCode::Or>) -> void { check_fold(op, 3); }
+  auto visit(Op *op, OpTag<OpCode::Xor>) -> void { check_fold(op, 3); }
+  auto visit(Op *op, OpTag<OpCode::Shl>) -> void { check_fold(op, 3); }
+  auto visit(Op *op, OpTag<OpCode::Shr>) -> void { check_fold(op, 3); }
+
   auto visit(Op *, OpTag<OpCode::Alloca>) -> void { cost += 5; }
   auto visit(Op *, OpTag<OpCode::Load>) -> void { cost += 5; }
   auto visit(Op *, OpTag<OpCode::Store>) -> void { cost += 5; }
   auto visit(Op *, OpTag<OpCode::GetPtr>) -> void { cost += 5; }
+  auto visit(Op *, OpTag<OpCode::Memset>) -> void { cost += 12; }
 
   auto visit(Op *, OpTag<OpCode::Call>) -> void { cost += 25; }
   auto visit(Op *, OpTag<OpCode::Ret>) -> void { cost += 5; }

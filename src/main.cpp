@@ -169,14 +169,17 @@ private:
       fpm.set_after_pass_callback(instrumentation);
       mpm.set_after_pass_callback(instrumentation);
 
-      for (auto &f : module->functions) {
-        if (!f->is_decl)
-          fpm.run(*f, fam);
-      }
-      mpm.run(*module, mam);
-      for (auto &f : module->functions) {
-        if (!f->is_decl)
-          fpm.run(*f, fam);
+      constexpr size_t max_iterations = 8;
+      for (size_t iteration = 0; iteration < max_iterations; ++iteration) {
+        bool changed = false;
+        for (auto &f : module->functions) {
+          if (!f->is_decl && !fpm.run(*f, fam).all_preserved())
+            changed = true;
+        }
+        if (!mpm.run(*module, mam).all_preserved())
+          changed = true;
+        if (!changed)
+          break;
       }
     } else {
       for (const auto &name : options.pass_names) {

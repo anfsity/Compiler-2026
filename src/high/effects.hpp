@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ir.hpp"
+#include <unordered_map>
 #include <unordered_set>
 
 namespace exodus::high_ir {
@@ -45,5 +46,24 @@ auto get_addr_root(Value *value) -> Value *;
 auto get_op_effects(const Op &op) -> OpEffects;
 // Recursive summary of every operation nested in region.
 auto get_region_effects(const Region &region) -> OpEffects;
+
+// Resolve calls and compute a conservative summary for every function in a
+// module.  The result is monotone: an unresolved declaration or an unknown
+// call keeps the summary unknown, while calls to defined functions inherit
+// their callee's summary.
+auto get_function_effects(const Module &module)
+  -> std::unordered_map<Function *, OpEffects>;
+
+// Instantiate a callee summary at a specific call site.  Effects on pointer
+// parameters are translated to the corresponding actual arguments.
+auto get_call_effects(
+  const Op &call, const Function &callee, const OpEffects &callee_effects
+) -> OpEffects;
+
+auto get_resolved_region_effects(
+  const Region &region,
+  const std::unordered_map<std::string, Function *> &functions,
+  const std::unordered_map<Function *, OpEffects> &summaries
+) -> OpEffects;
 
 } // namespace exodus::high_ir
