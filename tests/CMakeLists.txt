@@ -28,6 +28,12 @@ target_compile_features(constant_propagation_test PRIVATE cxx_std_17)
 target_compile_definitions(constant_propagation_test PRIVATE EXODUS_UNIT_TEST)
 add_test(NAME constant_propagation_test COMMAND constant_propagation_test)
 
+add_executable(high_simplify_test high_simplify_test.cpp)
+target_link_libraries(high_simplify_test PRIVATE compiler_core)
+target_compile_features(high_simplify_test PRIVATE cxx_std_17)
+target_compile_definitions(high_simplify_test PRIVATE EXODUS_UNIT_TEST)
+add_test(NAME high_simplify_test COMMAND high_simplify_test)
+
 add_executable(dom_test dom_test.cpp)
 target_link_libraries(dom_test PRIVATE compiler_core)
 target_compile_features(dom_test PRIVATE cxx_std_17)

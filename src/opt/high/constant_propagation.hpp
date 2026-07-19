@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../high/effects.hpp"
 #include "../../high/ir.hpp"
 #include "../../high/rewriter.hpp"
 #include "../../high/visitor.hpp"
@@ -30,16 +31,6 @@ struct CP : RecursiveOpVisitor<CP> {
 
   auto visit(Op *op) -> void;
 
-  struct ModifiedFinder : RecursiveOpVisitor<ModifiedFinder> {
-    std::unordered_set<Value *> modified;
-    bool has_call = false;
-    using RecursiveOpVisitor<ModifiedFinder>::visit;
-
-    auto visit(Op *op, OpTag<OpCode::Store>) -> void;
-    auto visit(Op *op, OpTag<OpCode::Memset>) -> void;
-    auto visit(Op * /* op */, OpTag<OpCode::Call>) -> void;
-  };
-
   auto visit(Op *op, OpTag<OpCode::Alloca>) -> void;
   auto visit(Op *op, OpTag<OpCode::Load>) -> void;
   auto visit(Op *op, OpTag<OpCode::Store>) -> void;
@@ -52,8 +43,8 @@ struct CP : RecursiveOpVisitor<CP> {
   auto visit(Op *op, OpTag<OpCode::If>) -> void;
   auto visit(Op *op, OpTag<OpCode::While>) -> void;
 
+  auto invalidate_writes(const OpEffects &effects) -> void;
   auto clear_global_env() -> void;
-  auto clear_all_env() -> void;
 
   template <typename T>
   auto fold_arith(OpCode code, T l, T r) -> std::optional<Constant::Data>;
