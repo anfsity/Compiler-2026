@@ -9,6 +9,7 @@ namespace exodus::mid_ir {
 struct MidIRRewriter : ir::RewriterBase<Op> {
   auto set_scope(LinearFunction &func) -> void;
   auto replace_all_uses_with(Value *old_val, Value *new_val) -> void;
+  auto eraseOp(Op *op) -> void;
   auto finalize(LinearFunction &func) -> void;
 
 private:
@@ -47,10 +48,35 @@ inline auto MidIRRewriter::replace_all_uses_with(Value *old_val, Value *new_val)
         replaced = true;
       }
     }
+    if (user->code == OpCode::Phi) {
+      auto &payload = std::get<PhiPayload>(user->payload);
+      for (auto &[block, value] : payload.incoming) {
+        (void)block;
+        if (value == old_val) {
+          value = new_val;
+          new_val->addUse(user);
+          replaced = true;
+        }
+      }
+    }
     if (replaced) {
       old_val->rmUse(user);
     }
   }
+}
+
+inline auto MidIRRewriter::eraseOp(Op *op) -> void {
+  if (!op)
+    return;
+  if (op->code == OpCode::Phi) {
+    auto &payload = std::get<PhiPayload>(op->payload);
+    for (auto &[block, value] : payload.incoming) {
+      (void)block;
+      if (value)
+        value->rmUse(op);
+    }
+  }
+  RewriterBase<Op>::eraseOp(op);
 }
 
 inline auto MidIRRewriter::finalize(LinearFunction &func) -> void {

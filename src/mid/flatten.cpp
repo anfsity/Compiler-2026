@@ -160,6 +160,7 @@ auto Flattener::visit(high_ir::Op *op) -> void {
 
     auto *br = new_module->make_op(OpCode::Branch);
     br->operands.push_back(op->operands[0]);
+    op->operands[0]->addUse(br);
     br->successors.push_back(then_b);
     br->successors.push_back(else_b ? else_b : merge_b);
     cur_block->insts.push_back(br);
@@ -212,6 +213,7 @@ auto Flattener::visit(high_ir::Op *op) -> void {
       if (cond_op->code == high_ir::OpCode::Condition) {
         auto *br = new_module->make_op(OpCode::Branch);
         br->operands.push_back(cond_op->operands[0]);
+        cond_op->operands[0]->addUse(br);
         br->successors.push_back(body_b);
         br->successors.push_back(exit_b);
         cur_block->insts.push_back(br);
