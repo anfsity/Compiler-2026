@@ -12,6 +12,11 @@ namespace exodus::high_ir::opt {
 namespace {
 
 constexpr int CacheSize = (1 << 12);
+// The cache stores and compares every explicit argument.  Memoizing a very
+// high-arity function expands the function body and every return path by the
+// arity, while offering little reuse.  Keep memoization focused on small
+// computational functions such as h-1-03::fun.
+constexpr size_t MaxMemoizedArguments = 16;
 
 struct CacheInfo {
   GlobalAddr *used = nullptr;
@@ -308,7 +313,7 @@ auto is_memoizable(const Function &function, const OpEffects &effects)
   -> std::optional<std::vector<GlobalAddr *>> {
   if (
     function.is_decl || function.is_memoized || !function.type ||
-    !function.type->is_func()
+    !function.type->is_func() || function.args.size() > MaxMemoizedArguments
   )
     return std::nullopt;
 
