@@ -19,6 +19,7 @@
 #include "mid/dom.hpp"
 #include "mid/flatten.hpp"
 #include "mid/ir_printer.hpp"
+#include "mid/loop.hpp"
 #include "opt/AnalysisManager.hpp"
 #include "opt/PassBuilder.hpp"
 #include "opt/PassManager.hpp"
@@ -232,6 +233,7 @@ private:
     PassBuilder pb(module.get(), mid_module.get());
     LinearFunctionAnalysisManager lfam;
     lfam.register_pass<DominanceAnalysis>();
+    lfam.register_pass<LoopAnalysis>();
 
     auto instrumentation = [&](const std::string &name, const auto &unit) {
       this->instrument(name, unit);
@@ -251,8 +253,9 @@ private:
           auto pass = pb.create_linear_function_pass(name);
           for (auto &f : mid_module->functions) {
             if (!f->is_decl) {
-              pass.run(*f, lfam);
+              auto preserved = pass.run(*f, lfam);
               instrument(name, *f);
+              lfam.invalidate(*f, preserved);
             }
           }
         }

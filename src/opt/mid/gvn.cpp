@@ -1,5 +1,6 @@
 #include "gvn.hpp"
 
+#include "../../base/getptr.hpp"
 #include <algorithm>
 
 namespace exodus::mid_ir::opt {
@@ -147,6 +148,13 @@ auto GVN::build_expression(Op *op) -> std::optional<Expression> {
 
   if (!is_pure_opcode(op->code))
     return std::nullopt;
+  if (op->code == OpCode::GetPtr) {
+    auto plan = ir::analyze_getptr(
+      op->operands[0]->type, op->result->type, op->operands.size() - 1
+    );
+    if (plan.reads_memory)
+      return std::nullopt;
+  }
 
   Expression expression{op->code, op->result->type.get(), {}};
   expression.operands.reserve(op->operands.size());
@@ -207,6 +215,7 @@ auto GVN::is_pure_opcode(OpCode code) -> bool {
   case OpCode::Xor:
   case OpCode::Shl:
   case OpCode::Shr:
+  case OpCode::GetPtr:
     return true;
   default:
     return false;

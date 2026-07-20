@@ -15,12 +15,17 @@ auto is_use_operand(const low_ir::MachineOperand &operand) -> bool {
          std::get<low_ir::MachineOperand::RegData>(operand.data).is_use;
 }
 
-auto allocable_int_regs() -> std::vector<int> {
-  return {S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11};
+auto allocable_int_regs(bool crosses_call) -> std::vector<int> {
+  if (crosses_call)
+    return {S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11};
+  // t6 is reserved for large frame offsets; t5 is used for spill loads.
+  return {T0, T1, T2, T3, T4};
 }
 
-auto allocable_float_regs() -> std::vector<int> {
-  return {FS0, FS1, FS2, FS3, FS4, FS5, FS6, FS7, FS8, FS9, FS10, FS11};
+auto allocable_float_regs(bool crosses_call) -> std::vector<int> {
+  if (crosses_call)
+    return {FS0, FS1, FS2, FS3, FS4, FS5, FS6, FS7, FS8, FS9, FS10, FS11};
+  return {FT0, FT1, FT2, FT3, FT4, FT5, FT6, FT7, FT8, FT9};
 }
 
 auto is_float_phys_reg(int reg) -> bool {
@@ -126,14 +131,6 @@ auto find_piece(std::vector<LiveInterval> &intervals, int vreg, int pos)
     }
   }
   return nullptr;
-}
-
-auto spill_tmp_regs_for(RegClass reg_class) -> const std::vector<int> & {
-  static const std::vector<int> int_regs = {T6, T5, T4, T3, T2, T1, T0};
-  static const std::vector<int> float_regs = {
-    FT11, FT10, FT9, FT8, FT7, FT6, FT5, FT4, FT3, FT2, FT1, FT0
-  };
-  return reg_class == RegClass::Float ? float_regs : int_regs;
 }
 
 auto should_hint_copy(const low_ir::MachineInst &inst) -> bool {
@@ -507,6 +504,28 @@ auto build_intervals(low_ir::MachineFunction &function)
   return intervals;
 }
 
+auto annotate_call_liveness(
+  low_ir::MachineFunction &function, std::vector<LiveInterval> &intervals
+) -> void {
+  auto layout = compute_block_layout(function);
+  std::vector<int> call_positions;
+  for (const auto &block_layout : layout) {
+    auto pos = block_layout.start;
+    for (const auto &inst : block_layout.block->insts) {
+      if (inst.opcode == CALL)
+        call_positions.push_back(pos);
+      ++pos;
+    }
+  }
+
+  for (auto &interval : intervals) {
+    interval.crosses_call =
+      std::any_of(call_positions.begin(), call_positions.end(), [&](int pos) {
+        return contains_pos(interval, pos);
+      });
+  }
+}
+
 auto collect_hints(low_ir::MachineFunction &function)
   -> std::unordered_map<int, std::vector<RegisterHint>> {
   std::unordered_map<int, std::vector<RegisterHint>> hints;
@@ -555,8 +574,9 @@ auto allocate_registers(std::vector<LiveInterval> &intervals) -> void {
       active.end()
     );
 
-    auto regs = interval.reg_class == RegClass::Float ? allocable_float_regs()
-                                                      : allocable_int_regs();
+    auto regs = interval.reg_class == RegClass::Float
+                  ? allocable_float_regs(interval.crosses_call)
+                  : allocable_int_regs(interval.crosses_call);
     for (auto *active_interval : active) {
       if (active_interval->reg_class == interval.reg_class) {
         regs.erase(
@@ -703,8 +723,7 @@ auto insert_spills(
       auto before = std::vector<low_ir::MachineInst>{};
       auto after = std::vector<low_ir::MachineInst>{};
       auto tmp_by_spill_slot = std::unordered_map<int, int>{};
-      auto next_int_tmp = size_t{0};
-      auto next_float_tmp = size_t{0};
+      auto used_tmp_regs = std::unordered_set<int>{};
 
       if (it->opcode == PHI) {
         ++it;
@@ -720,14 +739,46 @@ auto insert_spills(
           return found->second;
         }
 
-        const auto &tmp_regs = spill_tmp_regs_for(interval.reg_class);
-        auto &next_tmp =
-          interval.reg_class == RegClass::Float ? next_float_tmp : next_int_tmp;
-        auto tmp_reg =
-          tmp_regs[std::min(next_tmp, tmp_regs.size() - size_t{1})];
-        if (next_tmp + 1 < tmp_regs.size()) {
-          ++next_tmp;
+        std::vector<int> candidates;
+        if (interval.reg_class == RegClass::Float) {
+          candidates = {
+            FT0, FT1, FT2, FT3, FT4, FT5, FT6, FT7, FT8, FT9, FT10, FT11,
+            FS0, FS1, FS2, FS3, FS4, FS5, FS6, FS7, FS8, FS9, FS10, FS11,
+          };
+        } else {
+          candidates = {
+            T5,  S1,  S2, S3, S4, S5, S6, S7, S8, S9,
+            S10, S11, A0, A1, A2, A3, A4, A5, A6, A7,
+          };
         }
+
+        auto is_occupied = [&](int candidate) {
+          if (used_tmp_regs.count(candidate) != 0)
+            return true;
+          for (const auto &other : intervals) {
+            if (
+              other.spilled || other.reg_class != interval.reg_class ||
+              other.assigned_reg != candidate
+            ) {
+              continue;
+            }
+            if (contains_pos(other, pos))
+              return true;
+          }
+          for (const auto &operand : it->operands) {
+            if (operand.is_reg() && operand.get_reg() == candidate)
+              return true;
+          }
+          return false;
+        };
+
+        auto candidate =
+          std::find_if(candidates.begin(), candidates.end(), [&](int reg) {
+            return !is_occupied(reg);
+          });
+        auto tmp_reg =
+          candidate == candidates.end() ? candidates.front() : *candidate;
+        used_tmp_regs.insert(tmp_reg);
         tmp_by_spill_slot[interval.spill_slot] = tmp_reg;
         return tmp_reg;
       };
@@ -1058,7 +1109,7 @@ auto stack_move_temp_location(RegClass reg_class, int storage_size)
   return {
     Location::Kind::Reg,
     reg_class == RegClass::Float ? static_cast<int>(FT11)
-                                 : static_cast<int>(T6),
+                                 : static_cast<int>(T5),
     -1,
     reg_class,
     storage_size,
@@ -1069,7 +1120,7 @@ auto cycle_temp_location(RegClass reg_class, int storage_size) -> Location {
   return {
     Location::Kind::Reg,
     reg_class == RegClass::Float ? static_cast<int>(FT10)
-                                 : static_cast<int>(T5),
+                                 : static_cast<int>(A7),
     -1,
     reg_class,
     storage_size,
@@ -1416,12 +1467,228 @@ auto resolve_parallel_copies(low_ir::MachineFunction &function) -> void {
   }
 }
 
+using BlockSet = std::unordered_set<low_ir::MachineBasicBlock *>;
+
+auto reachable_from(low_ir::MachineBasicBlock *root) -> BlockSet {
+  BlockSet reachable;
+  std::vector<low_ir::MachineBasicBlock *> worklist;
+  if (root)
+    worklist.push_back(root);
+  while (!worklist.empty()) {
+    auto *block = worklist.back();
+    worklist.pop_back();
+    if (!reachable.insert(block).second)
+      continue;
+    worklist.insert(worklist.end(), block->succs.begin(), block->succs.end());
+  }
+  return reachable;
+}
+
+auto plan_frame_region(low_ir::MachineFunction &function) -> void {
+  if (function.blocks.empty())
+    return;
+
+  std::vector<low_ir::MachineBasicBlock *> call_blocks;
+  BlockSet all_blocks;
+  for (const auto &block : function.blocks) {
+    all_blocks.insert(block.get());
+    if (
+      std::any_of(block->insts.begin(), block->insts.end(), [](const auto &mi) {
+        return mi.opcode == CALL;
+      })
+    ) {
+      call_blocks.push_back(block.get());
+    }
+  }
+  if (call_blocks.empty())
+    return;
+
+  auto *entry = function.blocks.front().get();
+  std::unordered_map<low_ir::MachineBasicBlock *, BlockSet> dominators;
+  for (const auto &block : function.blocks)
+    dominators[block.get()] =
+      block.get() == entry ? BlockSet{entry} : all_blocks;
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (const auto &owned_block : function.blocks) {
+      auto *block = owned_block.get();
+      if (block == entry)
+        continue;
+
+      BlockSet next;
+      if (!block->preds.empty()) {
+        next = dominators[block->preds.front()];
+        for (size_t i = 1; i < block->preds.size(); ++i) {
+          const auto &pred_doms = dominators[block->preds[i]];
+          for (auto it = next.begin(); it != next.end();) {
+            if (pred_doms.count(*it) == 0)
+              it = next.erase(it);
+            else
+              ++it;
+          }
+        }
+      }
+      next.insert(block);
+      if (next != dominators[block]) {
+        dominators[block] = std::move(next);
+        changed = true;
+      }
+    }
+  }
+
+  auto common = dominators[call_blocks.front()];
+  for (size_t i = 1; i < call_blocks.size(); ++i) {
+    const auto &call_doms = dominators[call_blocks[i]];
+    for (auto it = common.begin(); it != common.end();) {
+      if (call_doms.count(*it) == 0)
+        it = common.erase(it);
+      else
+        ++it;
+    }
+  }
+
+  auto *root = entry;
+  for (auto *candidate : common) {
+    if (dominators[candidate].size() > dominators[root].size())
+      root = candidate;
+  }
+
+  auto active = reachable_from(root);
+  auto safe = root != entry &&
+              std::all_of(active.begin(), active.end(), [&](auto *block) {
+                return dominators[block].count(root) != 0;
+              });
+  safe =
+    safe &&
+    std::none_of(root->insts.begin(), root->insts.end(), [](const auto &mi) {
+      return mi.opcode == PHI;
+    });
+  safe = safe &&
+         std::none_of(root->preds.begin(), root->preds.end(), [&](auto *pred) {
+           return active.count(pred) != 0;
+         });
+  if (!safe) {
+    root = entry;
+    active = reachable_from(entry);
+  }
+
+  if (root != entry) {
+    auto liveness = compute_liveness(function);
+    std::vector<int> live_in(
+      liveness.live_in[root].begin(), liveness.live_in[root].end()
+    );
+    std::sort(live_in.begin(), live_in.end());
+
+    std::unordered_map<int, int> split_regs;
+    for (auto old_reg : live_in)
+      split_regs.emplace(old_reg, function.new_vreg());
+
+    for (auto *block : active) {
+      for (auto &mi : block->insts) {
+        for (auto &operand : mi.operands) {
+          if (!is_use_operand(operand))
+            continue;
+          auto &reg = std::get<low_ir::MachineOperand::RegData>(operand.data);
+          if (auto it = split_regs.find(reg.id); it != split_regs.end())
+            reg.id = it->second;
+        }
+      }
+    }
+
+    for (auto it = live_in.rbegin(); it != live_in.rend(); ++it) {
+      root->insts.emplace_front(COPY)
+        .add_reg(split_regs.at(*it), true, false)
+        .add_reg(*it);
+    }
+  }
+  root->insts.emplace_front(PROLOGUE);
+}
+
+auto is_callee_saved_reg(int reg) -> bool {
+  return reg == static_cast<int>(S1) ||
+         (reg >= static_cast<int>(S2) && reg <= static_cast<int>(S11)) ||
+         reg == static_cast<int>(FS0) || reg == static_cast<int>(FS1) ||
+         (reg >= static_cast<int>(FS2) && reg <= static_cast<int>(FS11));
+}
+
+auto block_requires_frame(const low_ir::MachineBasicBlock &block) -> bool {
+  for (const auto &inst : block.insts) {
+    if (inst.opcode == CALL)
+      return true;
+
+    for (const auto &operand : inst.operands) {
+      if (operand.kind == low_ir::MachineOperand::FrameIdx)
+        return true;
+      if (operand.is_reg() && is_callee_saved_reg(operand.get_reg()))
+        return true;
+    }
+  }
+  return false;
+}
+
+auto finalize_frame_region(low_ir::MachineFunction &function) -> void {
+  if (function.blocks.empty())
+    return;
+
+  auto *entry = function.blocks.front().get();
+  low_ir::MachineBasicBlock *root = nullptr;
+  for (auto &block : function.blocks) {
+    for (auto it = block->insts.begin(); it != block->insts.end();) {
+      if (it->opcode == PROLOGUE) {
+        if (!root)
+          root = block.get();
+        it = block->insts.erase(it);
+      } else {
+        if (it->opcode == RET_NOFRAME)
+          it->opcode = RET;
+        ++it;
+      }
+    }
+  }
+
+  auto active = reachable_from(root);
+  auto needs_entry_frame = false;
+  for (const auto &block : function.blocks) {
+    if (block_requires_frame(*block) && active.count(block.get()) == 0) {
+      needs_entry_frame = true;
+      break;
+    }
+  }
+
+  if (
+    needs_entry_frame ||
+    (!root && std::any_of(
+                function.blocks.begin(),
+                function.blocks.end(),
+                [](const auto &block) { return block_requires_frame(*block); }
+              ))
+  ) {
+    root = entry;
+    active = reachable_from(entry);
+  }
+
+  if (root)
+    root->insts.emplace_front(PROLOGUE);
+
+  for (auto &block : function.blocks) {
+    if (active.count(block.get()) != 0)
+      continue;
+    for (auto &mi : block->insts) {
+      if (mi.opcode == RET)
+        mi.opcode = RET_NOFRAME;
+    }
+  }
+}
+
 } // namespace detail
 
 auto run_ra(low_ir::MachineFunction &function, bool dump_ra, bool emit_ra)
   -> void {
   RegAllocPrinter printer{dump_ra};
   detail::prepare_phi_operands(function);
+  detail::plan_frame_region(function);
 
   auto intervals = detail::build_intervals(function);
   auto hints = detail::collect_hints(function);
@@ -1437,9 +1704,14 @@ auto run_ra(low_ir::MachineFunction &function, bool dump_ra, bool emit_ra)
   printer.dump_intervals(function, "intervals", intervals);
 
   std::vector<LiveInterval> split_intervals;
+  split_intervals.reserve(intervals.size());
   for (const auto &interval : intervals) {
-    auto pieces = detail::split_interval(interval);
-    split_intervals.insert(split_intervals.end(), pieces.begin(), pieces.end());
+    // Keep one location for a virtual value across CFG edges.  The current
+    // edge-move resolver does not model every split boundary, and a split
+    // value can otherwise reach a successor through an unmaterialized
+    // physical register.  Register preference still handles short-lived
+    // values without sacrificing this invariant.
+    split_intervals.push_back(interval);
   }
   std::sort(
     split_intervals.begin(),
@@ -1452,6 +1724,7 @@ auto run_ra(low_ir::MachineFunction &function, bool dump_ra, bool emit_ra)
       return lhs.vreg < rhs.vreg;
     }
   );
+  detail::annotate_call_liveness(function, split_intervals);
   for (auto &interval : split_intervals) {
     detail::compute_spill_cost(interval);
     interval.split_plan = detail::plan_split(interval);
@@ -1473,6 +1746,7 @@ auto run_ra(low_ir::MachineFunction &function, bool dump_ra, bool emit_ra)
   detail::resolve_ssa_data_flow(function, std::move(ssa_moves));
   detail::eliminate_spill_stores(function);
   detail::resolve_parallel_copies(function);
+  detail::finalize_frame_region(function);
 
   printer.dump_function(function);
 }

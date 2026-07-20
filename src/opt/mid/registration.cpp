@@ -3,6 +3,8 @@
 #include "dce.hpp"
 #include "gvn.hpp"
 #include "inst_combine.hpp"
+#include "licm.hpp"
+#include "loop_simplify.hpp"
 #include "mem2reg.hpp"
 #include "tail_recursion_elim.hpp"
 
@@ -16,6 +18,12 @@ static exodus::opt::RegisterLinearFunctionPass<TailRecursionElim>
 
 static exodus::opt::RegisterLinearFunctionPass<InstCombine>
   reg_inst_combine("instcombine", "instruction combining");
+
+static exodus::opt::RegisterLinearFunctionPass<LoopSimplify>
+  reg_loop_simplify("loop_simplify", "canonicalize natural loops");
+
+static exodus::opt::RegisterLinearFunctionPass<LICM>
+  reg_licm("licm", "loop-invariant code motion");
 
 static exodus::opt::RegisterLinearFunctionPass<GVN>
   reg_gvn("gvn", "global value numbering");

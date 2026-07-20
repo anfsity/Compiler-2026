@@ -155,6 +155,8 @@ enum Opcode : uint16_t {
   LA,         
   CALL,       
   RET,        
+  RET_NOFRAME,
+  PROLOGUE,
   ADJSTACKDOWN,
   ADJSTACKUP
 };
