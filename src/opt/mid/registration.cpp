@@ -2,6 +2,7 @@
 #include "cfg_simplify.hpp"
 #include "dce.hpp"
 #include "gvn.hpp"
+#include "inst_combine.hpp"
 #include "mem2reg.hpp"
 #include "tail_recursion_elim.hpp"
 
@@ -12,6 +13,9 @@ static exodus::opt::RegisterLinearFunctionPass<Mem2Reg>
 
 static exodus::opt::RegisterLinearFunctionPass<TailRecursionElim>
   reg_tail_recursion_elim("tail_recursion_elim", "tail recursion elimination");
+
+static exodus::opt::RegisterLinearFunctionPass<InstCombine>
+  reg_inst_combine("instcombine", "instruction combining");
 
 static exodus::opt::RegisterLinearFunctionPass<GVN>
   reg_gvn("gvn", "global value numbering");
