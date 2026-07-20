@@ -3,6 +3,7 @@
 #include "inliner.hpp"
 #include "inst_simplify.hpp"
 #include "ipcp.hpp"
+#include "memoization.hpp"
 #include "region_simplify.hpp"
 #include "return_insertion.hpp"
 #include "sdce.hpp"
@@ -14,6 +15,9 @@ static exodus::opt::RegisterModulePass<IPCP>
 
 static exodus::opt::RegisterModulePass<Inliner>
   reg_inliner("inliner", "function inlining");
+
+static exodus::opt::RegisterModulePass<Memoization>
+  reg_memoization("memoization", "memoize pure functions");
 
 static exodus::opt::RegisterFunctionPass<ReturnInsertion> reg_return_insertion(
   "return_insertion", "insert missing return instructions"

@@ -71,6 +71,7 @@ struct Function {
   std::vector<Argument *> args;
   Region body;
   bool is_decl = false;
+  bool is_memoized = false;
 };
 
 struct IRContext : exodus::ir::IRContext {

@@ -28,9 +28,9 @@ class CallGraph {
 
 public:
   CallGraph();
-  explicit CallGraph(Module &m);
+  explicit CallGraph(const Module &m);
 
-  auto build(Module &m) -> void;
+  auto build(const Module &m) -> void;
 
   auto getSCCs() const -> const std::vector<std::vector<Function *>> &;
 
