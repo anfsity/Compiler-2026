@@ -4,9 +4,9 @@ namespace exodus::high_ir {
 
 CallGraph::CallGraph() = default;
 
-CallGraph::CallGraph(Module &m) { build(m); }
+CallGraph::CallGraph(const Module &m) { build(m); }
 
-auto CallGraph::build(Module &m) -> void {
+auto CallGraph::build(const Module &m) -> void {
   nodes.clear();
   sccs.clear();
   order.clear();

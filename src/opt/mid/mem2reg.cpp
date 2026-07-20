@@ -1,6 +1,6 @@
 #include "mem2reg.hpp"
 
-namespace exodus::mid_ir {
+namespace exodus::mid_ir::opt {
 
 // TODO: 活跃变量分析
 // TODO: pured SSA
@@ -56,7 +56,7 @@ auto Mem2Reg::collect_promotable_allocas(LinearFunction &func)
     if (!type->is_ptr())
       return false;
     auto target = std::static_pointer_cast<Ptr>(type)->target;
-    return target->is_i32() || target->is_f32();
+    return target->is_i32() || target->is_f32() || target->is_bool();
   };
 
   auto is_alloca_promotable = [&](Op *alloca_op) -> bool {
@@ -241,4 +241,4 @@ auto Mem2Reg::cleanup(
   rewriter.finalize(func);
 }
 
-} // namespace exodus::mid_ir
+} // namespace exodus::mid_ir::opt

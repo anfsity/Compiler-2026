@@ -4,7 +4,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace exodus::mid_ir {
+namespace exodus::mid_ir::opt {
 namespace {
 
 auto has_pred(const Block *block, const Block *pred) -> bool {
@@ -215,4 +215,4 @@ auto CFGSimplify::merge_linear_blocks(LinearFunction &func) -> void {
   } while (merged);
 }
 
-} // namespace exodus::mid_ir
+} // namespace exodus::mid_ir::opt

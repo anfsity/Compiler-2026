@@ -1,10 +1,10 @@
 #pragma once
 
-#include "../opt/AnalysisManager.hpp"
-#include "ir.hpp"
-#include "rewriter.hpp"
+#include "../../mid/ir.hpp"
+#include "../../mid/rewriter.hpp"
+#include "../AnalysisManager.hpp"
 
-namespace exodus::mid_ir {
+namespace exodus::mid_ir::opt {
 
 class CFGSimplify {
   MidIRRewriter rewriter;
@@ -24,4 +24,4 @@ private:
   auto merge_linear_blocks(LinearFunction &func) -> void;
 };
 
-} // namespace exodus::mid_ir
+} // namespace exodus::mid_ir::opt

@@ -1,11 +1,11 @@
 #pragma once
 
-#include "../opt/AnalysisManager.hpp"
-#include "ir.hpp"
-#include "rewriter.hpp"
+#include "../../mid/ir.hpp"
+#include "../../mid/rewriter.hpp"
+#include "../AnalysisManager.hpp"
 #include <unordered_set>
 
-namespace exodus::mid_ir {
+namespace exodus::mid_ir::opt {
 
 class DCE {
   MidIRRewriter rewriter;
@@ -19,7 +19,8 @@ public:
 private:
   static auto has_observable_effect(const Op *op) -> bool;
   static auto
-  has_scoped_users(const Op *op, const std::unordered_set<Op *> &scope) -> bool;
+  has_scoped_users(const Op *op, const std::unordered_set<OpBase *> &scope)
+    -> bool;
 };
 
-} // namespace exodus::mid_ir
+} // namespace exodus::mid_ir::opt

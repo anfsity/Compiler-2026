@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-namespace exodus::mid_ir {
+namespace exodus::mid_ir::opt {
 
 auto GVN::run(
   LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager &am
@@ -224,4 +224,4 @@ auto GVN::is_commutative(OpCode code) -> bool {
          code == OpCode::Xor;
 }
 
-} // namespace exodus::mid_ir
+} // namespace exodus::mid_ir::opt

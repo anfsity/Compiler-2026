@@ -1,0 +1,302 @@
+#include "inst_combine.hpp"
+
+#include <algorithm>
+#include <cstdint>
+#include <limits>
+#include <utility>
+#include <variant>
+
+namespace exodus::mid_ir::opt {
+namespace {
+
+auto int_constant(Value *value) -> std::optional<int> {
+  if (!value || value->kind != ValueKind::Constant)
+    return std::nullopt;
+
+  auto *constant = static_cast<Constant *>(value);
+  if (!std::holds_alternative<int>(constant->val))
+    return std::nullopt;
+  return std::get<int>(constant->val);
+}
+
+auto make_i32(MidModule *module, int value) -> Value * {
+  return module->ctx->make_const(I32::get(), value);
+}
+
+auto make_binary(
+  MidModule *module,
+  OpCode code,
+  Value *lhs,
+  Value *rhs,
+  const std::shared_ptr<Type> &type = I32::get()
+) -> Op * {
+  auto *op = module->make_op(code);
+  op->operands = {lhs, rhs};
+  lhs->addUse(op);
+  rhs->addUse(op);
+  op->result = module->ctx->make_value<OpResult>(type, op);
+  return op;
+}
+
+auto is_zero(Value *value) -> bool {
+  auto constant = int_constant(value);
+  return constant && *constant == 0;
+}
+
+auto is_one(Value *value) -> bool {
+  auto constant = int_constant(value);
+  return constant && *constant == 1;
+}
+
+auto is_power_of_two(int value) -> bool {
+  return value > 0 && (value & (value - 1)) == 0;
+}
+
+struct Range {
+  int64_t min;
+  int64_t max;
+};
+
+auto range_of(Value *value) -> std::optional<Range> {
+  if (!value)
+    return std::nullopt;
+
+  if (auto constant = int_constant(value))
+    return Range{*constant, *constant};
+
+  if (value->kind != ValueKind::OpResult)
+    return std::nullopt;
+
+  auto *creator = static_cast<Op *>(static_cast<OpResult *>(value)->creator);
+  if (!creator || creator->code != OpCode::Mod || creator->operands.size() != 2)
+    return std::nullopt;
+
+  auto divisor = int_constant(creator->operands[1]);
+  if (!divisor || *divisor == 0)
+    return std::nullopt;
+
+  auto magnitude = std::llabs(static_cast<int64_t>(*divisor));
+  return Range{-(magnitude - 1), magnitude - 1};
+}
+
+auto abs_less_than(const Range &range, int64_t bound) -> bool {
+  return range.min > -bound && range.max < bound;
+}
+
+auto is_binary(OpCode code) -> CombineMatcher {
+  return [code](const CombineContext &ctx) {
+    return ctx.op && ctx.op->code == code && ctx.op->operands.size() == 2;
+  };
+}
+
+} // namespace
+
+auto CombineRuleSet::add(
+  std::string name, CombineMatcher match, CombineRewrite rewrite
+) -> CombineRuleSet & {
+  rules.push_back(
+    CombineRule{std::move(name), std::move(match), std::move(rewrite)}
+  );
+  return *this;
+}
+
+auto CombineRuleSet::apply(const CombineContext &ctx) const
+  -> std::optional<CombineResult> {
+  for (const auto &rule : rules) {
+    if (!rule.match(ctx))
+      continue;
+    if (auto result = rule.rewrite(ctx); result && result->changed())
+      return result;
+  }
+  return std::nullopt;
+}
+
+InstCombine::InstCombine(MidModule *m) : module(m) { register_rules(); }
+
+auto InstCombine::register_rules() -> void {
+  // The rule table is intentionally ordered from specific folds to general
+  // algebraic identities. New rules can be added without changing the driver.
+  rules
+    .add(
+      "fold-constants",
+      [](const CombineContext &ctx) {
+        return ctx.op && ctx.op->operands.size() == 2;
+      },
+      [](const CombineContext &ctx) { return fold_constants(ctx); }
+    )
+    .add(
+      "mod-simplify",
+      is_binary(OpCode::Mod),
+      [](const CombineContext &ctx) { return simplify_mod(ctx); }
+    )
+    .add(
+      "arithmetic-identities",
+      [](const CombineContext &ctx) {
+        return ctx.op && ctx.op->operands.size() == 2;
+      },
+      [](const CombineContext &ctx) { return simplify_arithmetic(ctx); }
+    );
+}
+
+auto InstCombine::run(
+  LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager &
+) -> exodus::opt::PreservedAnalysis {
+  bool ever_changed = false;
+
+  // Keep this fixed point local to the pass. This also makes an explicit
+  // -Oinstcombine invocation behave like the default pipeline.
+  for (;;) {
+    rewriter.set_scope(func);
+    bool changed = false;
+
+    for (auto &block : func.blocks)
+      changed |= combine_block(func, *block);
+
+    rewriter.finalize(func);
+    if (!changed)
+      break;
+
+    ever_changed = true;
+  }
+
+  return ever_changed ? exodus::opt::PreservedAnalysis::none()
+                      : exodus::opt::PreservedAnalysis::all();
+}
+
+auto InstCombine::combine_block(LinearFunction &func, Block &block) -> bool {
+  bool changed = false;
+  for (auto it = block.insts.begin(); it != block.insts.end(); ++it) {
+    CombineContext ctx{module, &func, &block, *it};
+    auto result = rules.apply(ctx);
+    if (!result)
+      continue;
+
+    apply(block, it, *result);
+    changed = true;
+  }
+  return changed;
+}
+
+auto InstCombine::apply(
+  Block &block, std::list<Op *>::iterator it, const CombineResult &result
+) -> void {
+  auto *old_op = *it;
+
+  for (auto *new_op : result.prefix)
+    block.insts.insert(it, new_op);
+
+  if (result.replacement && old_op->result)
+    rewriter.replace_all_uses_with(old_op->result, result.replacement);
+
+  rewriter.eraseOp(old_op);
+}
+
+auto InstCombine::fold_constants(const CombineContext &ctx)
+  -> std::optional<CombineResult> {
+  auto *op = ctx.op;
+  auto lhs = int_constant(op->operands[0]);
+  auto rhs = int_constant(op->operands[1]);
+  if (!lhs || !rhs)
+    return std::nullopt;
+
+  int64_t result = 0;
+  switch (op->code) {
+  case OpCode::Add:
+    result = static_cast<int64_t>(*lhs) + *rhs;
+    break;
+  case OpCode::Sub:
+    result = static_cast<int64_t>(*lhs) - *rhs;
+    break;
+  case OpCode::Mul:
+    result = static_cast<int64_t>(*lhs) * *rhs;
+    break;
+  case OpCode::Div:
+    if (*rhs == 0 || (*lhs == std::numeric_limits<int>::min() && *rhs == -1))
+      return std::nullopt;
+    result = *lhs / *rhs;
+    break;
+  case OpCode::Mod:
+    if (*rhs == 0 || (*lhs == std::numeric_limits<int>::min() && *rhs == -1))
+      return std::nullopt;
+    result = *lhs % *rhs;
+    break;
+  default:
+    return std::nullopt;
+  }
+
+  if (
+    result < std::numeric_limits<int>::min() ||
+    result > std::numeric_limits<int>::max()
+  )
+    return std::nullopt;
+
+  return CombineResult{make_i32(ctx.module, static_cast<int>(result)), {}};
+}
+
+auto InstCombine::simplify_mod(const CombineContext &ctx)
+  -> std::optional<CombineResult> {
+  auto *op = ctx.op;
+  auto *lhs = op->operands[0];
+  auto rhs = int_constant(op->operands[1]);
+  if (!rhs || *rhs == 0)
+    return std::nullopt;
+
+  if (is_zero(lhs))
+    return CombineResult{make_i32(ctx.module, 0), {}};
+
+  if (*rhs == 1 || *rhs == -1)
+    return CombineResult{make_i32(ctx.module, 0), {}};
+
+  if (auto range = range_of(lhs)) {
+    auto divisor = std::llabs(static_cast<int64_t>(*rhs));
+    if (abs_less_than(*range, divisor))
+      return CombineResult{lhs, {}};
+
+    // For non-negative x, x % 2^k is exactly x & (2^k - 1).
+    if (*rhs > 0 && range->min >= 0 && is_power_of_two(*rhs)) {
+      auto *mask = make_i32(ctx.module, *rhs - 1);
+      auto *and_op = make_binary(ctx.module, OpCode::And, lhs, mask);
+      return CombineResult{and_op->result, {and_op}};
+    }
+  }
+
+  return std::nullopt;
+}
+
+auto InstCombine::simplify_arithmetic(const CombineContext &ctx)
+  -> std::optional<CombineResult> {
+  auto *op = ctx.op;
+  auto *lhs = op->operands[0];
+  auto *rhs = op->operands[1];
+
+  switch (op->code) {
+  case OpCode::Add:
+    if (is_zero(rhs))
+      return CombineResult{lhs, {}};
+    if (is_zero(lhs))
+      return CombineResult{rhs, {}};
+    break;
+  case OpCode::Sub:
+    if (is_zero(rhs))
+      return CombineResult{lhs, {}};
+    break;
+  case OpCode::Mul:
+    if (is_zero(lhs) || is_zero(rhs))
+      return CombineResult{make_i32(ctx.module, 0), {}};
+    if (is_one(lhs))
+      return CombineResult{rhs, {}};
+    if (is_one(rhs))
+      return CombineResult{lhs, {}};
+    break;
+  case OpCode::Div:
+    if (is_one(rhs))
+      return CombineResult{lhs, {}};
+    break;
+  default:
+    break;
+  }
+
+  return std::nullopt;
+}
+
+} // namespace exodus::mid_ir::opt

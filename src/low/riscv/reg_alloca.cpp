@@ -1053,11 +1053,23 @@ auto same_location(const Location &lhs, const Location &rhs) -> bool {
   return true;
 }
 
-auto temp_location(RegClass reg_class, int storage_size) -> Location {
+auto stack_move_temp_location(RegClass reg_class, int storage_size)
+  -> Location {
   return {
     Location::Kind::Reg,
     reg_class == RegClass::Float ? static_cast<int>(FT11)
                                  : static_cast<int>(T6),
+    -1,
+    reg_class,
+    storage_size,
+  };
+}
+
+auto cycle_temp_location(RegClass reg_class, int storage_size) -> Location {
+  return {
+    Location::Kind::Reg,
+    reg_class == RegClass::Float ? static_cast<int>(FT10)
+                                 : static_cast<int>(T5),
     -1,
     reg_class,
     storage_size,
@@ -1142,7 +1154,7 @@ auto emit_location_move(
   }
 
   if (dst.kind == Location::Kind::Stack && src.kind == Location::Kind::Stack) {
-    auto tmp = temp_location(src.reg_class, src.storage_size);
+    auto tmp = stack_move_temp_location(src.reg_class, src.storage_size);
     emit_location_move(out, tmp, src);
     emit_location_move(out, dst, tmp);
   }
@@ -1177,7 +1189,10 @@ auto resolve_location_moves(std::vector<LocationMove> moves)
     }
 
     auto src = moves.front().src;
-    auto tmp = temp_location(src.reg_class, src.storage_size);
+    // A cycle temporary must survive while other ready moves are emitted.
+    // Stack-to-stack moves use a different scratch register so they cannot
+    // overwrite the value saved here.
+    auto tmp = cycle_temp_location(src.reg_class, src.storage_size);
     emit_location_move(resolved, tmp, src);
     for (auto &move : moves) {
       if (same_location(move.src, src)) {

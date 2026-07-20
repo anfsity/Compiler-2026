@@ -93,6 +93,8 @@ auto InstSimplify::visit(Op *op) -> void {
   case OpCode::Mod:
     if (is_one(rhs))
       replace_with_zero(op);
+    else if (is_all_ones(rhs) || is_zero(lhs))
+      replace_with_zero(op);
     break;
   case OpCode::And:
     if (is_zero(lhs) || is_zero(rhs))

@@ -1,16 +1,16 @@
 #pragma once
 
-#include "dom.hpp"
-#include "flatten.hpp"
-#include "ir.hpp"
-#include "rewriter.hpp"
+#include "../../mid/dom.hpp"
+#include "../../mid/flatten.hpp"
+#include "../../mid/ir.hpp"
+#include "../../mid/rewriter.hpp"
 #include <map>
 #include <set>
 #include <stack>
 #include <unordered_map>
 #include <vector>
 
-namespace exodus::mid_ir {
+namespace exodus::mid_ir::opt {
 
 struct Mem2Reg {
   Mem2Reg(MidModule *m) : module(m) {}
@@ -47,4 +47,4 @@ private:
   ) -> void;
 };
 
-} // namespace exodus::mid_ir
+} // namespace exodus::mid_ir::opt

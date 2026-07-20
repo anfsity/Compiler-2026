@@ -1,6 +1,7 @@
 #include "effects.hpp"
 
 #include "../base/getptr.hpp"
+#include "scc.hpp"
 #include "visitor.hpp"
 #include <unordered_map>
 
@@ -189,15 +190,13 @@ auto erase_local_locations(std::unordered_set<Value *> &locations) -> void {
 struct FunctionEffectCollector : RecursiveOpVisitor<FunctionEffectCollector> {
   const std::unordered_map<std::string, Function *> &functions; // NOLINT
   const std::unordered_map<Function *, OpEffects> &summaries;   // NOLINT
-  std::unordered_set<Function *> &visiting;                     // NOLINT
   OpEffects effects;
 
   FunctionEffectCollector(
     const std::unordered_map<std::string, Function *> &f,
-    const std::unordered_map<Function *, OpEffects> &s,
-    std::unordered_set<Function *> &v
+    const std::unordered_map<Function *, OpEffects> &s
   )
-      : functions(f), summaries(s), visiting(v) {}
+      : functions(f), summaries(s) {}
 
   using RecursiveOpVisitor<FunctionEffectCollector>::visit;
 
@@ -224,9 +223,7 @@ struct FunctionEffectCollector : RecursiveOpVisitor<FunctionEffectCollector> {
     auto call_effects = get_op_effects(*op);
     auto &payload = std::get<CallPayload>(op->payload);
     auto it = functions.find(payload.func_name);
-    if (
-      it == functions.end() || it->second->is_decl || visiting.count(it->second)
-    ) {
+    if (it == functions.end() || it->second->is_decl) {
       effects.merge(call_effects);
       return;
     }
@@ -244,6 +241,7 @@ struct FunctionEffectCollector : RecursiveOpVisitor<FunctionEffectCollector> {
 
 auto get_function_effects(const Module &module)
   -> std::unordered_map<Function *, OpEffects> {
+  CallGraph call_graph(module);
   std::unordered_map<std::string, Function *> functions;
   std::unordered_map<Function *, OpEffects> summaries;
   functions.reserve(module.functions.size());
@@ -254,26 +252,29 @@ auto get_function_effects(const Module &module)
     summaries.emplace(function.get(), OpEffects{});
   }
 
-  // Each iteration can only add effects from callees.  A small hard limit is
-  // intentional: recursive graphs converge quickly and malformed IR should
-  // never make an optimization pass spin forever.
+  // Process SCCs as groups. Calls inside a recursive SCC use the summary from
+  // the previous iteration instead of being treated as unknown calls. The
+  // summaries form a monotone dataflow problem, so recursive pure functions
+  // remain pure while effects introduced by any member of the SCC propagate to
+  // all callers after convergence.
   for (size_t iteration = 0; iteration < module.functions.size() + 1;
        ++iteration) {
     bool changed = false;
-    for (const auto &function : module.functions) {
-      if (function->is_decl)
-        continue;
-      std::unordered_set<Function *> visiting;
-      visiting.insert(function.get());
-      FunctionEffectCollector collector(functions, summaries, visiting);
-      collector.visit(function->body);
-      erase_local_locations(collector.effects.reads);
-      erase_local_locations(collector.effects.writes);
-      collector.effects.has_unique_identity = false;
-      auto &old = summaries[function.get()];
-      if (!same_effects(old, collector.effects)) {
-        old = std::move(collector.effects);
-        changed = true;
+    for (const auto &scc : call_graph.getSCCs()) {
+      for (auto *function : scc) {
+        if (function->is_decl)
+          continue;
+
+        FunctionEffectCollector collector(functions, summaries);
+        collector.visit(function->body);
+        erase_local_locations(collector.effects.reads);
+        erase_local_locations(collector.effects.writes);
+        collector.effects.has_unique_identity = false;
+        auto &old = summaries[function];
+        if (!same_effects(old, collector.effects)) {
+          old = std::move(collector.effects);
+          changed = true;
+        }
       }
     }
     if (!changed)

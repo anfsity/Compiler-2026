@@ -1,6 +1,6 @@
 #include "dce.hpp"
 
-namespace exodus::mid_ir {
+namespace exodus::mid_ir::opt {
 
 auto DCE::run(
   LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager & /* am */
@@ -10,7 +10,7 @@ auto DCE::run(
 
   do { // NOLINT
     local_changed = false;
-    std::unordered_set<Op *> scope;
+    std::unordered_set<OpBase *> scope;
     for (auto &block : func.blocks) {
       scope.insert(block->insts.begin(), block->insts.end());
     }
@@ -46,16 +46,20 @@ auto DCE::has_observable_effect(const Op *op) -> bool {
   }
 }
 
-auto DCE::has_scoped_users(const Op *op, const std::unordered_set<Op *> &scope)
-  -> bool {
+auto DCE::has_scoped_users(
+  const Op *op, const std::unordered_set<OpBase *> &scope
+) -> bool {
   if (!op->result)
     return false;
   for (auto *user_base : op->result->users) {
-    auto *user = dynamic_cast<Op *>(user_base);
-    if (user && scope.count(user))
+    if (!scope.count(user_base))
+      continue;
+
+    auto *user = static_cast<Op *>(user_base);
+    if (user)
       return true;
   }
   return false;
 }
 
-} // namespace exodus::mid_ir
+} // namespace exodus::mid_ir::opt
