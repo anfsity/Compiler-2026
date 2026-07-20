@@ -13,7 +13,7 @@ struct MidIRRewriter : ir::RewriterBase<Op> {
   auto finalize(LinearFunction &func) -> void;
 
 private:
-  std::unordered_set<Op *> scope;
+  std::unordered_set<OpBase *> scope;
 };
 
 inline auto MidIRRewriter::set_scope(LinearFunction &func) -> void {
@@ -35,10 +35,10 @@ inline auto MidIRRewriter::replace_all_uses_with(Value *old_val, Value *new_val)
   );
 
   for (auto *user_base : users_copy) {
-    auto *user = dynamic_cast<Op *>(user_base);
-    if (!user || (!scope.empty() && !scope.count(user))) {
+    if (!scope.count(user_base)) {
       continue;
     }
+    auto *user = static_cast<Op *>(user_base);
 
     bool replaced = false;
     for (auto &operand : user->operands) {

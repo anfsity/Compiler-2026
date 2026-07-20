@@ -1,8 +1,8 @@
-#include "../../mid/cfg_simplify.hpp"
-#include "../../mid/dce.hpp"
-#include "../../mid/gvn.hpp"
-#include "../../mid/mem2reg.hpp"
 #include "../PassRegistry.hpp"
+#include "cfg_simplify.hpp"
+#include "dce.hpp"
+#include "gvn.hpp"
+#include "mem2reg.hpp"
 #include "tail_recursion_elim.hpp"
 
 namespace exodus::mid_ir::opt {

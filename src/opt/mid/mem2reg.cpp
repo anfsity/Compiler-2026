@@ -1,6 +1,6 @@
 #include "mem2reg.hpp"
 
-namespace exodus::mid_ir {
+namespace exodus::mid_ir::opt {
 
 // TODO: 活跃变量分析
 // TODO: pured SSA
@@ -241,4 +241,4 @@ auto Mem2Reg::cleanup(
   rewriter.finalize(func);
 }
 
-} // namespace exodus::mid_ir
+} // namespace exodus::mid_ir::opt

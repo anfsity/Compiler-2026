@@ -1,13 +1,13 @@
 #pragma once
 
-#include "dom.hpp"
-#include "ir.hpp"
-#include "rewriter.hpp"
+#include "../../mid/dom.hpp"
+#include "../../mid/ir.hpp"
+#include "../../mid/rewriter.hpp"
 #include <optional>
 #include <unordered_map>
 #include <vector>
 
-namespace exodus::mid_ir {
+namespace exodus::mid_ir::opt {
 
 struct Expression {
   OpCode code;
@@ -65,4 +65,4 @@ private:
   static auto is_commutative(OpCode code) -> bool;
 };
 
-} // namespace exodus::mid_ir
+} // namespace exodus::mid_ir::opt

@@ -1,10 +1,11 @@
 #ifdef EXODUS_UNIT_TEST
 #include "../src/mid/dom.hpp"
-#include "../src/mid/mem2reg.hpp"
+#include "../src/opt/mid/mem2reg.hpp"
 #include <cassert>
 #include <iostream>
 
 using namespace exodus::mid_ir;
+using namespace exodus::mid_ir::opt;
 using namespace exodus::ir;
 
 auto test_basic_mem2reg() -> void {
