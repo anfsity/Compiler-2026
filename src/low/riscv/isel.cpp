@@ -416,10 +416,42 @@ auto select_branch(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   assert(op.operands.size() == 1);
   assert(op.successors.size() == 2);
   Seq seq;
-  auto cond = use_reg(ctx, op.operands[0], seq);
-  seq.emit(BNE).add_reg(cond).add_reg(ZERO).add_mbb(
-    ctx.block_map.at(op.successors[0])
-  );
+  auto condition = op.operands[0];
+  auto branch_opcode = BNE;
+  Value *branch_value = condition;
+
+  if (condition->kind == ValueKind::OpResult) {
+    auto *condition_op =
+      static_cast<mid_ir::Op *>(static_cast<OpResult *>(condition)->creator);
+    if (
+      condition_op &&
+      (condition_op->code == mid_ir::OpCode::Eq ||
+       condition_op->code == mid_ir::OpCode::Ne) &&
+      condition_op->operands.size() == 2
+    ) {
+      auto is_zero = [](Value *value) {
+        if (value->kind != ValueKind::Constant)
+          return false;
+        auto *constant = static_cast<Constant *>(value);
+        return std::holds_alternative<int>(constant->val) &&
+               std::get<int>(constant->val) == 0;
+      };
+
+      if (is_zero(condition_op->operands[1])) {
+        branch_value = condition_op->operands[0];
+        branch_opcode = condition_op->code == mid_ir::OpCode::Eq ? BEQ : BNE;
+      } else if (is_zero(condition_op->operands[0])) {
+        branch_value = condition_op->operands[1];
+        branch_opcode = condition_op->code == mid_ir::OpCode::Eq ? BEQ : BNE;
+      }
+    }
+  }
+
+  auto cond = use_reg(ctx, branch_value, seq);
+  seq.emit(branch_opcode)
+    .add_reg(cond)
+    .add_reg(ZERO)
+    .add_mbb(ctx.block_map.at(op.successors[0]));
   seq.emit(JAL)
     .add_reg(ZERO, true, false)
     .add_mbb(ctx.block_map.at(op.successors[1]));
@@ -574,6 +606,103 @@ auto select_op(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   throw std::logic_error("unsupported mid IR opcode");
 }
 
+auto is_dead_def_candidate(int opcode) -> bool {
+  switch (opcode) {
+  case COPY:
+  case ADD:
+  case ADDI:
+  case SUB:
+  case SLL:
+  case SLLI:
+  case SRL:
+  case SRLI:
+  case SRA:
+  case SRAI:
+  case AND:
+  case ANDI:
+  case OR:
+  case ORI:
+  case XOR:
+  case XORI:
+  case SLT:
+  case SLTI:
+  case SLTU:
+  case SLTIU:
+  case MUL:
+  case DIV:
+  case REM:
+  case ADDW:
+  case SUBW:
+  case MULW:
+  case DIVW:
+  case REMW:
+  case FADD_S:
+  case FSUB_S:
+  case FMUL_S:
+  case FDIV_S:
+  case FSGNJ_S:
+  case FSGNJN_S:
+  case FSGNJX_S:
+  case FEQ_S:
+  case FLT_S:
+  case FLE_S:
+  case FCVT_W_S:
+  case FCVT_WU_S:
+  case FCVT_S_W:
+  case FCVT_S_WU:
+  case FMV_X_W:
+  case FMV_W_X:
+  case LI:
+  case LA:
+    return true;
+  default:
+    return false;
+  }
+}
+
+auto eliminate_dead_defs(MachineFunction &function) -> void {
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    std::unordered_map<int, int> use_count;
+    for (const auto &block : function.blocks) {
+      for (const auto &mi : block->insts) {
+        for (const auto &operand : mi.operands) {
+          if (!operand.is_reg())
+            continue;
+          const auto &reg =
+            std::get<low_ir::MachineOperand::RegData>(operand.data);
+          if (reg.is_use && reg.id >= 128)
+            ++use_count[reg.id];
+        }
+      }
+    }
+
+    for (auto &block : function.blocks) {
+      for (auto it = block->insts.begin(); it != block->insts.end();) {
+        bool has_virtual_def = false;
+        bool removable = is_dead_def_candidate(it->opcode);
+        for (const auto &operand : it->operands) {
+          if (!operand.is_def())
+            continue;
+          auto reg = operand.get_reg();
+          if (reg < 128 || use_count[reg] != 0) {
+            removable = false;
+            break;
+          }
+          has_virtual_def = true;
+        }
+        if (removable && has_virtual_def) {
+          it = block->insts.erase(it);
+          changed = true;
+          continue;
+        }
+        ++it;
+      }
+    }
+  }
+}
+
 auto lower_function(const mid_ir::LinearFunction &f)
   -> std::unique_ptr<MachineFunction> {
   auto mf = std::make_unique<MachineFunction>();
@@ -609,6 +738,8 @@ auto lower_function(const mid_ir::LinearFunction &f)
       append(*ctx.block, select_op(ctx, *op));
     }
   }
+
+  eliminate_dead_defs(*mf);
 
   return mf;
 }

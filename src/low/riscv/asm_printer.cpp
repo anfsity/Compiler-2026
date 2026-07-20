@@ -167,7 +167,7 @@ auto append_load_address(
 
 auto choose_scratch_reg(std::initializer_list<std::string_view> conflicts)
   -> int {
-  for (auto candidate : {static_cast<int>(T4), static_cast<int>(T3)}) {
+  for (auto candidate : {static_cast<int>(T6), static_cast<int>(T5)}) {
     auto candidate_name = get_reg_name(candidate);
     if (
       std::find(conflicts.begin(), conflicts.end(), candidate_name) ==
@@ -176,7 +176,7 @@ auto choose_scratch_reg(std::initializer_list<std::string_view> conflicts)
       return candidate;
     }
   }
-  return T4;
+  return T6;
 }
 
 auto append_mem_inst(
@@ -185,7 +185,7 @@ auto append_mem_inst(
   const std::string &reg,
   int offset,
   const std::string &base,
-  int tmp_reg = T4
+  int tmp_reg = T6
 ) -> void {
   if (offset >= -2048 && offset <= 2047) {
     out += fmt::format("    {} {}, {}({})\n", opcode, reg, offset, base);
@@ -218,7 +218,7 @@ auto append_addi_or_li_add(
     out += fmt::format("    addi {}, {}, {}\n", dst, src, offset);
     return;
   }
-  auto tmp = dst == src ? get_reg_name(T4) : dst;
+  auto tmp = dst == src ? get_reg_name(T6) : dst;
   out += fmt::format("    li {}, {}\n", tmp, offset);
   out += fmt::format("    add {}, {}, {}\n", dst, src, tmp);
 }
@@ -398,6 +398,17 @@ auto emit_inst(
   case BGE:
   case BLTU:
   case BGEU: {
+    if (
+      (inst.opcode == BEQ || inst.opcode == BNE) && ops[1].get_reg() == ZERO
+    ) {
+      out += fmt::format(
+        "    {} {}, {}\n",
+        inst.opcode == BEQ ? "beqz" : "bnez",
+        reg_name(ops[0]),
+        target_label(function, ops[2])
+      );
+      break;
+    }
     std::string_view name = inst.opcode == BEQ    ? "beq"
                             : inst.opcode == BNE  ? "bne"
                             : inst.opcode == BLT  ? "blt"
@@ -495,6 +506,18 @@ auto emit_inst(
     append_stack_adjust(out, layout.frame_bytes);
     out += "    ret\n";
     break;
+  case RET_NOFRAME:
+    out += "    ret\n";
+    break;
+  case PROLOGUE:
+    append_stack_adjust(out, -layout.frame_bytes);
+    append_mem_inst(out, "sd", "ra", layout.ra_offset, "sp");
+    for (const auto &[reg, offset] : layout.saved_reg_offsets) {
+      append_mem_inst(
+        out, is_float_reg(reg) ? "fsw" : "sd", get_reg_name(reg), offset, "sp"
+      );
+    }
+    break;
   default:
     throw std::logic_error("unsupported RISC-V opcode in asm printer");
   }
@@ -530,14 +553,6 @@ auto AsmPrinter::to_string(const MachineFunction &function) -> std::string {
   std::string out;
   out += fmt::format("    .globl {}\n", public_function_label(function));
   out += fmt::format("{}:\n", public_function_label(function));
-  append_stack_adjust(out, -layout.frame_bytes);
-  append_mem_inst(out, "sd", "ra", layout.ra_offset, "sp");
-  for (const auto &[reg, offset] : layout.saved_reg_offsets) {
-    append_mem_inst(
-      out, is_float_reg(reg) ? "fsw" : "sd", get_reg_name(reg), offset, "sp"
-    );
-  }
-
   for (const auto &block : function.blocks) {
     out += fmt::format("{}:\n", block_label(function, *block));
     for (const auto &inst : block->insts) {

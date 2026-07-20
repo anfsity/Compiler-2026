@@ -89,6 +89,25 @@ auto is_binary(OpCode code) -> CombineMatcher {
   };
 }
 
+auto is_zero_compare(Value *value, OpCode code, Value *&compared) -> bool {
+  if (!value || value->kind != ValueKind::OpResult)
+    return false;
+
+  auto *creator = static_cast<Op *>(static_cast<OpResult *>(value)->creator);
+  if (!creator || creator->code != code || creator->operands.size() != 2)
+    return false;
+
+  if (is_zero(creator->operands[0])) {
+    compared = creator->operands[1];
+    return true;
+  }
+  if (is_zero(creator->operands[1])) {
+    compared = creator->operands[0];
+    return true;
+  }
+  return false;
+}
+
 } // namespace
 
 auto CombineRuleSet::add(
@@ -117,6 +136,83 @@ auto InstCombine::register_rules() -> void {
   // The rule table is intentionally ordered from specific folds to general
   // algebraic identities. New rules can be added without changing the driver.
   rules
+    .add(
+      "cancel-boolean-zero-compare",
+      [](const CombineContext &ctx) {
+        if (
+          !ctx.op ||
+          (ctx.op->code != OpCode::Eq && ctx.op->code != OpCode::Ne) ||
+          ctx.op->operands.size() != 2 || !is_zero(ctx.op->operands[1])
+        )
+          return false;
+        Value *compared = nullptr;
+        return is_zero_compare(ctx.op->operands[0], OpCode::Eq, compared) ||
+               is_zero_compare(ctx.op->operands[0], OpCode::Ne, compared);
+      },
+      [](const CombineContext &ctx) -> std::optional<CombineResult> {
+        Value *compared = nullptr;
+        OpCode inner_code = OpCode::Eq;
+        if (is_zero_compare(ctx.op->operands[0], OpCode::Eq, compared)) {
+          inner_code = OpCode::Eq;
+        } else if (is_zero_compare(ctx.op->operands[0], OpCode::Ne, compared)) {
+          inner_code = OpCode::Ne;
+        } else {
+          return std::nullopt;
+        }
+
+        auto replacement_code =
+          ctx.op->code == OpCode::Eq
+            ? (inner_code == OpCode::Eq ? OpCode::Ne : OpCode::Eq)
+            : inner_code;
+
+        auto *inner = static_cast<Op *>(
+          static_cast<OpResult *>(ctx.op->operands[0])->creator
+        );
+        auto *inner_zero = inner->operands[0] == compared ? inner->operands[1]
+                                                          : inner->operands[0];
+        auto *replacement = make_binary(
+          ctx.module,
+          replacement_code,
+          compared,
+          inner_zero,
+          ctx.op->result->type
+        );
+        return CombineResult{replacement->result, {replacement}};
+      }
+    )
+    .add(
+      "remove-bool-zext-before-branch",
+      [](const CombineContext &ctx) {
+        if (
+          !ctx.op ||
+          (ctx.op->code != OpCode::Eq && ctx.op->code != OpCode::Ne) ||
+          ctx.op->operands.size() != 2 || !is_zero(ctx.op->operands[1])
+        )
+          return false;
+        auto *zext = ctx.op->operands[0];
+        if (zext->kind != ValueKind::OpResult)
+          return false;
+        auto *zext_op =
+          static_cast<Op *>(static_cast<OpResult *>(zext)->creator);
+        return zext_op && zext_op->code == OpCode::ZExt &&
+               zext_op->operands.size() == 1 &&
+               zext_op->operands[0]->type->is_bool();
+      },
+      [](const CombineContext &ctx) -> std::optional<CombineResult> {
+        auto *zext_op = static_cast<Op *>(
+          static_cast<OpResult *>(ctx.op->operands[0])->creator
+        );
+        auto *source = zext_op->operands[0];
+        if (ctx.op->code == OpCode::Ne)
+          return CombineResult{source, {}};
+
+        auto *zero = ctx.module->ctx->make_const(Bool::get(), 0);
+        auto *replacement = make_binary(
+          ctx.module, OpCode::Eq, source, zero, ctx.op->result->type
+        );
+        return CombineResult{replacement->result, {replacement}};
+      }
+    )
     .add(
       "fold-constants",
       [](const CombineContext &ctx) {

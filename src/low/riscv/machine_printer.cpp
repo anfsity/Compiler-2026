@@ -92,6 +92,8 @@ auto get_op_name(int op) -> std::string {
     {LA, "LA"sv},
     {CALL, "CALL"sv},
     {RET, "RET"sv},
+    {RET_NOFRAME, "RET_NOFRAME"sv},
+    {PROLOGUE, "PROLOGUE"sv},
     {ADJSTACKDOWN, "ADJSTACKDOWN"sv},
     {ADJSTACKUP, "ADJSTACKUP"sv}
   };

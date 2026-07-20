@@ -86,6 +86,8 @@ auto opcode_name(int opcode) -> std::string_view {
     case LA: return "LA";
     case CALL: return "CALL";
     case RET: return "RET";
+    case RET_NOFRAME: return "RET_NOFRAME";
+    case PROLOGUE: return "PROLOGUE";
     case ADJSTACKDOWN: return "ADJSTACKDOWN";
     case ADJSTACKUP: return "ADJSTACKUP";
     default: return "OP";

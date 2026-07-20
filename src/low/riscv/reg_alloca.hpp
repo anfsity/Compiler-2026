@@ -76,6 +76,7 @@ struct LiveInterval {
   SpillCost spill_cost;
   SplitPlan split_plan;
   bool spilled = false;
+  bool crosses_call = false;
 };
 
 auto run_ra(low_ir::MachineFunction &function, bool dump_ra, bool emit_ra)
