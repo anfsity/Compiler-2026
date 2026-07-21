@@ -46,6 +46,12 @@ auto storage_size(const std::shared_ptr<Type> &type) -> size_t {
                         : static_cast<size_t>(type->byte_size());
 }
 
+auto is_scalar_global(Value *root) -> bool {
+  if (!root || root->kind != ValueKind::GlobalVar || !root->type->is_ptr())
+    return false;
+  return !std::static_pointer_cast<Ptr>(root->type)->target->is_array();
+}
+
 } // namespace
 
 auto BasicAliasAnalysis::get_location(Value *pointer, size_t size) const
@@ -151,6 +157,15 @@ auto BasicAliasAnalysis::alias(
     return AliasResult::MayAlias;
 
   if (lhs.root != rhs.root) {
+    // SysY cannot take the address of a scalar. Pointer arguments originate
+    // from array objects, so they cannot alias a scalar global even though
+    // both lower to an i32* or f32* in Mid IR.
+    if (
+      (is_scalar_global(lhs.root) && rhs.root->kind == ValueKind::Argument) ||
+      (is_scalar_global(rhs.root) && lhs.root->kind == ValueKind::Argument)
+    ) {
+      return AliasResult::NoAlias;
+    }
     if (is_identified_object(lhs.root) && is_identified_object(rhs.root))
       return AliasResult::NoAlias;
     return AliasResult::MayAlias;

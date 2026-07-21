@@ -54,6 +54,8 @@ private:
   auto process_op(
     Op *op,
     std::unordered_map<Expression, Value *, ExpressionHash> &loads,
+    std::unordered_map<ValueNumber, Value *> &stored_values,
+    std::unordered_map<ValueNumber, Op *> &pending_stores,
     std::vector<Expression> &inserted
   ) -> void;
   auto number_value(Value *value) -> ValueNumber;

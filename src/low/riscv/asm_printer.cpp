@@ -324,6 +324,14 @@ auto emit_inst(
     );
     break;
   }
+  case ADDIW:
+    out += fmt::format(
+      "    addiw {}, {}, {}\n",
+      reg_name(ops[0]),
+      reg_name(ops[1]),
+      imm_value(ops[2])
+    );
+    break;
   case ADDI:
     if (ops[2].kind == MachineOperand::FrameIdx) {
       append_addi_or_li_add(

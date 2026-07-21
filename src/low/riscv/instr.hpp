@@ -140,7 +140,7 @@ enum Opcode : uint16_t {
   // [RV64 word / RV32M 乘除法] 256-383
   MUL = 256, MULH, MULHSU, MULHU,
   DIV, DIVU, REM, REMU,
-  ADDW, SUBW, MULW, DIVW, REMW,
+  ADDW, ADDIW, SUBW, MULW, DIVW, REMW,
 
   // [RV32F 单精度浮点] 384-511
   FLW = 384, FSW,

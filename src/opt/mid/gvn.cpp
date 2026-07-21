@@ -31,10 +31,12 @@ auto GVN::run(
 
 auto GVN::visit(Block *block) -> void {
   std::unordered_map<Expression, Value *, ExpressionHash> loads;
+  std::unordered_map<ValueNumber, Value *> stored_values;
+  std::unordered_map<ValueNumber, Op *> pending_stores;
   std::vector<Expression> inserted;
 
   for (auto *op : block->insts) {
-    process_op(op, loads, inserted);
+    process_op(op, loads, stored_values, pending_stores, inserted);
   }
 
   for (auto *child : dom->get_children(block)) {
@@ -49,11 +51,29 @@ auto GVN::visit(Block *block) -> void {
 auto GVN::process_op(
   Op *op,
   std::unordered_map<Expression, Value *, ExpressionHash> &loads,
+  std::unordered_map<ValueNumber, Value *> &stored_values,
+  std::unordered_map<ValueNumber, Op *> &pending_stores,
   std::vector<Expression> &inserted
 ) -> void {
   if (op->code == OpCode::Load && op->result && !op->operands.empty()) {
+    auto address_number = number_value(op->operands[0]);
+    if (
+      auto stored = stored_values.find(address_number);
+      stored != stored_values.end()
+    ) {
+      rewriter.replace_all_uses_with(op->result, stored->second);
+      rewriter.eraseOp(op);
+      value_numbers[op->result] = number_value(stored->second);
+      changed = true;
+      return;
+    }
+
+    // A load through a different value number may still alias a preceding
+    // store. Stop forwarding and dead-store tracking at that point.
+    stored_values.clear();
+    pending_stores.clear();
     Expression expression{
-      OpCode::Load, op->result->type.get(), {number_value(op->operands[0])}
+      OpCode::Load, op->result->type.get(), {address_number}
     };
     auto it = loads.find(expression);
     if (it != loads.end()) {
@@ -68,8 +88,27 @@ auto GVN::process_op(
     return;
   }
 
+  if (op->code == OpCode::Store && op->operands.size() >= 2) {
+    auto address_number = number_value(op->operands[1]);
+    if (
+      auto previous = pending_stores.find(address_number);
+      previous != pending_stores.end()
+    ) {
+      rewriter.eraseOp(previous->second);
+      changed = true;
+    }
+    loads.clear();
+    stored_values.clear();
+    pending_stores.clear();
+    stored_values[address_number] = op->operands[0];
+    pending_stores[address_number] = op;
+    return;
+  }
+
   if (is_memory_barrier(op->code)) {
     loads.clear();
+    stored_values.clear();
+    pending_stores.clear();
     return;
   }
 

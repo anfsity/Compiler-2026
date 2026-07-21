@@ -308,8 +308,9 @@ auto LICM::hoist_set_fits_register_budget(const Loop &loop) const -> bool {
 
   bool has_call = loop_contains_call(loop);
   // Keep two registers free for instructions introduced while lowering the
-  // loop body. The allocator exposes 5/11 integer and 10/12 float registers.
-  size_t integer_budget = has_call ? 9u : 3u;
+  // loop body. Permit a few profitable invariants without letting deeply
+  // nested loops occupy every caller-saved register.
+  size_t integer_budget = has_call ? 9u : 8u;
   size_t float_budget = has_call ? 10u : 8u;
   return live_in_pressure(loop, false) + integer_boundary <= integer_budget &&
          live_in_pressure(loop, true) + float_boundary <= float_budget;

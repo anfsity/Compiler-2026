@@ -1,6 +1,7 @@
 #include "memoization.hpp"
 
 #include "../../high/effects.hpp"
+#include "../../high/scc.hpp"
 #include <algorithm>
 #include <memory>
 #include <optional>
@@ -348,12 +349,13 @@ auto Memoization::run(
   Module &m, exodus::opt::ModuleAnalysisManager & /* am */
 ) -> exodus::opt::PreservedAnalysis {
   auto effects = get_function_effects(m);
+  CallGraph call_graph(m);
   bool changed = false;
 
   for (auto &function_ptr : m.functions) {
     auto &function = *function_ptr;
     auto effect_it = effects.find(&function);
-    if (effect_it == effects.end())
+    if (effect_it == effects.end() || !call_graph.isRecursive(&function))
       continue;
 
     auto context_keys = is_memoizable(function, effect_it->second);
