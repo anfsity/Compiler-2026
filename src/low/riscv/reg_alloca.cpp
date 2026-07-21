@@ -18,8 +18,8 @@ auto is_use_operand(const low_ir::MachineOperand &operand) -> bool {
 auto allocable_int_regs(bool crosses_call) -> std::vector<int> {
   if (crosses_call)
     return {S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11};
-  // t6 is reserved for large frame offsets; t5 is used for spill loads.
-  return {T0, T1, T2, T3, T4};
+  // Keep t5/t6 and a7 available for spill and parallel-copy temporaries.
+  return {T0, T1, T2, T3, T4, A0, A1, A2, A3, A4, A5, A6};
 }
 
 auto allocable_float_regs(bool crosses_call) -> std::vector<int> {
@@ -549,6 +549,22 @@ auto collect_hints(low_ir::MachineFunction &function)
   return hints;
 }
 
+auto collect_fixed_reg_positions(low_ir::MachineFunction &function)
+  -> std::unordered_map<int, std::vector<int>> {
+  std::unordered_map<int, std::vector<int>> positions;
+  int pos = 0;
+  for (const auto &block : function.blocks) {
+    for (const auto &inst : block->insts) {
+      for (const auto &operand : inst.operands) {
+        if (operand.is_reg() && !is_virtual_reg(operand.get_reg()))
+          positions[operand.get_reg()].push_back(pos);
+      }
+      ++pos;
+    }
+  }
+  return positions;
+}
+
 auto compute_spill_cost(LiveInterval &interval) -> void {
   interval.spill_cost.use_count =
     static_cast<int>(interval.use_positions.size());
@@ -560,7 +576,10 @@ auto compute_spill_cost(LiveInterval &interval) -> void {
                               interval.spill_cost.span;
 }
 
-auto allocate_registers(std::vector<LiveInterval> &intervals) -> void {
+auto allocate_registers(
+  std::vector<LiveInterval> &intervals,
+  const std::unordered_map<int, std::vector<int>> &fixed_reg_positions
+) -> void {
   std::vector<LiveInterval *> active;
   for (auto &interval : intervals) {
     active.erase(
@@ -577,6 +596,23 @@ auto allocate_registers(std::vector<LiveInterval> &intervals) -> void {
     auto regs = interval.reg_class == RegClass::Float
                   ? allocable_float_regs(interval.crosses_call)
                   : allocable_int_regs(interval.crosses_call);
+    regs.erase(
+      std::remove_if(
+        regs.begin(),
+        regs.end(),
+        [&](int reg) {
+          auto found = fixed_reg_positions.find(reg);
+          return found != fixed_reg_positions.end() &&
+                 std::any_of(
+                   found->second.begin(), found->second.end(), [&](int pos) {
+                     return contains_pos(interval, pos);
+                   }
+                 );
+        }
+      ),
+      regs.end()
+    );
+    const auto allowed_regs = regs;
     for (auto *active_interval : active) {
       if (active_interval->reg_class == interval.reg_class) {
         regs.erase(
@@ -598,19 +634,22 @@ auto allocate_registers(std::vector<LiveInterval> &intervals) -> void {
     }
 
     if (interval.assigned_reg < 0) {
-      auto victim = std::min_element(
-        active.begin(), active.end(), [&](auto *lhs, auto *rhs) {
-          if (lhs->reg_class != interval.reg_class)
-            return false;
-          if (rhs->reg_class != interval.reg_class)
-            return true;
-          return lhs->spill_cost.score < rhs->spill_cost.score;
+      auto victim = active.end();
+      for (auto it = active.begin(); it != active.end(); ++it) {
+        if (
+          (*it)->reg_class != interval.reg_class ||
+          std::find(
+            allowed_regs.begin(), allowed_regs.end(), (*it)->assigned_reg
+          ) == allowed_regs.end()
+        ) {
+          continue;
         }
-      );
-      if (
-        victim != active.end() && (*victim)->reg_class != interval.reg_class
-      ) {
-        victim = active.end();
+        if (
+          victim == active.end() ||
+          (*it)->spill_cost.score < (*victim)->spill_cost.score
+        ) {
+          victim = it;
+        }
       }
 
       if (
@@ -742,13 +781,26 @@ auto insert_spills(
         std::vector<int> candidates;
         if (interval.reg_class == RegClass::Float) {
           candidates = {
-            FT0, FT1, FT2, FT3, FT4, FT5, FT6, FT7, FT8, FT9, FT10, FT11,
-            FS0, FS1, FS2, FS3, FS4, FS5, FS6, FS7, FS8, FS9, FS10, FS11,
+            FT11, FT10, FA7, FA6, FA5, FA4, FA3, FA2, FA1, FA0,
+            FT9,  FT8,  FT7, FT6, FT5, FT4, FT3, FT2, FT1, FT0,
           };
         } else {
           candidates = {
-            T5,  S1,  S2, S3, S4, S5, S6, S7, S8, S9,
-            S10, S11, A0, A1, A2, A3, A4, A5, A6, A7,
+            T5,
+            A7,
+            T6,
+            A6,
+            A5,
+            A4,
+            A3,
+            A2,
+            A1,
+            A0,
+            T4,
+            T3,
+            T2,
+            T1,
+            T0,
           };
         }
 
@@ -776,8 +828,9 @@ auto insert_spills(
           std::find_if(candidates.begin(), candidates.end(), [&](int reg) {
             return !is_occupied(reg);
           });
-        auto tmp_reg =
-          candidate == candidates.end() ? candidates.front() : *candidate;
+        if (candidate == candidates.end())
+          std::abort();
+        auto tmp_reg = *candidate;
         used_tmp_regs.insert(tmp_reg);
         tmp_by_spill_slot[interval.spill_slot] = tmp_reg;
         return tmp_reg;
@@ -1582,8 +1635,16 @@ auto plan_frame_region(low_ir::MachineFunction &function) -> void {
     std::sort(live_in.begin(), live_in.end());
 
     std::unordered_map<int, int> split_regs;
-    for (auto old_reg : live_in)
-      split_regs.emplace(old_reg, function.new_vreg());
+    for (auto old_reg : live_in) {
+      auto storage_size = 4;
+      if (
+        auto it = function.vreg_storage_sizes.find(old_reg);
+        it != function.vreg_storage_sizes.end()
+      ) {
+        storage_size = it->second;
+      }
+      split_regs.emplace(old_reg, function.new_vreg(storage_size));
+    }
 
     for (auto *block : active) {
       for (auto &mi : block->insts) {
@@ -1691,7 +1752,16 @@ auto run_ra(low_ir::MachineFunction &function, bool dump_ra, bool emit_ra)
   detail::plan_frame_region(function);
 
   auto intervals = detail::build_intervals(function);
+  for (auto &interval : intervals) {
+    if (
+      auto it = function.vreg_storage_sizes.find(interval.vreg);
+      it != function.vreg_storage_sizes.end()
+    ) {
+      interval.storage_size = std::max(interval.storage_size, it->second);
+    }
+  }
   auto hints = detail::collect_hints(function);
+  auto fixed_reg_positions = detail::collect_fixed_reg_positions(function);
 
   for (auto &interval : intervals) {
     if (auto it = hints.find(interval.vreg); it != hints.end()) {
@@ -1731,7 +1801,7 @@ auto run_ra(low_ir::MachineFunction &function, bool dump_ra, bool emit_ra)
   }
   printer.dump_intervals(function, "split", split_intervals);
 
-  detail::allocate_registers(split_intervals);
+  detail::allocate_registers(split_intervals, fixed_reg_positions);
   printer.dump_intervals(function, "allocated", split_intervals);
 
   if (!emit_ra) {

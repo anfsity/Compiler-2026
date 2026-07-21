@@ -4,6 +4,7 @@
 #include <list>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -105,9 +106,14 @@ struct MachineFunction {
   };
 
   std::vector<FrameSlot> stack_slots;
+  std::unordered_map<int, int> vreg_storage_sizes;
   int vreg_cnt = 128;
 
-  auto new_vreg() -> int { return vreg_cnt++; }
+  auto new_vreg(int storage_size = 4) -> int {
+    auto reg = vreg_cnt++;
+    vreg_storage_sizes[reg] = storage_size;
+    return reg;
+  }
   auto add_stack_slot(
     int size,
     int align = 4,

@@ -39,8 +39,12 @@ struct Seq {
   auto take() -> InstSeq { return std::move(insts); }
 };
 
+auto storage_size(const std::shared_ptr<Type> &type) -> int {
+  return type->is_ptr() ? 8 : type->byte_size();
+}
+
 auto new_vreg(LoweringContext &ctx, Value *value) -> int {
-  auto reg = ctx.function->new_vreg();
+  auto reg = ctx.function->new_vreg(storage_size(value->type));
   ctx.value_regs[value] = reg;
   return reg;
 }
@@ -58,10 +62,6 @@ auto float_bits(float value) -> int {
   int bits = 0;
   std::memcpy(&bits, &value, sizeof(float));
   return bits;
-}
-
-auto storage_size(const std::shared_ptr<Type> &type) -> int {
-  return type->is_ptr() ? 8 : type->byte_size();
 }
 
 auto storage_align(const std::shared_ptr<Type> &type) -> int {
@@ -89,7 +89,7 @@ auto materialize_float_constant(LoweringContext &ctx, float value, Seq &seq)
 
 auto materialize_global_addr(LoweringContext &ctx, GlobalAddr *global, Seq &seq)
   -> int {
-  auto reg = ctx.function->new_vreg();
+  auto reg = ctx.function->new_vreg(8);
   seq.emit(LA)
     .add_reg(reg, true, false)
     .add_operand(low_ir::MachineOperand::symbol(global->name));
@@ -304,7 +304,7 @@ auto select_getptr(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   bool defined_dst = false;
   for (const auto &step : plan.steps) {
     if (step.kind == ir::GetPtrStep::Kind::ImplicitLoad) {
-      auto loaded = ctx.function->new_vreg();
+      auto loaded = ctx.function->new_vreg(8);
       seq.emit(LD).add_reg(loaded, true, false).add_reg(cur).add_imm(0);
       cur = loaded;
       continue;
@@ -327,7 +327,7 @@ auto select_getptr(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
       auto size_reg = materialize_int_constant(ctx, step.scale, seq);
       seq.emit(MUL).add_reg(scaled, true, false).add_reg(idx).add_reg(size_reg);
     }
-    auto next = (&step == &plan.steps.back()) ? dst : ctx.function->new_vreg();
+    auto next = (&step == &plan.steps.back()) ? dst : ctx.function->new_vreg(8);
     seq.emit(ADD).add_reg(next, true, false).add_reg(cur).add_reg(scaled);
     cur = next;
     defined_dst = next == dst;
