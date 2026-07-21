@@ -5,6 +5,7 @@
 #include "inst_combine.hpp"
 #include "licm.hpp"
 #include "loop_simplify.hpp"
+#include "loop_strength_reduce.hpp"
 #include "mem2reg.hpp"
 #include "tail_recursion_elim.hpp"
 
@@ -27,6 +28,11 @@ static exodus::opt::RegisterLinearFunctionPass<LICM>
 
 static exodus::opt::RegisterLinearFunctionPass<GVN>
   reg_gvn("gvn", "global value numbering");
+
+static exodus::opt::RegisterLinearFunctionPass<LoopStrengthReduce>
+  reg_loop_strength_reduce(
+    "loop_strength_reduce", "reduce affine loop address calculations"
+  );
 
 static exodus::opt::RegisterLinearFunctionPass<CFGSimplify>
   reg_cfg_simplify("cfg_simplify", "control-flow graph simplification");

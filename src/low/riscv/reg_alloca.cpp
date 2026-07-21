@@ -15,9 +15,18 @@ auto is_use_operand(const low_ir::MachineOperand &operand) -> bool {
          std::get<low_ir::MachineOperand::RegData>(operand.data).is_use;
 }
 
-auto allocable_int_regs(bool crosses_call) -> std::vector<int> {
+auto allocable_int_regs(bool crosses_call, bool prefer_callee_saved)
+  -> std::vector<int> {
   if (crosses_call)
     return {S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11};
+
+  if (prefer_callee_saved) {
+    return {
+      S1, S2, S3, S4, S5, S6, S7, S8, T0, T1,
+      T2, T3, T4, A0, A1, A2, A3, A4, A5, A6,
+    };
+  }
+
   // Keep t5/t6 and a7 available for spill and parallel-copy temporaries.
   return {T0, T1, T2, T3, T4, A0, A1, A2, A3, A4, A5, A6};
 }
@@ -26,6 +35,17 @@ auto allocable_float_regs(bool crosses_call) -> std::vector<int> {
   if (crosses_call)
     return {FS0, FS1, FS2, FS3, FS4, FS5, FS6, FS7, FS8, FS9, FS10, FS11};
   return {FT0, FT1, FT2, FT3, FT4, FT5, FT6, FT7, FT8, FT9};
+}
+
+auto interval_prefers_callee_saved(const LiveInterval &interval) -> bool {
+  constexpr int LongLivedSpan = 32;
+  return !interval.crosses_call && interval.segments.size() > 1 &&
+         interval.segments.back().end - interval.segments.front().start >=
+           LongLivedSpan;
+}
+
+auto is_callee_saved_int_reg(int reg) -> bool {
+  return reg >= static_cast<int>(S1) && reg <= static_cast<int>(S8);
 }
 
 auto is_float_phys_reg(int reg) -> bool {
@@ -593,9 +613,12 @@ auto allocate_registers(
       active.end()
     );
 
-    auto regs = interval.reg_class == RegClass::Float
-                  ? allocable_float_regs(interval.crosses_call)
-                  : allocable_int_regs(interval.crosses_call);
+    auto prefer_callee_saved = interval.reg_class == RegClass::Int &&
+                               interval_prefers_callee_saved(interval);
+    auto regs =
+      interval.reg_class == RegClass::Float
+        ? allocable_float_regs(interval.crosses_call)
+        : allocable_int_regs(interval.crosses_call, prefer_callee_saved);
     regs.erase(
       std::remove_if(
         regs.begin(),
@@ -623,6 +646,9 @@ auto allocate_registers(
     }
 
     for (const auto &hint : interval.hints) {
+      if (prefer_callee_saved && !is_callee_saved_int_reg(hint.reg)) {
+        continue;
+      }
       if (std::find(regs.begin(), regs.end(), hint.reg) != regs.end()) {
         interval.assigned_reg = hint.reg;
         break;

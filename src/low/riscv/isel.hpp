@@ -16,6 +16,8 @@ struct LoweringContext {
   low_ir::MachineBasicBlock *block = nullptr;
 
   std::unordered_map<ir::Value *, int> value_regs;
+  std::unordered_map<ir::Value *, int> invariant_global_load_regs;
+  std::unordered_map<ir::Value *, int> block_global_addr_regs;
   std::unordered_map<const mid_ir::Block *, low_ir::MachineBasicBlock *>
     block_map;
 };

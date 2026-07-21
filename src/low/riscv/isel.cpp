@@ -1,11 +1,13 @@
 #include "isel.hpp"
 
 #include "../../base/getptr.hpp"
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <optional>
 #include <stdexcept>
+#include <unordered_set>
 #include <utility>
 
 namespace exodus::riscv {
@@ -108,7 +110,16 @@ auto use_reg(LoweringContext &ctx, Value *value, Seq &seq) -> int {
   }
 
   if (value->kind == ValueKind::GlobalVar) {
-    return materialize_global_addr(ctx, static_cast<GlobalAddr *>(value), seq);
+    if (
+      auto it = ctx.block_global_addr_regs.find(value);
+      it != ctx.block_global_addr_regs.end()
+    ) {
+      return it->second;
+    }
+    auto reg =
+      materialize_global_addr(ctx, static_cast<GlobalAddr *>(value), seq);
+    ctx.block_global_addr_regs[value] = reg;
+    return reg;
   }
 
   if (auto it = ctx.value_regs.find(value); it != ctx.value_regs.end()) {
@@ -299,6 +310,14 @@ auto select_alloca(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
 
 auto select_load(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   Seq seq;
+  if (
+    auto it = ctx.invariant_global_load_regs.find(op.operands[0]);
+    it != ctx.invariant_global_load_regs.end()
+  ) {
+    ctx.value_regs[op.result] = it->second;
+    return seq.take();
+  }
+
   auto dst = def_reg(ctx, op.result);
   auto addr = use_reg(ctx, op.operands[0], seq);
   auto opcode = op.result->type->is_f32()   ? FLW
@@ -338,6 +357,30 @@ auto select_getptr(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   auto plan = ir::analyze_getptr(
     op.operands[0]->type, op.result->type, op.operands.size() - 1
   );
+
+  if (
+    !plan.reads_memory && plan.steps.size() == 1 &&
+    plan.steps.front().kind == ir::GetPtrStep::Kind::Index
+  ) {
+    auto operand_index = plan.steps.front().index_pos + 1;
+    if (
+      operand_index < op.operands.size() &&
+      op.operands[operand_index]->kind == ValueKind::Constant
+    ) {
+      auto *constant = static_cast<Constant *>(op.operands[operand_index]);
+      if (std::holds_alternative<int>(constant->val)) {
+        auto offset = static_cast<int64_t>(std::get<int>(constant->val)) *
+                      plan.steps.front().scale;
+        if (offset >= -2048 && offset <= 2047) {
+          seq.emit(ADDI)
+            .add_reg(dst, true, false)
+            .add_reg(base)
+            .add_imm(static_cast<int>(offset));
+          return seq.take();
+        }
+      }
+    }
+  }
 
   bool defined_dst = false;
   for (const auto &step : plan.steps) {
@@ -383,9 +426,14 @@ auto select_call(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   int int_arg = 0;
   int float_arg = 0;
 
+  std::vector<int> sources;
+  sources.reserve(op.operands.size());
+  for (auto *operand : op.operands)
+    sources.push_back(use_reg(ctx, operand, seq));
+
   for (size_t arg_index = 0; arg_index < op.operands.size(); ++arg_index) {
     auto *operand = op.operands[arg_index];
-    auto src = use_reg(ctx, operand, seq);
+    auto src = sources[arg_index];
     if (operand->type->is_f32()) {
       if (float_arg < 8) {
         seq.emit(COPY)
@@ -620,6 +668,82 @@ auto bind_arguments(LoweringContext &ctx, const mid_ir::LinearFunction &f)
   return seq.take();
 }
 
+auto global_root(Value *value) -> Value * {
+  if (!value)
+    return nullptr;
+  if (value->kind == ValueKind::GlobalVar)
+    return value;
+  if (value->kind != ValueKind::OpResult)
+    return nullptr;
+
+  auto *creator =
+    static_cast<mid_ir::Op *>(static_cast<OpResult *>(value)->creator);
+  if (
+    !creator || creator->code != mid_ir::OpCode::GetPtr ||
+    creator->operands.empty()
+  ) {
+    return nullptr;
+  }
+  return global_root(creator->operands[0]);
+}
+
+auto preload_invariant_scalar_globals(
+  LoweringContext &ctx, const mid_ir::LinearFunction &f
+) -> InstSeq {
+  std::vector<Value *> candidates;
+  std::unordered_set<Value *> written_globals;
+  bool has_call = false;
+
+  for (const auto &block : f.blocks) {
+    for (auto *op : block->insts) {
+      has_call |= op->code == mid_ir::OpCode::Call;
+
+      if (
+        op->code == mid_ir::OpCode::Load && op->result &&
+        op->result->type->is_i32() && op->operands.size() == 1
+      ) {
+        auto *global = global_root(op->operands[0]);
+        if (
+          global && global->type->is_ptr() &&
+          !std::static_pointer_cast<Ptr>(global->type)->target->is_array()
+        ) {
+          if (
+            std::find(candidates.begin(), candidates.end(), global) ==
+            candidates.end()
+          ) {
+            candidates.push_back(global);
+          }
+        }
+      }
+
+      Value *written_address = nullptr;
+      if (op->code == mid_ir::OpCode::Store && op->operands.size() >= 2) {
+        written_address = op->operands[1];
+      } else if (op->code == mid_ir::OpCode::Memset && !op->operands.empty()) {
+        written_address = op->operands[0];
+      }
+      if (auto *global = global_root(written_address))
+        written_globals.insert(global);
+    }
+  }
+
+  if (has_call)
+    return {};
+
+  Seq seq;
+  for (auto *global : candidates) {
+    if (written_globals.count(global) != 0)
+      continue;
+
+    auto address =
+      materialize_global_addr(ctx, static_cast<GlobalAddr *>(global), seq);
+    auto value = ctx.function->new_vreg();
+    seq.emit(LW).add_reg(value, true, false).add_reg(address).add_imm(0);
+    ctx.invariant_global_load_regs[global] = value;
+  }
+  return seq.take();
+}
+
 } // namespace
 
 auto select_op(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
@@ -799,8 +923,10 @@ auto lower_function(const mid_ir::LinearFunction &f)
   bool is_entry = true;
   for (auto &block : f.blocks) {
     ctx.block = ctx.block_map.at(block.get());
+    ctx.block_global_addr_regs.clear();
     if (is_entry) {
       append(*ctx.block, bind_arguments(ctx, f));
+      append(*ctx.block, preload_invariant_scalar_globals(ctx, f));
       is_entry = false;
     }
     for (auto *op : block->insts) {
