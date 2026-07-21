@@ -13,6 +13,7 @@ auto opcode_name(int opcode) -> std::string_view {
     case COPY: return "COPY";
     case ADD: return "ADD";
     case ADDW: return "ADDW";
+    case ADDIW: return "ADDIW";
     case ADDI: return "ADDI";
     case SUB: return "SUB";
     case SUBW: return "SUBW";

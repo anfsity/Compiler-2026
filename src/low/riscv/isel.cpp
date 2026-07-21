@@ -2,7 +2,9 @@
 
 #include "../../base/getptr.hpp"
 #include <cassert>
+#include <cstdint>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -155,6 +157,42 @@ auto select_binary_opcode(mid_ir::OpCode code) -> int {
 auto select_binary(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   Seq seq;
   auto dst = def_reg(ctx, op.result);
+
+  auto small_int_constant = [](Value *value) -> std::optional<int> {
+    if (value->kind != ValueKind::Constant)
+      return std::nullopt;
+    auto *constant = static_cast<Constant *>(value);
+    if (!std::holds_alternative<int>(constant->val))
+      return std::nullopt;
+    return std::get<int>(constant->val);
+  };
+
+  Value *addiw_source = nullptr;
+  int addiw_imm = 0;
+  if (op.code == mid_ir::OpCode::Add) {
+    if (auto immediate = small_int_constant(op.operands[1])) {
+      addiw_source = op.operands[0];
+      addiw_imm = *immediate;
+    } else if (auto immediate = small_int_constant(op.operands[0])) {
+      addiw_source = op.operands[1];
+      addiw_imm = *immediate;
+    }
+  } else if (op.code == mid_ir::OpCode::Sub) {
+    if (auto immediate = small_int_constant(op.operands[1])) {
+      auto negated = -static_cast<int64_t>(*immediate);
+      if (negated >= -2048 && negated <= 2047) {
+        addiw_source = op.operands[0];
+        addiw_imm = static_cast<int>(negated);
+      }
+    }
+  }
+
+  if (addiw_source && addiw_imm && addiw_imm >= -2048 && addiw_imm <= 2047) {
+    auto src = use_reg(ctx, addiw_source, seq);
+    seq.emit(ADDIW).add_reg(dst, true, false).add_reg(src).add_imm(addiw_imm);
+    return seq.take();
+  }
+
   auto lhs = use_reg(ctx, op.operands[0], seq);
   auto rhs = use_reg(ctx, op.operands[1], seq);
   seq.emit(select_binary_opcode(op.code))
@@ -418,39 +456,69 @@ auto select_branch(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   Seq seq;
   auto condition = op.operands[0];
   auto branch_opcode = BNE;
-  Value *branch_value = condition;
+  Value *lhs = condition;
+  Value *rhs = nullptr;
 
   if (condition->kind == ValueKind::OpResult) {
     auto *condition_op =
       static_cast<mid_ir::Op *>(static_cast<OpResult *>(condition)->creator);
     if (
-      condition_op &&
-      (condition_op->code == mid_ir::OpCode::Eq ||
-       condition_op->code == mid_ir::OpCode::Ne) &&
-      condition_op->operands.size() == 2
+      condition_op && condition_op->operands.size() == 2 &&
+      !is_float_value(condition_op->operands[0])
     ) {
-      auto is_zero = [](Value *value) {
-        if (value->kind != ValueKind::Constant)
-          return false;
-        auto *constant = static_cast<Constant *>(value);
-        return std::holds_alternative<int>(constant->val) &&
-               std::get<int>(constant->val) == 0;
-      };
-
-      if (is_zero(condition_op->operands[1])) {
-        branch_value = condition_op->operands[0];
-        branch_opcode = condition_op->code == mid_ir::OpCode::Eq ? BEQ : BNE;
-      } else if (is_zero(condition_op->operands[0])) {
-        branch_value = condition_op->operands[1];
-        branch_opcode = condition_op->code == mid_ir::OpCode::Eq ? BEQ : BNE;
+      auto *compare_lhs = condition_op->operands[0];
+      auto *compare_rhs = condition_op->operands[1];
+      auto selected_compare = true;
+      switch (condition_op->code) {
+      case mid_ir::OpCode::Eq:
+        branch_opcode = BEQ;
+        break;
+      case mid_ir::OpCode::Ne:
+        branch_opcode = BNE;
+        break;
+      case mid_ir::OpCode::Lt:
+        branch_opcode = BLT;
+        break;
+      case mid_ir::OpCode::Gt:
+        branch_opcode = BLT;
+        std::swap(compare_lhs, compare_rhs);
+        break;
+      case mid_ir::OpCode::Le:
+        branch_opcode = BGE;
+        std::swap(compare_lhs, compare_rhs);
+        break;
+      case mid_ir::OpCode::Ge:
+        branch_opcode = BGE;
+        break;
+      default:
+        selected_compare = false;
+        break;
+      }
+      if (selected_compare) {
+        lhs = compare_lhs;
+        rhs = compare_rhs;
       }
     }
   }
 
-  auto cond = use_reg(ctx, branch_value, seq);
+  auto use_branch_operand = [&](Value *value) {
+    if (value && value->kind == ValueKind::Constant) {
+      auto *constant = static_cast<Constant *>(value);
+      if (
+        std::holds_alternative<int>(constant->val) &&
+        std::get<int>(constant->val) == 0
+      ) {
+        return static_cast<int>(ZERO);
+      }
+    }
+    return use_reg(ctx, value, seq);
+  };
+
+  auto lhs_reg = use_branch_operand(lhs);
+  auto rhs_reg = rhs ? use_branch_operand(rhs) : static_cast<int>(ZERO);
   seq.emit(branch_opcode)
-    .add_reg(cond)
-    .add_reg(ZERO)
+    .add_reg(lhs_reg)
+    .add_reg(rhs_reg)
     .add_mbb(ctx.block_map.at(op.successors[0]));
   seq.emit(JAL)
     .add_reg(ZERO, true, false)
@@ -632,6 +700,7 @@ auto is_dead_def_candidate(int opcode) -> bool {
   case DIV:
   case REM:
   case ADDW:
+  case ADDIW:
   case SUBW:
   case MULW:
   case DIVW:

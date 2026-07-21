@@ -19,6 +19,7 @@ auto get_op_name(int op) -> std::string {
     {COPY, "COPY"sv},
     {ADD, "ADD"sv},
     {ADDW, "ADDW"sv},
+    {ADDIW, "ADDIW"sv},
     {ADDI, "ADDI"sv},
     {SUB, "SUB"sv},
     {SUBW, "SUBW"sv},
