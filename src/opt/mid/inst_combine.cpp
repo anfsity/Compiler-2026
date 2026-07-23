@@ -57,6 +57,45 @@ struct Range {
   int64_t max;
 };
 
+auto is_proven_non_negative(Value *value) -> bool {
+  if (auto constant = int_constant(value))
+    return *constant >= 0;
+
+  if (!value || value->kind != ValueKind::OpResult)
+    return false;
+
+  auto *creator = static_cast<Op *>(static_cast<OpResult *>(value)->creator);
+  if (!creator)
+    return false;
+
+  switch (creator->code) {
+  case OpCode::Eq:
+  case OpCode::Ne:
+  case OpCode::Lt:
+  case OpCode::Gt:
+  case OpCode::Le:
+  case OpCode::Ge:
+  case OpCode::ZExt:
+    return true;
+  case OpCode::And:
+    if (creator->operands.size() == 2) {
+      auto lhs = int_constant(creator->operands[0]);
+      auto rhs = int_constant(creator->operands[1]);
+      return (lhs && *lhs >= 0) || (rhs && *rhs >= 0);
+    }
+    return false;
+  case OpCode::Mod: {
+    if (creator->operands.size() != 2)
+      return false;
+    auto divisor = int_constant(creator->operands[1]);
+    return divisor && *divisor != 0 &&
+           is_proven_non_negative(creator->operands[0]);
+  }
+  default:
+    return false;
+  }
+}
+
 auto range_of(Value *value) -> std::optional<Range> {
   if (!value)
     return std::nullopt;
@@ -68,15 +107,44 @@ auto range_of(Value *value) -> std::optional<Range> {
     return std::nullopt;
 
   auto *creator = static_cast<Op *>(static_cast<OpResult *>(value)->creator);
-  if (!creator || creator->code != OpCode::Mod || creator->operands.size() != 2)
+  if (!creator)
     return std::nullopt;
 
-  auto divisor = int_constant(creator->operands[1]);
-  if (!divisor || *divisor == 0)
+  switch (creator->code) {
+  case OpCode::Eq:
+  case OpCode::Ne:
+  case OpCode::Lt:
+  case OpCode::Gt:
+  case OpCode::Le:
+  case OpCode::Ge:
+  case OpCode::ZExt:
+    return Range{0, 1};
+  case OpCode::And: {
+    if (creator->operands.size() != 2)
+      return std::nullopt;
+    auto lhs = int_constant(creator->operands[0]);
+    auto rhs = int_constant(creator->operands[1]);
+    if (lhs && *lhs >= 0)
+      return Range{0, *lhs};
+    if (rhs && *rhs >= 0)
+      return Range{0, *rhs};
     return std::nullopt;
+  }
+  case OpCode::Mod: {
+    if (creator->operands.size() != 2)
+      return std::nullopt;
+    auto divisor = int_constant(creator->operands[1]);
+    if (!divisor || *divisor == 0)
+      return std::nullopt;
 
-  auto magnitude = std::llabs(static_cast<int64_t>(*divisor));
-  return Range{-(magnitude - 1), magnitude - 1};
+    auto magnitude = std::llabs(static_cast<int64_t>(*divisor));
+    if (is_proven_non_negative(creator->operands[0]))
+      return Range{0, magnitude - 1};
+    return Range{-(magnitude - 1), magnitude - 1};
+  }
+  default:
+    return std::nullopt;
+  }
 }
 
 auto abs_less_than(const Range &range, int64_t bound) -> bool {
@@ -347,13 +415,14 @@ auto InstCombine::simplify_mod(const CombineContext &ctx)
     auto divisor = std::llabs(static_cast<int64_t>(*rhs));
     if (abs_less_than(*range, divisor))
       return CombineResult{lhs, {}};
+  }
 
-    // For non-negative x, x % 2^k is exactly x & (2^k - 1).
-    if (*rhs > 0 && range->min >= 0 && is_power_of_two(*rhs)) {
-      auto *mask = make_i32(ctx.module, *rhs - 1);
-      auto *and_op = make_binary(ctx.module, OpCode::And, lhs, mask);
-      return CombineResult{and_op->result, {and_op}};
-    }
+  // Boundedness and signedness are independent facts.  A non-negative value
+  // does not need a finite range here: x % 2^k is exactly x & (2^k - 1).
+  if (*rhs > 0 && is_power_of_two(*rhs) && is_proven_non_negative(lhs)) {
+    auto *mask = make_i32(ctx.module, *rhs - 1);
+    auto *and_op = make_binary(ctx.module, OpCode::And, lhs, mask);
+    return CombineResult{and_op->result, {and_op}};
   }
 
   return std::nullopt;

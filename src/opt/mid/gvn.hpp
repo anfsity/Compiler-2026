@@ -34,6 +34,18 @@ struct ExpressionHash {
 class GVN {
   using ValueNumber = uint32_t;
 
+  struct MemoryState {
+    std::unordered_map<Expression, Value *, ExpressionHash> loads;
+    std::unordered_map<ValueNumber, Value *> stored_values;
+    std::unordered_map<ValueNumber, Op *> pending_stores;
+
+    auto clear() -> void {
+      loads.clear();
+      stored_values.clear();
+      pending_stores.clear();
+    }
+  };
+
   MidModule *module;
   MidIRRewriter rewriter;
   DomTree *dom = nullptr;
@@ -50,20 +62,17 @@ public:
     -> exodus::opt::PreservedAnalysis;
 
 private:
-  auto visit(Block *block) -> void;
-  auto process_op(
-    Op *op,
-    std::unordered_map<Expression, Value *, ExpressionHash> &loads,
-    std::unordered_map<ValueNumber, Value *> &stored_values,
-    std::unordered_map<ValueNumber, Op *> &pending_stores,
-    std::vector<Expression> &inserted
-  ) -> void;
+  auto visit(Block *block, MemoryState state) -> void;
+  auto prepare_inherited_state(Block *block, MemoryState &state) -> void;
+  auto process_op(Op *op, MemoryState &state, std::vector<Expression> &inserted)
+    -> void;
   auto number_value(Value *value) -> ValueNumber;
   auto build_expression(Op *op) -> std::optional<Expression>;
   auto simplify(Op *op, const std::vector<ValueNumber> &operands) -> Value *;
 
   static auto is_pure_opcode(OpCode code) -> bool;
-  static auto is_memory_barrier(OpCode code) -> bool;
+  static auto reads_memory_through_getptr(const Op *op) -> bool;
+  static auto is_memory_barrier(const Op *op) -> bool;
   static auto is_commutative(OpCode code) -> bool;
 };
 
