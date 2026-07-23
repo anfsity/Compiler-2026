@@ -12,7 +12,10 @@
 namespace exodus::high_ir::opt {
 namespace {
 
-constexpr int CacheSize = (1 << 12);
+constexpr size_t MaxCacheEntries = (1 << 12);
+constexpr size_t MinCacheEntries = (1 << 4);
+// Bound both slot count and statically allocated key/value words.
+constexpr size_t MaxCacheWords = (1 << 14);
 // The cache stores and compares every explicit argument.  Memoizing a very
 // high-arity function expands the function body and every return path by the
 // arity, while offering little reuse.  Keep memoization focused on small
@@ -20,6 +23,7 @@ constexpr int CacheSize = (1 << 12);
 constexpr size_t MaxMemoizedArguments = 16;
 
 struct CacheInfo {
+  size_t size = 0;
   GlobalAddr *used = nullptr;
   GlobalAddr *value = nullptr;
   std::vector<GlobalAddr *> keys;
@@ -95,11 +99,12 @@ auto global_name_exists(const Module &module, const std::string &name) -> bool {
 auto add_cache_global(
   Module &module,
   const std::string &name,
-  const std::shared_ptr<Type> &element_type
+  const std::shared_ptr<Type> &element_type,
+  size_t cache_size
 ) -> GlobalAddr * {
   auto global = std::make_unique<GlobalVar>();
   global->name = name;
-  global->type = Array::get(element_type, CacheSize);
+  global->type = Array::get(element_type, static_cast<int>(cache_size));
   global->init = {ZeroInit{}};
   global->addr =
     module.ctx.make_value<GlobalAddr>(global->type->ptr_to(), name);
@@ -133,7 +138,8 @@ auto cache_name_exists(
 auto create_cache(
   Module &module,
   const Function &function,
-  const std::vector<GlobalAddr *> &context_globals
+  const std::vector<GlobalAddr *> &context_globals,
+  size_t cache_size
 ) -> CacheInfo {
   std::string base = "__exodus_memo_" + function.name;
   int suffix = 0;
@@ -144,19 +150,21 @@ auto create_cache(
   }
 
   CacheInfo cache;
-  cache.used = add_cache_global(module, base + "_used", I32::get());
-  cache.value = add_cache_global(module, base + "_value", I32::get());
+  cache.size = cache_size;
+  cache.used = add_cache_global(module, base + "_used", I32::get(), cache_size);
+  cache.value =
+    add_cache_global(module, base + "_value", I32::get(), cache_size);
   cache.keys.reserve(function.args.size());
   for (size_t i = 0; i < function.args.size(); ++i) {
-    cache.keys.push_back(
-      add_cache_global(module, base + "_key" + std::to_string(i), I32::get())
-    );
+    cache.keys.push_back(add_cache_global(
+      module, base + "_key" + std::to_string(i), I32::get(), cache_size
+    ));
   }
   cache.context_globals = context_globals;
   cache.context_keys.reserve(context_globals.size());
   for (size_t i = 0; i < context_globals.size(); ++i) {
     cache.context_keys.push_back(add_cache_global(
-      module, base + "_context" + std::to_string(i), I32::get()
+      module, base + "_context" + std::to_string(i), I32::get(), cache_size
     ));
   }
   cache.one = module.ctx.make_const(I32::get(), 1);
@@ -193,14 +201,47 @@ auto build_lookup(Module &module, const Function &function, CacheInfo &cache)
   -> Region {
   Region lookup;
   auto *zero = module.ctx.make_const(I32::get(), 0);
-  Value *index = zero;
-  if (!function.args.empty()) {
-    auto *mask = module.ctx.make_const(I32::get(), CacheSize - 1);
-    auto *hash =
-      make_binary(module, OpCode::And, I32::get(), function.args.front(), mask);
-    lookup.push_back(hash);
-    index = hash->result;
+  // Hashing only selects a slot. Exact argument/context comparisons below
+  // remain the correctness check for a hit.
+  Value *hash = zero;
+  bool first_key = true;
+  auto fold_key = [&](Value *key) {
+    if (first_key) {
+      hash = key;
+    } else {
+      auto *scaled = make_binary(
+        module,
+        OpCode::Mul,
+        I32::get(),
+        hash,
+        module.ctx.make_const(I32::get(), 33)
+      );
+      lookup.push_back(scaled);
+      hash = scaled->result;
+      auto *mixed = make_binary(module, OpCode::Xor, I32::get(), hash, key);
+      lookup.push_back(mixed);
+      hash = mixed->result;
+    }
+    first_key = false;
+  };
+
+  for (auto *argument : function.args)
+    fold_key(argument);
+
+  cache.context_key_ptrs.reserve(cache.context_keys.size());
+  cache.context_values.reserve(cache.context_keys.size());
+  for (size_t i = 0; i < cache.context_keys.size(); ++i) {
+    auto *value = make_load(module, cache.context_globals[i], I32::get());
+    cache.context_values.push_back(value->result);
+    lookup.push_back(value);
+    fold_key(value->result);
   }
+
+  auto *mask =
+    module.ctx.make_const(I32::get(), static_cast<int>(cache.size - 1));
+  auto *index_op = make_binary(module, OpCode::And, I32::get(), hash, mask);
+  lookup.push_back(index_op);
+  Value *index = index_op->result;
 
   auto *used_ptr = make_getptr(module, cache.used, index);
   cache.used_ptr = used_ptr->result;
@@ -216,17 +257,11 @@ auto build_lookup(Module &module, const Function &function, CacheInfo &cache)
     lookup.push_back(key_ptr);
   }
 
-  cache.context_key_ptrs.reserve(cache.context_keys.size());
-  cache.context_values.reserve(cache.context_keys.size());
   for (size_t i = 0; i < cache.context_keys.size(); ++i) {
     auto *key = cache.context_keys[i];
     auto *key_ptr = make_getptr(module, key, index);
     cache.context_key_ptrs.push_back(key_ptr->result);
     lookup.push_back(key_ptr);
-
-    auto *value = make_load(module, cache.context_globals[i], I32::get());
-    cache.context_values.push_back(value->result);
-    lookup.push_back(value);
   }
 
   auto *used = make_load(module, cache.used_ptr, I32::get());
@@ -310,8 +345,89 @@ auto instrument_returns(
   }
 }
 
+struct CostEstimate {
+  size_t body_cost = 0;
+  size_t recursive_calls = 0;
+  size_t return_paths = 0;
+};
+
+auto estimate_region(
+  const Region &region, const std::string &function_name, CostEstimate &estimate
+) -> void {
+  for (auto *op : region) {
+    ++estimate.body_cost;
+    switch (op->code) {
+    case OpCode::Div:
+    case OpCode::Mod:
+    case OpCode::FDiv:
+      estimate.body_cost += 7;
+      break;
+    case OpCode::Call:
+      estimate.body_cost += 3;
+      if (
+        std::holds_alternative<CallPayload>(op->payload) &&
+        std::get<CallPayload>(op->payload).func_name == function_name
+      )
+        ++estimate.recursive_calls;
+      break;
+    case OpCode::Load:
+    case OpCode::Store:
+    case OpCode::GetPtr:
+    case OpCode::If:
+    case OpCode::While:
+      estimate.body_cost += 2;
+      break;
+    default:
+      break;
+    }
+
+    if (op->code == OpCode::Ret) {
+      ++estimate.return_paths;
+    } else if (op->code == OpCode::If) {
+      const auto &payload = std::get<IfPayload>(op->payload);
+      estimate_region(*payload.then_region, function_name, estimate);
+      if (payload.else_region)
+        estimate_region(*payload.else_region, function_name, estimate);
+    } else if (op->code == OpCode::While) {
+      const auto &payload = std::get<WhilePayload>(op->payload);
+      estimate_region(*payload.cond_region, function_name, estimate);
+      estimate_region(*payload.loop_region, function_name, estimate);
+    }
+  }
+}
+
+struct MemoizationPlan {
+  std::vector<GlobalAddr *> context_globals;
+  size_t cache_size = 0;
+};
+
+auto next_power_of_two(size_t value) -> size_t {
+  size_t result = 1;
+  while (result < value && result < MaxCacheEntries)
+    result <<= 1;
+  return result;
+}
+
+auto choose_cache_size(
+  size_t body_cost, size_t recursive_calls, size_t key_count
+) -> size_t {
+  const auto reuse_score = body_cost * std::max<size_t>(1, recursive_calls);
+  auto desired = std::max(MinCacheEntries, reuse_score / 4);
+  desired = std::min(desired, MaxCacheEntries);
+  auto slots = next_power_of_two(desired);
+
+  // Every slot contains used/value plus one word per identity key.
+  const auto fields_per_slot = key_count + 2;
+  auto footprint_limit = MaxCacheWords / std::max<size_t>(1, fields_per_slot);
+  footprint_limit = std::max<size_t>(MinCacheEntries, footprint_limit);
+  footprint_limit = std::min(footprint_limit, MaxCacheEntries);
+  while (slots > footprint_limit)
+    slots >>= 1;
+  return std::max(slots, MinCacheEntries);
+}
+
 auto is_memoizable(const Function &function, const OpEffects &effects)
-  -> std::optional<std::vector<GlobalAddr *>> {
+  -> std::optional<MemoizationPlan> {
   if (
     function.is_decl || function.is_memoized || !function.type ||
     !function.type->is_func() || function.args.size() > MaxMemoizedArguments
@@ -340,7 +456,35 @@ auto is_memoizable(const Function &function, const OpEffects &effects)
   auto dependencies = get_global_dependencies(effects);
   if (dependencies.size() != effects.reads.size())
     return std::nullopt;
-  return dependencies;
+
+  CostEstimate estimate;
+  estimate_region(function.body, function.name, estimate);
+  if (estimate.recursive_calls == 0 || estimate.return_paths == 0)
+    return std::nullopt;
+
+  const auto key_count = function.args.size() + dependencies.size();
+  // A lookup performs hashing, address formation, loads, and one comparison
+  // per key. Every return path also pays for the complete cache store.
+  const auto hash_ops = key_count == 0 ? 0 : key_count * 2 - 1;
+  const auto lookup_ops =
+    hash_ops + (key_count + 2) + (key_count + 2) + key_count + 2;
+  const auto store_ops = key_count + 2;
+  const auto generated_ops = lookup_ops + estimate.return_paths * store_ops;
+  const auto recursive_work = estimate.body_cost * estimate.recursive_calls;
+
+  // Require enough recursive work to amortize both the lookup and the stores,
+  // and keep generated cache IR below one third of the estimated body. This
+  // rejects cheap recursive wrappers while allowing expensive computations.
+  if (
+    estimate.body_cost <= lookup_ops ||
+    generated_ops * 3 > estimate.body_cost || recursive_work < generated_ops * 3
+  )
+    return std::nullopt;
+
+  return MemoizationPlan{
+    std::move(dependencies),
+    choose_cache_size(estimate.body_cost, estimate.recursive_calls, key_count)
+  };
 }
 
 } // namespace
@@ -362,7 +506,9 @@ auto Memoization::run(
     if (!context_keys)
       continue;
 
-    auto cache = create_cache(m, function, *context_keys);
+    auto cache = create_cache(
+      m, function, context_keys->context_globals, context_keys->cache_size
+    );
     auto lookup = build_lookup(m, function, cache);
     instrument_returns(m, function.body, function, cache);
     function.body.splice(function.body.begin(), lookup);

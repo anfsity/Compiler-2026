@@ -1,4 +1,5 @@
 #include "isel.hpp"
+#include "peephole.hpp"
 
 #include "../../base/getptr.hpp"
 #include <algorithm>
@@ -934,6 +935,8 @@ auto lower_function(const mid_ir::LinearFunction &f)
     }
   }
 
+  eliminate_dead_defs(*mf);
+  run_peephole(*mf);
   eliminate_dead_defs(*mf);
 
   return mf;

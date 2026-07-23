@@ -203,18 +203,34 @@ auto test_spilled_operands_use_distinct_temporaries() -> void {
   run_ra(mf, false, true);
 
   bool found_distinct_spill_add = false;
-  auto prev = entry->insts.end();
   for (auto it = entry->insts.begin(); it != entry->insts.end(); ++it) {
     if (
-      it->opcode == ADD && it->operands.size() == 3 &&
-      it->operands[1].is_reg() && it->operands[2].is_reg() &&
-      it->operands[1].get_reg() == T6 && it->operands[2].get_reg() == T5
+      it->opcode != ADD || it->operands.size() != 3 ||
+      !it->operands[1].is_reg() || !it->operands[2].is_reg()
+    )
+      continue;
+
+    auto rhs = it->operands[2].get_reg();
+    auto lhs = it->operands[1].get_reg();
+    if (lhs == rhs || it == entry->insts.begin())
+      continue;
+
+    auto second_reload = std::prev(it);
+    if (second_reload == entry->insts.begin())
+      continue;
+    auto first_reload = std::prev(second_reload);
+    if (
+      first_reload->opcode == LW && second_reload->opcode == LW &&
+      first_reload->operands[0].get_reg() == lhs &&
+      second_reload->operands[0].get_reg() == rhs &&
+      first_reload->operands[1].kind == MachineOperand::FrameIdx &&
+      second_reload->operands[1].kind == MachineOperand::FrameIdx &&
+      std::get<int>(first_reload->operands[1].data) !=
+        std::get<int>(second_reload->operands[1].data)
     ) {
-      require(prev != entry->insts.end());
-      require(prev->opcode == LW);
       found_distinct_spill_add = true;
+      break;
     }
-    prev = it;
   }
   require(found_distinct_spill_add);
 }

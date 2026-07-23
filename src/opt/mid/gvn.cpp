@@ -2,6 +2,7 @@
 
 #include "../../base/getptr.hpp"
 #include <algorithm>
+#include <unordered_set>
 
 namespace exodus::mid_ir::opt {
 
@@ -21,7 +22,7 @@ auto GVN::run(
   next_number = 0;
   dom = &dom_result;
 
-  visit(func.blocks.front().get());
+  visit(func.blocks.front().get(), {});
   rewriter.finalize(func);
   dom = nullptr;
 
@@ -29,18 +30,22 @@ auto GVN::run(
                  : exodus::opt::PreservedAnalysis::all();
 }
 
-auto GVN::visit(Block *block) -> void {
-  std::unordered_map<Expression, Value *, ExpressionHash> loads;
-  std::unordered_map<ValueNumber, Value *> stored_values;
-  std::unordered_map<ValueNumber, Op *> pending_stores;
+auto GVN::visit(Block *block, MemoryState state) -> void {
+  prepare_inherited_state(block, state);
+
   std::vector<Expression> inserted;
 
   for (auto *op : block->insts) {
-    process_op(op, loads, stored_values, pending_stores, inserted);
+    process_op(op, state, inserted);
   }
 
+  // A store in one arm does not make a dominating store dead on sibling arms.
+  // Only carry dead-store candidates across a single-successor edge.
+  if (block->succs.size() != 1)
+    state.pending_stores.clear();
+
   for (auto *child : dom->get_children(block)) {
-    visit(child);
+    visit(child, state);
   }
 
   for (const auto &expression : inserted) {
@@ -48,18 +53,59 @@ auto GVN::visit(Block *block) -> void {
   }
 }
 
+auto GVN::prepare_inherited_state(Block *block, MemoryState &state) -> void {
+  if (block->preds.size() <= 1)
+    return;
+
+  auto *idom = dom->get_idom(block);
+  if (!idom) {
+    state.clear();
+    return;
+  }
+
+  bool has_load = false;
+  std::vector<Block *> worklist(block->preds.begin(), block->preds.end());
+  std::unordered_set<Block *> visited;
+  while (!worklist.empty()) {
+    auto *current = worklist.back();
+    worklist.pop_back();
+    if (current == idom || !visited.insert(current).second)
+      continue;
+    if (!dom->dominate(idom, current)) {
+      state.clear();
+      return;
+    }
+
+    for (auto *op : current->insts) {
+      if (op->code == OpCode::Load) {
+        has_load = true;
+        continue;
+      }
+      if (is_memory_barrier(op)) {
+        state.clear();
+        return;
+      }
+    }
+    worklist.insert(
+      worklist.end(), current->preds.begin(), current->preds.end()
+    );
+  }
+
+  // A read along one incoming path can observe a pending store.  It does not
+  // invalidate dominating load values when no path can write memory.
+  if (has_load)
+    state.stored_values.clear();
+  state.pending_stores.clear();
+}
+
 auto GVN::process_op(
-  Op *op,
-  std::unordered_map<Expression, Value *, ExpressionHash> &loads,
-  std::unordered_map<ValueNumber, Value *> &stored_values,
-  std::unordered_map<ValueNumber, Op *> &pending_stores,
-  std::vector<Expression> &inserted
+  Op *op, MemoryState &state, std::vector<Expression> &inserted
 ) -> void {
   if (op->code == OpCode::Load && op->result && !op->operands.empty()) {
     auto address_number = number_value(op->operands[0]);
     if (
-      auto stored = stored_values.find(address_number);
-      stored != stored_values.end()
+      auto stored = state.stored_values.find(address_number);
+      stored != state.stored_values.end()
     ) {
       rewriter.replace_all_uses_with(op->result, stored->second);
       rewriter.eraseOp(op);
@@ -70,19 +116,19 @@ auto GVN::process_op(
 
     // A load through a different value number may still alias a preceding
     // store. Stop forwarding and dead-store tracking at that point.
-    stored_values.clear();
-    pending_stores.clear();
+    state.stored_values.clear();
+    state.pending_stores.clear();
     Expression expression{
       OpCode::Load, op->result->type.get(), {address_number}
     };
-    auto it = loads.find(expression);
-    if (it != loads.end()) {
+    auto it = state.loads.find(expression);
+    if (it != state.loads.end()) {
       rewriter.replace_all_uses_with(op->result, it->second);
       rewriter.eraseOp(op);
       value_numbers[op->result] = number_value(it->second);
       changed = true;
     } else {
-      loads.emplace(expression, op->result);
+      state.loads.emplace(expression, op->result);
       value_numbers[op->result] = next_number++;
     }
     return;
@@ -91,24 +137,20 @@ auto GVN::process_op(
   if (op->code == OpCode::Store && op->operands.size() >= 2) {
     auto address_number = number_value(op->operands[1]);
     if (
-      auto previous = pending_stores.find(address_number);
-      previous != pending_stores.end()
+      auto previous = state.pending_stores.find(address_number);
+      previous != state.pending_stores.end()
     ) {
       rewriter.eraseOp(previous->second);
       changed = true;
     }
-    loads.clear();
-    stored_values.clear();
-    pending_stores.clear();
-    stored_values[address_number] = op->operands[0];
-    pending_stores[address_number] = op;
+    state.clear();
+    state.stored_values[address_number] = op->operands[0];
+    state.pending_stores[address_number] = op;
     return;
   }
 
-  if (is_memory_barrier(op->code)) {
-    loads.clear();
-    stored_values.clear();
-    pending_stores.clear();
+  if (is_memory_barrier(op)) {
+    state.clear();
     return;
   }
 
@@ -187,13 +229,8 @@ auto GVN::build_expression(Op *op) -> std::optional<Expression> {
 
   if (!is_pure_opcode(op->code))
     return std::nullopt;
-  if (op->code == OpCode::GetPtr) {
-    auto plan = ir::analyze_getptr(
-      op->operands[0]->type, op->result->type, op->operands.size() - 1
-    );
-    if (plan.reads_memory)
-      return std::nullopt;
-  }
+  if (reads_memory_through_getptr(op))
+    return std::nullopt;
 
   Expression expression{op->code, op->result->type.get(), {}};
   expression.operands.reserve(op->operands.size());
@@ -261,9 +298,22 @@ auto GVN::is_pure_opcode(OpCode code) -> bool {
   }
 }
 
-auto GVN::is_memory_barrier(OpCode code) -> bool {
-  return code == OpCode::Store || code == OpCode::Memset ||
-         code == OpCode::Call;
+auto GVN::reads_memory_through_getptr(const Op *op) -> bool {
+  if (
+    !op || op->code != OpCode::GetPtr || op->operands.empty() || !op->result ||
+    !op->operands[0]->type->is_ptr() || !op->result->type->is_ptr()
+  ) {
+    return false;
+  }
+  return ir::analyze_getptr(
+           op->operands[0]->type, op->result->type, op->operands.size() - 1
+  )
+    .reads_memory;
+}
+
+auto GVN::is_memory_barrier(const Op *op) -> bool {
+  return op && (op->code == OpCode::Store || op->code == OpCode::Memset ||
+                op->code == OpCode::Call || reads_memory_through_getptr(op));
 }
 
 auto GVN::is_commutative(OpCode code) -> bool {

@@ -23,6 +23,7 @@ struct LiveSegment {
 struct RegisterHint {
   int reg = -1;
   int score = 0;
+  int copy_pos = -1;
 };
 
 struct SpillCost {
@@ -56,6 +57,7 @@ struct SplitPoint {
 
   int pos = 0;
   Kind kind = Kind::Conflict;
+  int score = 0;
 };
 
 struct SplitPlan {
