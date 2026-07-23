@@ -57,6 +57,7 @@ struct SplitPoint {
 
   int pos = 0;
   Kind kind = Kind::Conflict;
+  int score = 0;
 };
 
 struct SplitPlan {

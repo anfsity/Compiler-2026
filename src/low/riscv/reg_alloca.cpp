@@ -1,9 +1,12 @@
 #include "reg_alloca.hpp"
 
+#include "../cfg_analysis.hpp"
 #include "ra_printer.hpp"
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <list>
+#include <numeric>
 
 namespace exodus::riscv {
 namespace {
@@ -26,12 +29,38 @@ auto allocable_int_regs(bool crosses_call) -> std::vector<int> {
 auto allocable_float_regs(bool crosses_call) -> std::vector<int> {
   if (crosses_call)
     return {FS0, FS1, FS2, FS3, FS4, FS5, FS6, FS7, FS8, FS9, FS10, FS11};
-  return {FT0, FT1, FT2, FT3, FT4, FT5, FT6, FT7, FT8, FT9};
+  // fa0-fa7 are caller-saved and are available when the interval does not
+  // overlap a call.  Keep ft10/ft11 for spill and parallel-copy temporaries.
+  return {
+    FT0,
+    FT1,
+    FT2,
+    FT3,
+    FT4,
+    FT5,
+    FT6,
+    FT7,
+    FA0,
+    FA1,
+    FA2,
+    FA3,
+    FA4,
+    FA5,
+    FA6,
+    FA7,
+    FT8,
+    FT9,
+  };
 }
 
 auto is_callee_saved_int_reg(int reg) -> bool {
   return reg == static_cast<int>(S1) ||
-         (reg >= static_cast<int>(S2) && reg <= static_cast<int>(S8));
+         (reg >= static_cast<int>(S2) && reg <= static_cast<int>(S11));
+}
+
+auto is_callee_saved_float_reg(int reg) -> bool {
+  return reg == static_cast<int>(FS0) || reg == static_cast<int>(FS1) ||
+         (reg >= static_cast<int>(FS2) && reg <= static_cast<int>(FS11));
 }
 
 auto is_float_phys_reg(int reg) -> bool {
@@ -108,6 +137,7 @@ auto operand_storage_size(const low_ir::MachineInst &inst, size_t index)
     ) {
       return 8;
     }
+    [[fallthrough]];
   default:
     return 4;
   }
@@ -218,6 +248,70 @@ auto compute_block_layout(low_ir::MachineFunction &function)
   }
 
   return layout;
+}
+
+struct SplitBoundary {
+  int pos = 0;
+  low_ir::MachineBasicBlock *block = nullptr;
+  SplitPoint::Kind kind = SplitPoint::Kind::BlockBoundary;
+  int loop_depth = 0;
+  int edge_cost = 1;
+  std::vector<size_t> loops;
+};
+
+struct SplitContext {
+  std::vector<BlockLayout> layout;
+  low_ir::LoopInfo loop_info;
+  std::vector<SplitBoundary> boundaries;
+};
+
+auto build_split_context(low_ir::MachineFunction &function) -> SplitContext {
+  SplitContext context;
+  context.layout = compute_block_layout(function);
+  if (context.layout.empty())
+    return context;
+
+  low_ir::DominatorTree dom;
+  dom.compute(function);
+  context.loop_info.compute(function, dom);
+
+  std::unordered_set<int> seen_positions;
+  for (size_t i = 1; i < context.layout.size(); ++i) {
+    const auto &layout = context.layout[i];
+    if (
+      layout.start <= 0 || layout.start == layout.end ||
+      !seen_positions.insert(layout.start).second
+    ) {
+      continue;
+    }
+
+    SplitBoundary boundary;
+    boundary.pos = layout.start;
+    boundary.block = layout.block;
+    boundary.edge_cost =
+      std::max(1, static_cast<int>(layout.block->preds.size()));
+    const auto &loops = context.loop_info.get_loops();
+    for (size_t loop_index = 0; loop_index < loops.size(); ++loop_index) {
+      const auto &loop = loops[loop_index];
+      if (loop.blocks.count(layout.block) != 0)
+        ++boundary.loop_depth;
+
+      auto is_loop_exit = std::any_of(
+        layout.block->preds.begin(),
+        layout.block->preds.end(),
+        [&](auto *pred) {
+          return loop.blocks.count(pred) != 0 &&
+                 loop.blocks.count(layout.block) == 0;
+        }
+      );
+      if (layout.block == loop.header || is_loop_exit)
+        boundary.loops.push_back(loop_index);
+    }
+    boundary.kind = boundary.loops.empty() ? SplitPoint::Kind::BlockBoundary
+                                           : SplitPoint::Kind::LoopBoundary;
+    context.boundaries.push_back(std::move(boundary));
+  }
+  return context;
 }
 
 auto compute_liveness(low_ir::MachineFunction &function) -> LivenessInfo {
@@ -586,7 +680,25 @@ auto compute_spill_cost(LiveInterval &interval) -> void {
                               interval.spill_cost.span;
 }
 
-auto allocate_registers(
+auto plan_split(
+  const LiveInterval &interval,
+  const SplitContext &context,
+  int conflict_pos = -1,
+  bool force = false
+) -> SplitPlan;
+
+auto split_interval(
+  const LiveInterval &interval,
+  const SplitContext &context,
+  int conflict_pos = -1,
+  bool force = false
+) -> std::vector<LiveInterval>;
+
+auto split_edge_cost(
+  const LiveInterval &interval, const SplitContext &context, int point
+) -> int;
+
+auto allocate_registers_once(
   std::vector<LiveInterval> &intervals,
   const std::unordered_map<int, std::vector<int>> &fixed_reg_positions,
   bool function_has_call
@@ -641,7 +753,10 @@ auto allocate_registers(
     }
 
     for (const auto &hint : interval.hints) {
-      if (std::find(regs.begin(), regs.end(), hint.reg) != regs.end()) {
+      if (
+        (hint.copy_pos < 0 || contains_pos(interval, hint.copy_pos)) &&
+        std::find(regs.begin(), regs.end(), hint.reg) != regs.end()
+      ) {
         interval.assigned_reg = hint.reg;
         break;
       }
@@ -678,9 +793,23 @@ auto allocate_registers(
         would_spill = *victim;
       }
 
-      // A leaf may use s1-s8 only as a profitable alternative to spilling.
+      // A leaf may use a saved register only as a profitable alternative to
+      // spilling.  The ABI permits all s1-s11 here; the frame builder records
+      // whichever of them is actually used.
       if (interval.reg_class == RegClass::Int && !function_has_call) {
-        std::vector<int> callee_regs{S1, S2, S3, S4, S5, S6, S7, S8};
+        std::vector<int> callee_regs{
+          S1,
+          S2,
+          S3,
+          S4,
+          S5,
+          S6,
+          S7,
+          S8,
+          S9,
+          S10,
+          S11,
+        };
         callee_regs.erase(
           std::remove_if(
             callee_regs.begin(),
@@ -728,81 +857,338 @@ auto allocate_registers(
   }
 }
 
-auto choose_split_point(const LiveInterval &interval) -> SplitPoint {
-  if (interval.segments.size() < 2)
-    return {};
+auto allocate_registers(
+  low_ir::MachineFunction &function,
+  std::vector<LiveInterval> &intervals,
+  const std::unordered_map<int, std::vector<int>> &fixed_reg_positions,
+  bool function_has_call,
+  const SplitContext &split_context
+) -> void {
+  auto initial_interval_count = intervals.size();
+  auto max_split_rounds = std::max<size_t>(32, initial_interval_count * 4 + 1);
+  size_t split_rounds = 0;
 
-  return {
-    interval.segments[1].start,
-    SplitPoint::Kind::BlockBoundary,
+  auto sort_intervals = [&] {
+    std::sort(
+      intervals.begin(), intervals.end(), [](const auto &lhs, const auto &rhs) {
+        if (interval_start(lhs) != interval_start(rhs))
+          return interval_start(lhs) < interval_start(rhs);
+        if (interval_end(lhs) != interval_end(rhs))
+          return interval_end(lhs) < interval_end(rhs);
+        return lhs.vreg < rhs.vreg;
+      }
+    );
   };
-}
 
-auto plan_split(const LiveInterval &interval) -> SplitPlan {
-  auto point = choose_split_point(interval);
-  if (
-    interval.segments.size() < 2 ||
-    point.pos <= interval.segments.front().end ||
-    point.pos >= interval_end(interval)
-  ) {
-    return {};
-  }
+  auto spill_memory_ops = [&] {
+    auto total = 0;
+    for (const auto &interval : intervals) {
+      if (interval.spilled)
+        total += interval.spill_cost.use_count + interval.spill_cost.def_count;
+    }
+    return total;
+  };
 
-  return {true, point};
-}
+  auto spill_interval_count = [&] {
+    return static_cast<int>(std::count_if(
+      intervals.begin(), intervals.end(), [](const auto &interval) {
+        return interval.spilled;
+      }
+    ));
+  };
 
-auto split_interval(const LiveInterval &interval) -> std::vector<LiveInterval> {
-  std::vector<LiveInterval> pieces;
-  std::vector<LiveInterval> pending{interval};
-  while (!pending.empty()) {
-    auto current = std::move(pending.back());
-    pending.pop_back();
+  std::vector<LiveInterval> rollback_intervals;
+  auto rollback_spill_ops = 0;
+  auto rollback_spill_count = 0;
+  auto rollback_copy_cost = 0;
+  auto can_rollback = false;
 
-    auto split_plan = plan_split(current);
-    if (!split_plan.should_split) {
-      current.split_plan = {};
-      pieces.push_back(std::move(current));
-      continue;
+  while (true) {
+    for (auto &interval : intervals) {
+      interval.assigned_reg = -1;
+      interval.spilled = false;
+      interval.split_plan = {};
+      compute_spill_cost(interval);
+    }
+    annotate_call_liveness(function, intervals);
+    allocate_registers_once(intervals, fixed_reg_positions, function_has_call);
+
+    auto current_spill_ops = spill_memory_ops();
+    auto current_spill_count = spill_interval_count();
+    if (can_rollback) {
+      if (
+        current_spill_ops + rollback_copy_cost >= rollback_spill_ops ||
+        current_spill_count > rollback_spill_count
+      ) {
+        intervals = std::move(rollback_intervals);
+        break;
+      }
+      can_rollback = false;
     }
 
-    LiveInterval left = current;
-    LiveInterval right = current;
-    left.segments.clear();
-    left.def_positions.clear();
-    left.use_positions.clear();
-    right.segments.clear();
-    right.def_positions.clear();
-    right.use_positions.clear();
+    auto best = intervals.end();
+    SplitPlan best_plan;
+    for (auto it = intervals.begin(); it != intervals.end(); ++it) {
+      if (!it->spilled || it->def_positions.empty())
+        continue;
+      auto plan = plan_split(*it, split_context, interval_start(*it), true);
+      if (!plan.should_split)
+        continue;
 
-    for (auto segment : current.segments) {
-      if (segment.end <= split_plan.point.pos) {
-        left.segments.push_back(segment);
-      } else if (segment.start >= split_plan.point.pos) {
-        right.segments.push_back(segment);
-      } else {
-        left.segments.push_back({segment.start, split_plan.point.pos});
-        right.segments.push_back({split_plan.point.pos, segment.end});
+      if (
+        best == intervals.end() || plan.point.score > best_plan.point.score ||
+        (plan.point.score == best_plan.point.score &&
+         it->spill_cost.score > best->spill_cost.score)
+      ) {
+        best = it;
+        best_plan = plan;
       }
     }
 
-    for (auto pos : current.def_positions) {
-      (pos < split_plan.point.pos ? left.def_positions : right.def_positions)
-        .push_back(pos);
+    if (best == intervals.end() || split_rounds >= max_split_rounds)
+      break;
+
+    auto pieces =
+      split_interval(*best, split_context, interval_start(*best), true);
+    if (pieces.size() < 2)
+      break;
+
+    rollback_intervals = intervals;
+    rollback_spill_ops = current_spill_ops;
+    rollback_spill_count = current_spill_count;
+    rollback_copy_cost =
+      split_edge_cost(*best, split_context, best_plan.point.pos);
+    can_rollback = true;
+    auto insert_at = intervals.erase(best);
+    intervals.insert(
+      insert_at,
+      std::make_move_iterator(pieces.begin()),
+      std::make_move_iterator(pieces.end())
+    );
+    sort_intervals();
+    ++split_rounds;
+  }
+
+  annotate_call_liveness(function, intervals);
+  for (auto &interval : intervals) {
+    interval.split_plan = plan_split(interval, split_context);
+  }
+}
+
+auto block_for_position(const SplitContext &context, int pos)
+  -> low_ir::MachineBasicBlock * {
+  for (const auto &layout : context.layout) {
+    if (pos >= layout.start && pos < layout.end)
+      return layout.block;
+  }
+  return nullptr;
+}
+
+auto split_edge_cost(
+  const LiveInterval &interval, const SplitContext &context, int point
+) -> int {
+  auto find_layout =
+    [&](low_ir::MachineBasicBlock *block) -> const BlockLayout * {
+    auto found = std::find_if(
+      context.layout.begin(), context.layout.end(), [&](const auto &layout) {
+        return layout.block == block;
+      }
+    );
+    return found == context.layout.end() ? nullptr : &*found;
+  };
+
+  auto edge_position = [](const BlockLayout &layout) {
+    return layout.end > layout.start ? layout.end - 1 : layout.start;
+  };
+
+  auto cost = 0;
+  for (const auto &from_layout : context.layout) {
+    auto source_pos = edge_position(from_layout);
+    for (auto *successor : from_layout.block->succs) {
+      auto *to_layout = find_layout(successor);
+      if (!to_layout)
+        continue;
+
+      auto destination_pos = to_layout->start;
+      if (
+        !contains_pos(interval, source_pos) ||
+        !contains_pos(interval, destination_pos)
+      ) {
+        continue;
+      }
+
+      if ((source_pos < point) != (destination_pos < point))
+        ++cost;
     }
-    for (auto pos : current.use_positions) {
-      (pos < split_plan.point.pos ? left.use_positions : right.use_positions)
-        .push_back(pos);
+  }
+  return cost;
+}
+
+auto choose_split_point(
+  const LiveInterval &interval,
+  const SplitContext &context,
+  int conflict_pos,
+  bool force
+) -> SplitPoint {
+  auto start = interval_start(interval);
+  auto end = interval_end(interval);
+  if (end - start < 4)
+    return {};
+
+  SplitPoint best;
+  auto best_distance = std::numeric_limits<int>::max();
+  for (const auto &boundary : context.boundaries) {
+    auto point = boundary.pos;
+    if (point <= start || point >= end)
+      continue;
+
+    bool has_left = false;
+    bool has_right = false;
+    for (auto segment : interval.segments) {
+      has_left |= segment.start < point;
+      has_right |= segment.end > point;
+    }
+    if (!has_left || !has_right)
+      continue;
+
+    auto left_uses = static_cast<int>(std::count_if(
+      interval.use_positions.begin(),
+      interval.use_positions.end(),
+      [&](int use_pos) { return use_pos < point; }
+    ));
+    auto right_uses =
+      static_cast<int>(interval.use_positions.size()) - left_uses;
+    auto left_ops = static_cast<int>(std::count_if(
+                      interval.def_positions.begin(),
+                      interval.def_positions.end(),
+                      [&](int def_pos) { return def_pos < point; }
+                    )) +
+                    left_uses;
+    auto right_ops = static_cast<int>(std::count_if(
+                       interval.def_positions.begin(),
+                       interval.def_positions.end(),
+                       [&](int def_pos) { return def_pos >= point; }
+                     )) +
+                     right_uses;
+    if (left_ops == 0 || right_ops == 0)
+      continue;
+    auto left_span = point - start;
+    auto right_span = end - point;
+    auto range_reduction =
+      std::max(0, end - start - std::max(left_span, right_span));
+    auto score = range_reduction + std::min(left_uses, right_uses) * 4;
+    if (interval.segments.size() > 1)
+      score += 8;
+
+    int loop_uses = 0;
+    const auto &loops = context.loop_info.get_loops();
+    for (auto loop_index : boundary.loops) {
+      const auto &loop = loops[loop_index];
+      for (auto use_pos : interval.use_positions) {
+        auto *use_block = block_for_position(context, use_pos);
+        if (use_block && loop.blocks.count(use_block) != 0)
+          ++loop_uses;
+      }
+    }
+    score += boundary.loop_depth * 8 + loop_uses * 6;
+    score -= boundary.edge_cost * 3;
+
+    auto is_long_loop_split = boundary.kind == SplitPoint::Kind::LoopBoundary &&
+                              end - start >= 32 &&
+                              interval.use_positions.size() >= 3;
+    if (!force && interval.segments.size() < 2 && !is_long_loop_split)
+      continue;
+    if (!force && score < 8)
+      continue;
+
+    auto distance = 0;
+    if (conflict_pos >= 0) {
+      distance =
+        conflict_pos >= point ? conflict_pos - point : point - conflict_pos;
+      if (point <= conflict_pos)
+        score += boundary.kind == SplitPoint::Kind::LoopBoundary ? 16 : 4;
+      else
+        score += 4;
     }
 
-    if (!right.segments.empty()) {
-      pending.push_back(std::move(right));
+    if (
+      best.kind == SplitPoint::Kind::Conflict || score > best.score ||
+      (score == best.score && distance < best_distance)
+    ) {
+      best = {point, boundary.kind, score};
+      best_distance = distance;
     }
-    if (!left.segments.empty()) {
-      pending.push_back(std::move(left));
+  }
+  return best;
+}
+
+auto plan_split(
+  const LiveInterval &interval,
+  const SplitContext &context,
+  int conflict_pos,
+  bool force
+) -> SplitPlan {
+  auto point = choose_split_point(interval, context, conflict_pos, force);
+  return point.score == 0 && point.kind == SplitPoint::Kind::Conflict
+           ? SplitPlan{}
+           : SplitPlan{true, point};
+}
+
+auto split_interval(
+  const LiveInterval &interval,
+  const SplitContext &context,
+  int conflict_pos,
+  bool force
+) -> std::vector<LiveInterval> {
+  auto split_plan = plan_split(interval, context, conflict_pos, force);
+  if (!split_plan.should_split)
+    return {interval};
+
+  LiveInterval left = interval;
+  LiveInterval right = interval;
+  left.segments.clear();
+  left.def_positions.clear();
+  left.use_positions.clear();
+  left.hints.clear();
+  right.segments.clear();
+  right.def_positions.clear();
+  right.use_positions.clear();
+  right.hints.clear();
+
+  for (auto segment : interval.segments) {
+    if (segment.end <= split_plan.point.pos) {
+      left.segments.push_back(segment);
+    } else if (segment.start >= split_plan.point.pos) {
+      right.segments.push_back(segment);
+    } else {
+      left.segments.push_back({segment.start, split_plan.point.pos});
+      right.segments.push_back({split_plan.point.pos, segment.end});
     }
   }
 
-  return pieces.empty() ? std::vector<LiveInterval>{interval} : pieces;
+  for (auto pos : interval.def_positions) {
+    (pos < split_plan.point.pos ? left.def_positions : right.def_positions)
+      .push_back(pos);
+  }
+  for (auto pos : interval.use_positions) {
+    (pos < split_plan.point.pos ? left.use_positions : right.use_positions)
+      .push_back(pos);
+  }
+  for (const auto &hint : interval.hints) {
+    auto *piece = hint.copy_pos < split_plan.point.pos ? &left : &right;
+    if (contains_pos(*piece, hint.copy_pos))
+      piece->hints.push_back(hint);
+  }
+
+  if (left.segments.empty() || right.segments.empty())
+    return {interval};
+
+  for (auto *piece : {&left, &right}) {
+    piece->assigned_reg = -1;
+    piece->spilled = false;
+    piece->split_plan = {};
+  }
+  return {std::move(left), std::move(right)};
 }
 
 auto ensure_spill_slots(
@@ -1599,11 +1985,13 @@ auto plan_frame_region(low_ir::MachineFunction &function) -> void {
   if (function.blocks.empty())
     return;
 
+  low_ir::DominatorTree dom;
+  dom.compute(function);
+
   std::vector<low_ir::MachineBasicBlock *> call_blocks;
-  BlockSet all_blocks;
   for (const auto &block : function.blocks) {
-    all_blocks.insert(block.get());
     if (
+      dom.is_reachable(block.get()) &&
       std::any_of(block->insts.begin(), block->insts.end(), [](const auto &mi) {
         return mi.opcode == CALL;
       })
@@ -1615,61 +2003,18 @@ auto plan_frame_region(low_ir::MachineFunction &function) -> void {
     return;
 
   auto *entry = function.blocks.front().get();
-  std::unordered_map<low_ir::MachineBasicBlock *, BlockSet> dominators;
-  for (const auto &block : function.blocks)
-    dominators[block.get()] =
-      block.get() == entry ? BlockSet{entry} : all_blocks;
-
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    for (const auto &owned_block : function.blocks) {
-      auto *block = owned_block.get();
-      if (block == entry)
-        continue;
-
-      BlockSet next;
-      if (!block->preds.empty()) {
-        next = dominators[block->preds.front()];
-        for (size_t i = 1; i < block->preds.size(); ++i) {
-          const auto &pred_doms = dominators[block->preds[i]];
-          for (auto it = next.begin(); it != next.end();) {
-            if (pred_doms.count(*it) == 0)
-              it = next.erase(it);
-            else
-              ++it;
-          }
-        }
-      }
-      next.insert(block);
-      if (next != dominators[block]) {
-        dominators[block] = std::move(next);
-        changed = true;
-      }
-    }
+  auto *root = call_blocks.front();
+  for (size_t i = 1; i < call_blocks.size() && root; ++i) {
+    while (root && !dom.dominates(root, call_blocks[i]))
+      root = dom.idom(root);
   }
-
-  auto common = dominators[call_blocks.front()];
-  for (size_t i = 1; i < call_blocks.size(); ++i) {
-    const auto &call_doms = dominators[call_blocks[i]];
-    for (auto it = common.begin(); it != common.end();) {
-      if (call_doms.count(*it) == 0)
-        it = common.erase(it);
-      else
-        ++it;
-    }
-  }
-
-  auto *root = entry;
-  for (auto *candidate : common) {
-    if (dominators[candidate].size() > dominators[root].size())
-      root = candidate;
-  }
+  if (!root)
+    root = entry;
 
   auto active = reachable_from(root);
   auto safe = root != entry &&
               std::all_of(active.begin(), active.end(), [&](auto *block) {
-                return dominators[block].count(root) != 0;
+                return dom.dominates(root, block);
               });
   safe =
     safe &&
@@ -1707,7 +2052,7 @@ auto plan_frame_region(low_ir::MachineFunction &function) -> void {
     for (auto *block : active) {
       for (auto &mi : block->insts) {
         for (auto &operand : mi.operands) {
-          if (!is_use_operand(operand))
+          if (!operand.is_reg())
             continue;
           auto &reg = std::get<low_ir::MachineOperand::RegData>(operand.data);
           if (auto it = split_regs.find(reg.id); it != split_regs.end())
@@ -1726,10 +2071,7 @@ auto plan_frame_region(low_ir::MachineFunction &function) -> void {
 }
 
 auto is_callee_saved_reg(int reg) -> bool {
-  return reg == static_cast<int>(S1) ||
-         (reg >= static_cast<int>(S2) && reg <= static_cast<int>(S11)) ||
-         reg == static_cast<int>(FS0) || reg == static_cast<int>(FS1) ||
-         (reg >= static_cast<int>(FS2) && reg <= static_cast<int>(FS11));
+  return is_callee_saved_int_reg(reg) || is_callee_saved_float_reg(reg);
 }
 
 auto block_requires_frame(const low_ir::MachineBasicBlock &block) -> bool {
@@ -1808,6 +2150,7 @@ auto run_ra(low_ir::MachineFunction &function, bool dump_ra, bool emit_ra)
   RegAllocPrinter printer{dump_ra};
   detail::prepare_phi_operands(function);
   detail::plan_frame_region(function);
+  auto split_context = detail::build_split_context(function);
 
   auto intervals = detail::build_intervals(function);
   for (auto &interval : intervals) {
@@ -1820,13 +2163,14 @@ auto run_ra(low_ir::MachineFunction &function, bool dump_ra, bool emit_ra)
   }
   auto hints = detail::collect_hints(function);
   auto fixed_reg_positions = detail::collect_fixed_reg_positions(function);
+  detail::annotate_call_liveness(function, intervals);
 
   for (auto &interval : intervals) {
     if (auto it = hints.find(interval.vreg); it != hints.end()) {
       interval.hints = std::move(it->second);
     }
     detail::compute_spill_cost(interval);
-    interval.split_plan = detail::plan_split(interval);
+    interval.split_plan = detail::plan_split(interval, split_context);
   }
 
   printer.dump_intervals(function, "intervals", intervals);
@@ -1834,11 +2178,9 @@ auto run_ra(low_ir::MachineFunction &function, bool dump_ra, bool emit_ra)
   std::vector<LiveInterval> split_intervals;
   split_intervals.reserve(intervals.size());
   for (const auto &interval : intervals) {
-    // Keep one location for a virtual value across CFG edges.  The current
-    // edge-move resolver does not model every split boundary, and a split
-    // value can otherwise reach a successor through an unmaterialized
-    // physical register.  Register preference still handles short-lived
-    // values without sacrificing this invariant.
+    // Keep the initial allocation whole.  A split is only materialized after
+    // a real allocation conflict, where the allocator can account for the
+    // edge-move cost against the spill it is meant to avoid.
     split_intervals.push_back(interval);
   }
   std::sort(
@@ -1855,7 +2197,7 @@ auto run_ra(low_ir::MachineFunction &function, bool dump_ra, bool emit_ra)
   detail::annotate_call_liveness(function, split_intervals);
   for (auto &interval : split_intervals) {
     detail::compute_spill_cost(interval);
-    interval.split_plan = detail::plan_split(interval);
+    interval.split_plan = detail::plan_split(interval, split_context);
   }
   printer.dump_intervals(function, "split", split_intervals);
 
@@ -1869,7 +2211,11 @@ auto run_ra(low_ir::MachineFunction &function, bool dump_ra, bool emit_ra)
     }
   );
   detail::allocate_registers(
-    split_intervals, fixed_reg_positions, function_has_call
+    function,
+    split_intervals,
+    fixed_reg_positions,
+    function_has_call,
+    split_context
   );
   printer.dump_intervals(function, "allocated", split_intervals);
 
