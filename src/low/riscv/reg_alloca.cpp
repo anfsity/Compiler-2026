@@ -15,17 +15,9 @@ auto is_use_operand(const low_ir::MachineOperand &operand) -> bool {
          std::get<low_ir::MachineOperand::RegData>(operand.data).is_use;
 }
 
-auto allocable_int_regs(bool crosses_call, bool prefer_callee_saved)
-  -> std::vector<int> {
+auto allocable_int_regs(bool crosses_call) -> std::vector<int> {
   if (crosses_call)
     return {S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11};
-
-  if (prefer_callee_saved) {
-    return {
-      S1, S2, S3, S4, S5, S6, S7, S8, T0, T1,
-      T2, T3, T4, A0, A1, A2, A3, A4, A5, A6,
-    };
-  }
 
   // Keep t5/t6 and a7 available for spill and parallel-copy temporaries.
   return {T0, T1, T2, T3, T4, A0, A1, A2, A3, A4, A5, A6};
@@ -37,15 +29,9 @@ auto allocable_float_regs(bool crosses_call) -> std::vector<int> {
   return {FT0, FT1, FT2, FT3, FT4, FT5, FT6, FT7, FT8, FT9};
 }
 
-auto interval_prefers_callee_saved(const LiveInterval &interval) -> bool {
-  constexpr int LongLivedSpan = 32;
-  return !interval.crosses_call && interval.segments.size() > 1 &&
-         interval.segments.back().end - interval.segments.front().start >=
-           LongLivedSpan;
-}
-
 auto is_callee_saved_int_reg(int reg) -> bool {
-  return reg >= static_cast<int>(S1) && reg <= static_cast<int>(S8);
+  return reg == static_cast<int>(S1) ||
+         (reg >= static_cast<int>(S2) && reg <= static_cast<int>(S8));
 }
 
 auto is_float_phys_reg(int reg) -> bool {
@@ -549,20 +535,24 @@ auto annotate_call_liveness(
 auto collect_hints(low_ir::MachineFunction &function)
   -> std::unordered_map<int, std::vector<RegisterHint>> {
   std::unordered_map<int, std::vector<RegisterHint>> hints;
+  int pos = 0;
 
   for (auto &block : function.blocks) {
     for (auto &inst : block->insts) {
-      if (!should_hint_copy(inst))
+      if (!should_hint_copy(inst)) {
+        ++pos;
         continue;
+      }
 
       auto dst = inst.operands[0].get_reg();
       auto src = inst.operands[1].get_reg();
       if (is_virtual_reg(dst) && !is_virtual_reg(src)) {
-        hints[dst].push_back({src, 10});
+        hints[dst].push_back({src, 10, pos});
       }
       if (is_virtual_reg(src) && !is_virtual_reg(dst)) {
-        hints[src].push_back({dst, 10});
+        hints[src].push_back({dst, 10, pos});
       }
+      ++pos;
     }
   }
 
@@ -598,9 +588,11 @@ auto compute_spill_cost(LiveInterval &interval) -> void {
 
 auto allocate_registers(
   std::vector<LiveInterval> &intervals,
-  const std::unordered_map<int, std::vector<int>> &fixed_reg_positions
+  const std::unordered_map<int, std::vector<int>> &fixed_reg_positions,
+  bool function_has_call
 ) -> void {
   std::vector<LiveInterval *> active;
+  std::unordered_set<int> used_callee_saved;
   for (auto &interval : intervals) {
     active.erase(
       std::remove_if(
@@ -613,26 +605,29 @@ auto allocate_registers(
       active.end()
     );
 
-    auto prefer_callee_saved = interval.reg_class == RegClass::Int &&
-                               interval_prefers_callee_saved(interval);
-    auto regs =
-      interval.reg_class == RegClass::Float
-        ? allocable_float_regs(interval.crosses_call)
-        : allocable_int_regs(interval.crosses_call, prefer_callee_saved);
-    regs.erase(
-      std::remove_if(
-        regs.begin(),
-        regs.end(),
-        [&](int reg) {
-          auto found = fixed_reg_positions.find(reg);
-          return found != fixed_reg_positions.end() &&
-                 std::any_of(
-                   found->second.begin(), found->second.end(), [&](int pos) {
-                     return contains_pos(interval, pos);
-                   }
-                 );
+    auto regs = interval.reg_class == RegClass::Float
+                  ? allocable_float_regs(interval.crosses_call)
+                  : allocable_int_regs(interval.crosses_call);
+    auto conflicts_with_fixed_use = [&](int reg) {
+      auto found = fixed_reg_positions.find(reg);
+      if (found == fixed_reg_positions.end())
+        return false;
+      return std::any_of(
+        found->second.begin(), found->second.end(), [&](int pos) {
+          if (!contains_pos(interval, pos))
+            return false;
+          return std::none_of(
+            interval.hints.begin(),
+            interval.hints.end(),
+            [&](const auto &hint) {
+              return hint.reg == reg && hint.copy_pos == pos;
+            }
+          );
         }
-      ),
+      );
+    };
+    regs.erase(
+      std::remove_if(regs.begin(), regs.end(), conflicts_with_fixed_use),
       regs.end()
     );
     const auto allowed_regs = regs;
@@ -646,9 +641,6 @@ auto allocate_registers(
     }
 
     for (const auto &hint : interval.hints) {
-      if (prefer_callee_saved && !is_callee_saved_int_reg(hint.reg)) {
-        continue;
-      }
       if (std::find(regs.begin(), regs.end(), hint.reg) != regs.end()) {
         interval.assigned_reg = hint.reg;
         break;
@@ -659,8 +651,8 @@ auto allocate_registers(
       interval.assigned_reg = regs.front();
     }
 
+    auto victim = active.end();
     if (interval.assigned_reg < 0) {
-      auto victim = active.end();
       for (auto it = active.begin(); it != active.end(); ++it) {
         if (
           (*it)->reg_class != interval.reg_class ||
@@ -678,20 +670,60 @@ auto allocate_registers(
         }
       }
 
+      auto *would_spill = &interval;
       if (
         victim != active.end() &&
+        (*victim)->spill_cost.score < interval.spill_cost.score
+      ) {
+        would_spill = *victim;
+      }
+
+      // A leaf may use s1-s8 only as a profitable alternative to spilling.
+      if (interval.reg_class == RegClass::Int && !function_has_call) {
+        std::vector<int> callee_regs{S1, S2, S3, S4, S5, S6, S7, S8};
+        callee_regs.erase(
+          std::remove_if(
+            callee_regs.begin(),
+            callee_regs.end(),
+            [&](int reg) {
+              if (conflicts_with_fixed_use(reg))
+                return true;
+              return std::any_of(
+                active.begin(), active.end(), [&](const auto *active_interval) {
+                  return active_interval->reg_class == RegClass::Int &&
+                         active_interval->assigned_reg == reg;
+                }
+              );
+            }
+          ),
+          callee_regs.end()
+        );
+
+        auto spill_memory_ops =
+          would_spill->spill_cost.use_count + would_spill->spill_cost.def_count;
+        auto callee_saved_cost = used_callee_saved.empty() ? 6 : 2;
+        if (!callee_regs.empty() && spill_memory_ops > callee_saved_cost) {
+          interval.assigned_reg = callee_regs.front();
+          used_callee_saved.insert(interval.assigned_reg);
+        }
+      }
+
+      if (
+        interval.assigned_reg < 0 && victim != active.end() &&
         (*victim)->spill_cost.score < interval.spill_cost.score
       ) {
         interval.assigned_reg = (*victim)->assigned_reg;
         (*victim)->assigned_reg = -1;
         (*victim)->spilled = true;
         active.erase(victim);
-        active.push_back(&interval);
       } else {
-        interval.spilled = true;
+        interval.spilled = interval.assigned_reg < 0;
       }
-    } else {
+    }
+    if (!interval.spilled) {
       active.push_back(&interval);
+      if (is_callee_saved_int_reg(interval.assigned_reg))
+        used_callee_saved.insert(interval.assigned_reg);
     }
   }
 }
@@ -1827,7 +1859,18 @@ auto run_ra(low_ir::MachineFunction &function, bool dump_ra, bool emit_ra)
   }
   printer.dump_intervals(function, "split", split_intervals);
 
-  detail::allocate_registers(split_intervals, fixed_reg_positions);
+  auto function_has_call = std::any_of(
+    function.blocks.begin(), function.blocks.end(), [](const auto &block) {
+      return std::any_of(
+        block->insts.begin(), block->insts.end(), [](auto &inst) {
+          return inst.opcode == CALL;
+        }
+      );
+    }
+  );
+  detail::allocate_registers(
+    split_intervals, fixed_reg_positions, function_has_call
+  );
   printer.dump_intervals(function, "allocated", split_intervals);
 
   if (!emit_ra) {
