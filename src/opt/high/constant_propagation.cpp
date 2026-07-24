@@ -48,7 +48,10 @@ auto CP::visit(Op *op) -> void {
 
 auto CP::visit(Op *op, OpTag<OpCode::Alloca>) -> void {
   auto ptr_type = std::static_pointer_cast<exodus::Ptr>(op->result->type);
-  if (ptr_type->target->is_i32() || ptr_type->target->is_f32()) {
+  if (
+    ptr_type->target->is_i32() || ptr_type->target->is_f32() ||
+    ptr_type->target->is_bool()
+  ) {
     safe_allocas.insert(op->result);
   }
 }
