@@ -2,6 +2,7 @@
 
 #include "../../base/getptr.hpp"
 #include <algorithm>
+#include <limits>
 
 namespace exodus::mid_ir::opt {
 
@@ -168,15 +169,27 @@ auto LICM::can_hoist(Op *op, Block *block, const Loop &loop) const -> bool {
            !has_aliasing_write(loop, *location);
   }
   case OpCode::GetPtr: {
-    auto read_location = get_getptr_read_location(*op);
-    if (!read_location) {
+    auto read_locations = get_getptr_read_locations(*op);
+    if (read_locations.empty()) {
       if (!has_non_call_loop_user(op->result, loop))
         return false;
       return is_safe_to_speculate(*op);
     }
-    return (alias_analysis.is_dereferenceable(*read_location) ||
-            block_dominates_all_exits(block, loop)) &&
-           !has_aliasing_write(loop, *read_location);
+    return std::all_of(
+             read_locations.begin(),
+             read_locations.end(),
+             [this, block, &loop](const auto &location) {
+               return alias_analysis.is_dereferenceable(location) ||
+                      block_dominates_all_exits(block, loop);
+             }
+           ) &&
+           std::all_of(
+             read_locations.begin(),
+             read_locations.end(),
+             [this, &loop](const auto &location) {
+               return !has_aliasing_write(loop, location);
+             }
+           );
   }
   default:
     return false;
@@ -267,7 +280,21 @@ auto LICM::has_interfering_access(
       ) {
         access = alias_analysis.get_location(*op);
       } else if (op->code == OpCode::GetPtr) {
-        access = get_getptr_read_location(*op);
+        auto accesses = get_getptr_read_locations(*op);
+        if (accesses.empty())
+          continue;
+        if (
+          std::any_of(
+            accesses.begin(),
+            accesses.end(),
+            [this, &location](const auto &access) {
+              return alias_analysis.may_alias(location, access);
+            }
+          )
+        ) {
+          return true;
+        }
+        continue;
       } else {
         continue;
       }
@@ -297,7 +324,7 @@ auto LICM::hoist_set_fits_register_budget(const Loop &loop) const -> bool {
   size_t integer_boundary = 0;
   size_t float_boundary = 0;
   for (auto *op : invariant_ops) {
-    if (!op->result || !has_loop_user_outside_hoist_set(op->result, loop)) {
+    if (!op->result || !has_user_outside_hoist_set(op->result)) {
       continue;
     }
     if (op->result->type->is_f32())
@@ -386,42 +413,85 @@ auto LICM::has_non_call_loop_user(Value *value, const Loop &loop) const
   return false;
 }
 
-auto LICM::has_loop_user_outside_hoist_set(Value *value, const Loop &loop) const
-  -> bool {
-  for (auto *block : loop.get_blocks()) {
-    for (auto *op : block->insts) {
-      bool uses_value =
-        std::find(op->operands.begin(), op->operands.end(), value) !=
-        op->operands.end();
-      if (op->code == OpCode::Phi) {
-        const auto &incoming = std::get<PhiPayload>(op->payload).incoming;
-        uses_value |= std::any_of(
-          incoming.begin(), incoming.end(), [value](const auto &in) {
-            return in.second == value;
-          }
-        );
-      }
-      if (uses_value && !invariant_ops.count(op))
-        return true;
-    }
+auto LICM::has_user_outside_hoist_set(Value *value) const -> bool {
+  if (!value)
+    return false;
+  for (auto *user_base : value->users) {
+    auto *user = static_cast<Op *>(user_base);
+    if (!invariant_ops.count(user))
+      return true;
   }
   return false;
 }
 
-auto LICM::get_getptr_read_location(const Op &op) const
-  -> std::optional<MemoryLocation> {
+auto LICM::get_getptr_read_locations(const Op &op) const
+  -> std::vector<MemoryLocation> {
+  std::vector<MemoryLocation> locations;
   if (
     op.code != OpCode::GetPtr || op.operands.empty() || !op.result ||
     !op.operands[0]->type->is_ptr() || !op.result->type->is_ptr()
   ) {
-    return std::nullopt;
+    return locations;
   }
   auto plan = ir::analyze_getptr(
     op.operands[0]->type, op.result->type, op.operands.size() - 1
   );
   if (!plan.reads_memory)
-    return std::nullopt;
-  return alias_analysis.get_location(op.operands[0], pointer_storage_size);
+    return locations;
+
+  auto base = alias_analysis.get_location(op.operands[0], pointer_storage_size);
+  auto checked_add = [](int64_t lhs, int64_t rhs) -> std::optional<int64_t> {
+    if (
+      (rhs > 0 && lhs > std::numeric_limits<int64_t>::max() - rhs) ||
+      (rhs < 0 && lhs < std::numeric_limits<int64_t>::min() - rhs)
+    ) {
+      return std::nullopt;
+    }
+    return lhs + rhs;
+  };
+  bool address_is_traced = true;
+  for (const auto &step : plan.steps) {
+    if (step.kind == ir::GetPtrStep::Kind::ImplicitLoad) {
+      if (!address_is_traced) {
+        locations.push_back(
+          MemoryLocation{nullptr, nullptr, std::nullopt, pointer_storage_size}
+        );
+        continue;
+      }
+      auto location = base;
+      location.pointer = op.operands[0];
+      location.size = pointer_storage_size;
+      locations.push_back(location);
+      address_is_traced = false;
+      continue;
+    }
+
+    if (!address_is_traced || !base.offset)
+      continue;
+    auto operand_index = step.index_pos + 1;
+    if (operand_index >= op.operands.size()) {
+      address_is_traced = false;
+      continue;
+    }
+    auto *index = op.operands[operand_index];
+    if (
+      !index || index->kind != ValueKind::Constant ||
+      !std::holds_alternative<int>(static_cast<Constant *>(index)->val)
+    ) {
+      address_is_traced = false;
+      continue;
+    }
+    auto scaled =
+      static_cast<int64_t>(std::get<int>(static_cast<Constant *>(index)->val)) *
+      step.scale;
+    auto offset = checked_add(*base.offset, scaled);
+    if (!offset) {
+      address_is_traced = false;
+      continue;
+    }
+    base.offset = *offset;
+  }
+  return locations;
 }
 
 auto LICM::move_to_preheader(Op *op, Block *from, Block *preheader) -> void {

@@ -56,9 +56,22 @@ auto is_scalar_global(Value *root) -> bool {
 
 auto BasicAliasAnalysis::get_location(Value *pointer, size_t size) const
   -> MemoryLocation {
+  std::unordered_set<Value *> active;
+  return get_location_impl(pointer, size, active);
+}
+
+auto BasicAliasAnalysis::get_location_impl(
+  Value *pointer, size_t size, std::unordered_set<Value *> &active
+) const -> MemoryLocation {
   MemoryLocation location{pointer, nullptr, std::nullopt, size};
   if (!pointer)
     return location;
+  if (!active.insert(pointer).second)
+    return location;
+  auto finish = [&active, pointer](MemoryLocation result) {
+    active.erase(pointer);
+    return result;
+  };
 
   if (
     pointer->kind == ValueKind::GlobalVar ||
@@ -66,26 +79,77 @@ auto BasicAliasAnalysis::get_location(Value *pointer, size_t size) const
   ) {
     location.root = pointer;
     location.offset = 0;
-    return location;
+    return finish(location);
   }
 
   if (pointer->kind != ValueKind::OpResult)
-    return location;
+    return finish(location);
 
   auto *creator = static_cast<Op *>(static_cast<OpResult *>(pointer)->creator);
   if (!creator)
-    return location;
+    return finish(location);
   if (creator->code == OpCode::Alloca) {
     location.root = pointer;
     location.offset = 0;
-    return location;
+    return finish(location);
+  }
+  if (creator->code == OpCode::Phi) {
+    auto &incoming = std::get<PhiPayload>(creator->payload).incoming;
+    bool have_root = false;
+    bool has_recurrence = false;
+    Value *root = nullptr;
+    std::optional<int64_t> offset;
+    for (const auto &[pred, value] : incoming) {
+      (void)pred;
+      if (!value)
+        continue;
+      bool recurrence = false;
+      if (value->kind == ValueKind::OpResult) {
+        auto *incoming_op =
+          static_cast<Op *>(static_cast<OpResult *>(value)->creator);
+        recurrence = incoming_op && incoming_op->code == OpCode::GetPtr &&
+                     !incoming_op->operands.empty() &&
+                     incoming_op->operands[0] == pointer &&
+                     incoming_op->result &&
+                     incoming_op->operands[0]->type->is_ptr() &&
+                     incoming_op->result->type->is_ptr() &&
+                     !ir::analyze_getptr(
+                        incoming_op->operands[0]->type,
+                        incoming_op->result->type,
+                        incoming_op->operands.size() - 1
+                     )
+                        .reads_memory;
+      }
+      if (recurrence) {
+        has_recurrence = true;
+        continue;
+      }
+      auto incoming_location = get_location_impl(value, size, active);
+      if (!incoming_location.root) {
+        return finish(location);
+      }
+      if (!have_root) {
+        have_root = true;
+        root = incoming_location.root;
+        offset = incoming_location.offset;
+      } else if (root != incoming_location.root) {
+        return finish(location);
+      } else if (offset != incoming_location.offset) {
+        offset = std::nullopt;
+      }
+    }
+    if (!have_root)
+      return finish(location);
+    location.root = root;
+    location.offset = has_recurrence ? std::nullopt : offset;
+    return finish(location);
   }
   if (
     creator->code != OpCode::GetPtr || creator->operands.empty() ||
     !creator->result || !creator->operands[0]->type->is_ptr() ||
     !creator->result->type->is_ptr()
   ) {
-    return location;
+    return finish(location);
   }
 
   auto plan = ir::analyze_getptr(
@@ -94,13 +158,13 @@ auto BasicAliasAnalysis::get_location(Value *pointer, size_t size) const
     creator->operands.size() - 1
   );
   if (plan.reads_memory)
-    return location;
+    return finish(location);
 
-  auto base = get_location(creator->operands[0], size);
+  auto base = get_location_impl(creator->operands[0], size, active);
   location.root = base.root;
   location.offset = base.offset;
   if (!location.root || !location.offset)
-    return location;
+    return finish(location);
 
   for (const auto &step : plan.steps) {
     if (step.kind != ir::GetPtrStep::Kind::Index)
@@ -124,7 +188,7 @@ auto BasicAliasAnalysis::get_location(Value *pointer, size_t size) const
     if (!location.offset)
       break;
   }
-  return location;
+  return finish(location);
 }
 
 auto BasicAliasAnalysis::get_location(const Op &op) const

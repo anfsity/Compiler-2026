@@ -3,6 +3,7 @@
 #include "../../mid/ir.hpp"
 #include "../../mid/rewriter.hpp"
 #include "../AnalysisManager.hpp"
+#include <deque>
 #include <unordered_set>
 
 namespace exodus::mid_ir::opt {
@@ -18,9 +19,12 @@ public:
 
 private:
   static auto has_observable_effect(const Op *op) -> bool;
-  static auto
-  has_scoped_users(const Op *op, const std::unordered_set<OpBase *> &scope)
-    -> bool;
+  static auto mark_definition(
+    Value *value,
+    const std::unordered_set<Op *> &scope,
+    std::unordered_set<Op *> &live,
+    std::deque<Op *> &worklist
+  ) -> void;
 };
 
 } // namespace exodus::mid_ir::opt
