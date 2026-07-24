@@ -5,28 +5,42 @@ namespace exodus::mid_ir::opt {
 auto DCE::run(
   LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager & /* am */
 ) -> exodus::opt::PreservedAnalysis {
-  bool changed = false;
-  bool local_changed = false;
-
-  do { // NOLINT
-    local_changed = false;
-    std::unordered_set<OpBase *> scope;
-    for (auto &block : func.blocks) {
-      scope.insert(block->insts.begin(), block->insts.end());
+  std::unordered_set<Op *> scope;
+  std::unordered_set<Op *> live;
+  std::deque<Op *> worklist;
+  for (auto &block : func.blocks) {
+    for (auto *op : block->insts) {
+      scope.insert(op);
+      if (has_observable_effect(op) && live.insert(op).second)
+        worklist.push_back(op);
     }
+  }
 
-    rewriter.set_scope(func);
-    for (auto &block : func.blocks) {
-      for (auto *op : block->insts) {
-        if (has_observable_effect(op) || has_scoped_users(op, scope))
-          continue;
-        rewriter.eraseOp(op);
-        local_changed = true;
+  while (!worklist.empty()) {
+    auto *op = worklist.front();
+    worklist.pop_front();
+    for (auto *operand : op->operands)
+      mark_definition(operand, scope, live, worklist);
+    if (op->code == OpCode::Phi) {
+      for (const auto &[pred, value] :
+           std::get<PhiPayload>(op->payload).incoming) {
+        (void)pred;
+        mark_definition(value, scope, live, worklist);
       }
     }
-    rewriter.finalize(func);
-    changed |= local_changed;
-  } while (local_changed);
+  }
+
+  bool changed = false;
+  rewriter.set_scope(func);
+  for (auto &block : func.blocks) {
+    for (auto *op : block->insts) {
+      if (live.count(op))
+        continue;
+      rewriter.eraseOp(op);
+      changed = true;
+    }
+  }
+  rewriter.finalize(func);
 
   return changed ? exodus::opt::PreservedAnalysis::none()
                  : exodus::opt::PreservedAnalysis::all();
@@ -46,20 +60,18 @@ auto DCE::has_observable_effect(const Op *op) -> bool {
   }
 }
 
-auto DCE::has_scoped_users(
-  const Op *op, const std::unordered_set<OpBase *> &scope
-) -> bool {
-  if (!op->result)
-    return false;
-  for (auto *user_base : op->result->users) {
-    if (!scope.count(user_base))
-      continue;
-
-    auto *user = static_cast<Op *>(user_base);
-    if (user)
-      return true;
+auto DCE::mark_definition(
+  Value *value,
+  const std::unordered_set<Op *> &scope,
+  std::unordered_set<Op *> &live,
+  std::deque<Op *> &worklist
+) -> void {
+  if (!value || value->kind != ValueKind::OpResult)
+    return;
+  auto *definition = static_cast<Op *>(static_cast<OpResult *>(value)->creator);
+  if (definition && scope.count(definition) && live.insert(definition).second) {
+    worklist.push_back(definition);
   }
-  return false;
 }
 
 } // namespace exodus::mid_ir::opt
