@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <unordered_set>
 
 namespace exodus::mid_ir {
 
@@ -31,6 +32,9 @@ public:
   }
 
 private:
+  auto get_location_impl(
+    Value *pointer, size_t size, std::unordered_set<Value *> &active
+  ) const -> MemoryLocation;
   auto is_identified_object(Value *root) const -> bool;
 };
 

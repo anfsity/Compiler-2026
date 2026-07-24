@@ -40,6 +40,13 @@ auto LoopSimplify::create_preheader(LinearFunction &func, Loop &loop) -> bool {
 
   if (outside_preds.empty() && header != func.blocks.front().get())
     return false;
+  if (
+    outside_preds.empty() && !header->insts.empty() &&
+    header->insts.front()->code == OpCode::Phi
+  ) {
+    // There is no valid initial value to attach to the new entry edge.
+    return false;
+  }
 
   auto header_it = std::find_if(
     func.blocks.begin(),

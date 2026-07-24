@@ -46,11 +46,10 @@ private:
   auto loop_contains_call(const Loop &loop) const -> bool;
   auto live_in_pressure(const Loop &loop, bool floating) const -> size_t;
   auto has_non_call_loop_user(Value *value, const Loop &loop) const -> bool;
-  auto has_loop_user_outside_hoist_set(Value *value, const Loop &loop) const
-    -> bool;
+  auto has_user_outside_hoist_set(Value *value) const -> bool;
 
-  auto get_getptr_read_location(const Op &op) const
-    -> std::optional<MemoryLocation>;
+  auto get_getptr_read_locations(const Op &op) const
+    -> std::vector<MemoryLocation>;
   auto move_to_preheader(Op *op, Block *from, Block *preheader) -> void;
   auto clone_store_to_exit(const Op &store, Block *exit) -> void;
 

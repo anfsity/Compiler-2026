@@ -2,6 +2,7 @@
 
 #include "../../base/getptr.hpp"
 #include <algorithm>
+#include <cstdint>
 #include <limits>
 
 namespace exodus::mid_ir::opt {
@@ -171,6 +172,182 @@ auto LoopStrengthReduce::expression_cost(
   return cost;
 }
 
+auto LoopStrengthReduce::affine_form(
+  Value *value, Value *induction, const Loop &loop
+) const -> std::optional<AffineForm> {
+  if (!value)
+    return std::nullopt;
+  if (value == induction)
+    return AffineForm{1, 0};
+  if (value->kind == ValueKind::Constant) {
+    auto constant = integer_constant(value);
+    return constant ? std::optional<AffineForm>{{0, *constant}} : std::nullopt;
+  }
+  if (value->kind != ValueKind::OpResult)
+    return std::nullopt;
+
+  auto *creator = static_cast<Op *>(static_cast<OpResult *>(value)->creator);
+  auto block_it = op_blocks.find(creator);
+  if (
+    !creator || block_it == op_blocks.end() ||
+    !loop.contains(block_it->second) || creator->operands.size() != 2 ||
+    (creator->code != OpCode::Add && creator->code != OpCode::Sub)
+  ) {
+    return std::nullopt;
+  }
+
+  auto lhs = affine_form(creator->operands[0], induction, loop);
+  auto rhs = affine_form(creator->operands[1], induction, loop);
+  if (!lhs || !rhs)
+    return std::nullopt;
+  auto checked_add = [](int64_t lhs, int64_t rhs) -> std::optional<int64_t> {
+    if (
+      (rhs > 0 && lhs > std::numeric_limits<int64_t>::max() - rhs) ||
+      (rhs < 0 && lhs < std::numeric_limits<int64_t>::min() - rhs)
+    ) {
+      return std::nullopt;
+    }
+    return lhs + rhs;
+  };
+  auto checked_sub =
+    [&checked_add](int64_t lhs, int64_t rhs) -> std::optional<int64_t> {
+    if (rhs == std::numeric_limits<int64_t>::min()) {
+      if (lhs >= 0)
+        return std::nullopt;
+      auto partial = checked_add(lhs, std::numeric_limits<int64_t>::max());
+      return partial ? checked_add(*partial, 1) : std::nullopt;
+    }
+    return checked_add(lhs, -rhs);
+  };
+  auto coefficient = creator->code == OpCode::Add
+                       ? checked_add(lhs->coefficient, rhs->coefficient)
+                       : checked_sub(lhs->coefficient, rhs->coefficient);
+  auto offset = creator->code == OpCode::Add
+                  ? checked_add(lhs->offset, rhs->offset)
+                  : checked_sub(lhs->offset, rhs->offset);
+  if (!coefficient || !offset)
+    return std::nullopt;
+  return AffineForm{*coefficient, *offset};
+}
+
+auto LoopStrengthReduce::index_is_no_wrap(
+  Value *index, const Loop &loop, const Induction &induction
+) const -> bool {
+  auto form = affine_form(index, induction.phi->result, loop);
+  auto initial = integer_constant(induction.initial);
+  if (!form || !initial || (form->coefficient != 1 && form->coefficient != -1))
+    return false;
+
+  auto *header = loop.get_header();
+  if (header->insts.empty() || header->insts.back()->code != OpCode::Branch)
+    return false;
+  auto *branch = header->insts.back();
+  if (
+    branch->operands.size() != 1 || branch->successors.size() != 2 ||
+    (loop.contains(branch->successors[0]) ==
+     loop.contains(branch->successors[1]))
+  ) {
+    return false;
+  }
+  auto *condition = branch->operands[0];
+  if (!condition || condition->kind != ValueKind::OpResult)
+    return false;
+  auto *compare =
+    static_cast<Op *>(static_cast<OpResult *>(condition)->creator);
+  auto compare_block = op_blocks.find(compare);
+  if (
+    !compare || compare_block == op_blocks.end() ||
+    compare_block->second != header || compare->operands.size() != 2
+  ) {
+    return false;
+  }
+
+  auto predicate = compare->code;
+  Value *bound_value = nullptr;
+  if (compare->operands[0] == induction.phi->result) {
+    bound_value = compare->operands[1];
+  } else if (compare->operands[1] == induction.phi->result) {
+    bound_value = compare->operands[0];
+    switch (predicate) {
+    case OpCode::Lt:
+      predicate = OpCode::Gt;
+      break;
+    case OpCode::Le:
+      predicate = OpCode::Ge;
+      break;
+    case OpCode::Gt:
+      predicate = OpCode::Lt;
+      break;
+    case OpCode::Ge:
+      predicate = OpCode::Le;
+      break;
+    default:
+      break;
+    }
+  } else {
+    return false;
+  }
+  auto bound = integer_constant(bound_value);
+  if (!bound)
+    return false;
+
+  bool true_is_continue = loop.contains(branch->successors[0]);
+  if (!true_is_continue) {
+    switch (predicate) {
+    case OpCode::Lt:
+      predicate = OpCode::Ge;
+      break;
+    case OpCode::Le:
+      predicate = OpCode::Gt;
+      break;
+    case OpCode::Gt:
+      predicate = OpCode::Le;
+      break;
+    case OpCode::Ge:
+      predicate = OpCode::Lt;
+      break;
+    default:
+      break;
+    }
+  }
+
+  int64_t iv_min = 0;
+  int64_t iv_max = 0;
+  if (induction.step > 0) {
+    if (predicate != OpCode::Lt && predicate != OpCode::Le)
+      return false;
+    if (*initial > *bound)
+      return true;
+    iv_min = *initial;
+    iv_max = predicate == OpCode::Lt ? static_cast<int64_t>(*bound) - 1
+                                     : static_cast<int64_t>(*bound);
+    if (iv_max < iv_min)
+      return true;
+    if (iv_max + induction.step > std::numeric_limits<int32_t>::max())
+      return false;
+  } else {
+    if (predicate != OpCode::Gt && predicate != OpCode::Ge)
+      return false;
+    if (*initial < *bound)
+      return true;
+    iv_max = *initial;
+    iv_min = predicate == OpCode::Gt ? static_cast<int64_t>(*bound) + 1
+                                     : static_cast<int64_t>(*bound);
+    if (iv_min > iv_max)
+      return true;
+    if (iv_min + induction.step < std::numeric_limits<int32_t>::min())
+      return false;
+  }
+
+  auto index_at = [form](int64_t iv) {
+    return form->coefficient * iv + form->offset;
+  };
+  auto min_index = std::min(index_at(iv_min), index_at(iv_max));
+  auto max_index = std::max(index_at(iv_min), index_at(iv_max));
+  return min_index >= std::numeric_limits<int32_t>::min() &&
+         max_index <= std::numeric_limits<int32_t>::max();
+}
+
 auto LoopStrengthReduce::is_clonable_expression(
   const Op &op, const Loop &loop
 ) const -> bool {
@@ -263,9 +440,12 @@ auto LoopStrengthReduce::reduce_getptrs(LinearFunction &func, const Loop &loop)
   MidIRRewriter rewriter;
   rewriter.set_scope(func);
   bool changed = false;
+  std::unordered_map<Op *, std::unordered_map<Value *, Value *>> caches;
   for (auto *getptr : candidates) {
     for (const auto &induction : inductions) {
-      if (reduce_getptr(getptr, loop, induction, rewriter)) {
+      if (
+        reduce_getptr(getptr, loop, induction, rewriter, caches[induction.phi])
+      ) {
         changed = true;
         break;
       }
@@ -279,7 +459,8 @@ auto LoopStrengthReduce::reduce_getptr(
   Op *getptr,
   const Loop &loop,
   const Induction &induction,
-  MidIRRewriter &rewriter
+  MidIRRewriter &rewriter,
+  std::unordered_map<Value *, Value *> &cache
 ) -> bool {
   if (
     !getptr->result || getptr->operands.size() != 2 ||
@@ -314,6 +495,8 @@ auto LoopStrengthReduce::reduce_getptr(
   auto cost = expression_cost(getptr->operands[1], induction.phi->result, loop);
   if (!cost || *cost == 0)
     return false;
+  if (!index_is_no_wrap(getptr->operands[1], loop, induction))
+    return false;
 
   long long pointer_step =
     static_cast<long long>(*coefficient) * induction.step;
@@ -324,7 +507,6 @@ auto LoopStrengthReduce::reduce_getptr(
     return false;
   }
 
-  std::unordered_map<Value *, Value *> cache;
   auto *initial_index = clone_initial_expression(
     getptr->operands[1],
     induction.phi->result,

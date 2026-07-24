@@ -22,6 +22,11 @@ private:
     int step = 0;
   };
 
+  struct AffineForm {
+    int64_t coefficient = 0;
+    int64_t offset = 0;
+  };
+
   MidModule *module;
   std::unordered_map<Op *, Block *> op_blocks;
 
@@ -45,10 +50,16 @@ private:
     Op *getptr,
     const Loop &loop,
     const Induction &induction,
-    MidIRRewriter &rewriter
+    MidIRRewriter &rewriter,
+    std::unordered_map<Value *, Value *> &cache
   ) -> bool;
 
   static auto integer_constant(Value *value) -> std::optional<int>;
+  auto affine_form(Value *value, Value *induction, const Loop &loop) const
+    -> std::optional<AffineForm>;
+  auto index_is_no_wrap(
+    Value *index, const Loop &loop, const Induction &induction
+  ) const -> bool;
   auto is_clonable_expression(const Op &op, const Loop &loop) const -> bool;
 };
 
