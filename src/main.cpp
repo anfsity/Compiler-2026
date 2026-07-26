@@ -23,6 +23,7 @@
 #include "opt/AnalysisManager.hpp"
 #include "opt/PassBuilder.hpp"
 #include "opt/PassManager.hpp"
+#include "opt/mid/dead_function_elimination.hpp"
 
 using namespace exodus::ast;
 using namespace exodus::high_ir;
@@ -242,11 +243,22 @@ private:
     if (options.pass_names.empty()) {
       auto lfpm = pb.build_linear_function_pipeline();
       lfpm.set_after_pass_callback(instrumentation);
-      for (auto &f : mid_module->functions) {
-        if (!f->is_decl) {
-          lfpm.run_to_fixed_point(*f, lfam);
+      constexpr size_t max_module_iterations = 8;
+      for (size_t iteration = 0; iteration < max_module_iterations;
+           ++iteration) {
+        bool changed = false;
+        for (auto &f : mid_module->functions) {
+          if (
+            !f->is_decl && !lfpm.run_to_fixed_point(*f, lfam).all_preserved()
+          ) {
+            changed = true;
+          }
         }
+        if (!changed)
+          break;
       }
+      if (exodus::mid_ir::opt::eliminate_dead_functions(*mid_module))
+        instrument("mid_dead_function_elimination", *mid_module);
     } else {
       for (const auto &name : options.pass_names) {
         if (pb.is_linear_function_pass(name)) {

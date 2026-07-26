@@ -2,8 +2,10 @@
 #include "cfg_simplify.hpp"
 #include "dce.hpp"
 #include "gvn.hpp"
+#include "inliner.hpp"
 #include "inst_combine.hpp"
 #include "licm.hpp"
+#include "loop_idiom_recognize.hpp"
 #include "loop_simplify.hpp"
 #include "loop_strength_reduce.hpp"
 #include "mem2reg.hpp"
@@ -16,6 +18,9 @@ static exodus::opt::RegisterLinearFunctionPass<Mem2Reg>
 
 static exodus::opt::RegisterLinearFunctionPass<TailRecursionElim>
   reg_tail_recursion_elim("tail_recursion_elim", "tail recursion elimination");
+
+static exodus::opt::RegisterLinearFunctionPass<Inliner>
+  reg_inliner("mid_inliner", "cost-aware CFG inlining");
 
 static exodus::opt::RegisterLinearFunctionPass<InstCombine>
   reg_inst_combine("instcombine", "instruction combining");
@@ -32,6 +37,11 @@ static exodus::opt::RegisterLinearFunctionPass<GVN>
 static exodus::opt::RegisterLinearFunctionPass<LoopStrengthReduce>
   reg_loop_strength_reduce(
     "loop_strength_reduce", "reduce affine loop address calculations"
+  );
+
+static exodus::opt::RegisterLinearFunctionPass<LoopIdiomRecognize>
+  reg_loop_idiom_recognize(
+    "loop_idiom_recognize", "recognize proven loop memory idioms"
   );
 
 static exodus::opt::RegisterLinearFunctionPass<CFGSimplify>

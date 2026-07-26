@@ -66,6 +66,7 @@ struct LinearFunction {
 
   std::list<std::unique_ptr<Block>> blocks;
   bool is_decl = false;
+  bool tail_recursion_eliminated = false;
 };
 
 struct MidModule {

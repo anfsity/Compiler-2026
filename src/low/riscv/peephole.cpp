@@ -268,7 +268,8 @@ auto simplify_constant_operation(
   std::list<MachineInst>::iterator op,
   const std::unordered_map<int, int> &uses,
   const std::unordered_set<int> &sign_extended_i32_regs,
-  bool in_hot_loop
+  bool in_hot_loop,
+  bool in_loop
 ) -> bool {
   if (li->opcode != LI || li->operands.size() != 2)
     return false;
@@ -394,6 +395,8 @@ auto simplify_constant_operation(
     }
     break;
   case DIVW:
+    if (*rhs != *constant_reg)
+      break;
     if (*value == 1) {
       replacement.push_back(make_copy(*dst, *source));
     } else if (*value == -1) {
@@ -452,10 +455,93 @@ auto simplify_constant_operation(
       replacement.push_back(make_binary(ADDW, *dst, *dst, correction));
     }
     break;
-  case REMW:
-    if (*value == 1 || *value == -1)
+  case REMW: {
+    if (*rhs != *constant_reg)
+      break;
+    if (*value == 1 || *value == -1) {
       replacement.push_back(make_li(*dst, 0));
+      break;
+    }
+    auto scratch = *constant_reg;
+    if (scratch == *dst || scratch == *source)
+      scratch = function.new_vreg();
+    auto result = *dst;
+    if (result == *source || result == scratch)
+      result = function.new_vreg();
+    auto finish_result = [&] {
+      if (result != *dst)
+        replacement.push_back(make_copy(*dst, result));
+    };
+
+    auto absolute_divisor =
+      *value < 0 ? -static_cast<int64_t>(*value) : static_cast<int64_t>(*value);
+    if (
+      absolute_divisor <= std::numeric_limits<int>::max() &&
+      is_power_of_two(static_cast<int>(absolute_divisor))
+    ) {
+      // For d = 2^k, signed remainder can be computed over the full i32
+      // domain as ((x + bias) & (d - 1)) - bias, where bias is d - 1 for
+      // negative x and zero otherwise.  Reuse the removed one-use constant
+      // register for bias when it does not conflict with the dividend or
+      // result.  An in-place REMW uses a temporary result so the original
+      // dividend remains available through the final subtraction.
+      auto divisor = static_cast<int>(absolute_divisor);
+      auto shift = log2_power_of_two(divisor);
+      if (sign_extended_i32_regs.count(*source) == 0) {
+        replacement.push_back(make_unary_imm(ADDIW, scratch, *source, 0));
+        replacement.push_back(make_unary_imm(SRAI, scratch, scratch, 31));
+      } else {
+        replacement.push_back(make_unary_imm(SRAI, scratch, *source, 31));
+      }
+      replacement.push_back(make_unary_imm(SRLI, scratch, scratch, 64 - shift));
+      replacement.push_back(make_binary(ADDW, result, *source, scratch));
+      if (divisor - 1 <= 2047) {
+        replacement.push_back(
+          make_unary_imm(ANDI, result, result, divisor - 1)
+        );
+      } else {
+        replacement.push_back(make_unary_imm(SLLI, result, result, 64 - shift));
+        replacement.push_back(make_unary_imm(SRLI, result, result, 64 - shift));
+      }
+      replacement.push_back(make_binary(SUBW, result, result, scratch));
+      finish_result();
+      break;
+    }
+
+    if (!in_loop)
+      break;
+    auto magic = signed_division_magic(*value);
+    if (!magic)
+      break;
+
+    // First compute q = trunc(x / d) using the same full-domain magic-number
+    // proof as DIVW, then form x - q*d.  The old constant register is safe to
+    // reuse after each use; only a non-sign-extended dividend needs one new
+    // register so its normalized i32 value remains available for the final
+    // subtraction.
+    auto normalized = *source;
+    if (sign_extended_i32_regs.count(*source) == 0) {
+      normalized = function.new_vreg();
+      replacement.push_back(make_unary_imm(ADDIW, normalized, *source, 0));
+    }
+    replacement.push_back(make_li(scratch, magic->multiplier));
+    replacement.push_back(make_binary(MUL, result, normalized, scratch));
+    replacement.push_back(make_unary_imm(SRAI, result, result, 32));
+    if (*value > 0 && magic->multiplier < 0) {
+      replacement.push_back(make_binary(ADDW, result, result, normalized));
+    } else if (*value < 0 && magic->multiplier > 0) {
+      replacement.push_back(make_binary(SUBW, result, result, normalized));
+    }
+    if (magic->shift > 0)
+      replacement.push_back(make_unary_imm(SRAI, result, result, magic->shift));
+    replacement.push_back(make_unary_imm(SRLI, scratch, result, 63));
+    replacement.push_back(make_binary(ADDW, result, result, scratch));
+    replacement.push_back(make_li(scratch, *value));
+    replacement.push_back(make_binary(MULW, result, result, scratch));
+    replacement.push_back(make_binary(SUBW, result, normalized, result));
+    finish_result();
     break;
+  }
   default:
     break;
   }
@@ -531,8 +617,10 @@ auto run_peephole(MachineFunction &function) -> void {
   low_ir::LoopInfo loop_info;
   loop_info.compute(function, dom);
   std::unordered_set<MachineBasicBlock *> hot_loop_blocks;
+  std::unordered_set<MachineBasicBlock *> loop_blocks;
   const auto &loops = loop_info.get_loops();
   for (const auto &loop : loops) {
+    loop_blocks.insert(loop.blocks.begin(), loop.blocks.end());
     auto has_subloop =
       std::any_of(loops.begin(), loops.end(), [&](const auto &other) {
         return &other != &loop && loop.blocks.count(other.header) != 0 &&
@@ -559,7 +647,8 @@ auto run_peephole(MachineFunction &function) -> void {
                                          next,
                                          uses,
                                          sign_extended_i32_regs,
-                                         hot_loop_blocks.count(&block) != 0
+                                         hot_loop_blocks.count(&block) != 0,
+                                         loop_blocks.count(&block) != 0
                                        )
         ) {
           changed = true;
