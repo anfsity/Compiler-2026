@@ -28,6 +28,7 @@ private:
   };
 
   MidModule *module;
+  DomTree *dom = nullptr;
   std::unordered_map<Op *, Block *> op_blocks;
 
   auto build_op_block_map(LinearFunction &func) -> void;
@@ -45,6 +46,15 @@ private:
     Block *preheader,
     std::unordered_map<Value *, Value *> &cache
   ) -> Value *;
+  auto can_clone_initial_expression(
+    Value *value,
+    Value *induction,
+    Value *initial,
+    const Loop &loop,
+    Block *preheader
+  ) const -> bool;
+  auto value_available_in_preheader(Value *value, Block *preheader) const
+    -> bool;
   auto reduce_getptrs(LinearFunction &func, const Loop &loop) -> bool;
   auto reduce_getptr(
     Op *getptr,

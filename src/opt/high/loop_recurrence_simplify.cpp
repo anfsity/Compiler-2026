@@ -1,6 +1,7 @@
 #include "loop_recurrence_simplify.hpp"
 
 #include "../../base/integer_range.hpp"
+#include "../../high/effects.hpp"
 #include <algorithm>
 #include <unordered_set>
 #include <vector>
@@ -50,6 +51,21 @@ auto make_store(Module *module, Value *value, Value *address) -> Op * {
   value->addUse(store);
   address->addUse(store);
   return store;
+}
+
+auto may_write_memory(const Op &op) -> bool {
+  auto effects = get_op_effects(op);
+  if (op.code == OpCode::If) {
+    const auto &payload = std::get<IfPayload>(op.payload);
+    effects.merge(get_region_effects(*payload.then_region));
+    if (payload.else_region)
+      effects.merge(get_region_effects(*payload.else_region));
+  } else if (op.code == OpCode::While) {
+    const auto &payload = std::get<WhilePayload>(op.payload);
+    effects.merge(get_region_effects(*payload.cond_region));
+    effects.merge(get_region_effects(*payload.loop_region));
+  }
+  return effects.writes_memory();
 }
 
 } // namespace
@@ -149,12 +165,7 @@ auto LoopRecurrenceSimplify::match_modular_recurrence(
       counter_initializers.insert(op);
     }
     if (saw_initial_state) {
-      if (op->code == OpCode::Call || op->code == OpCode::Memset)
-        return std::nullopt;
-      if (
-        op->code == OpCode::Store &&
-        (!counter_initializers.count(op) || op->operands.size() != 2)
-      )
+      if (!counter_initializers.count(op) && may_write_memory(*op))
         return std::nullopt;
     }
   }
