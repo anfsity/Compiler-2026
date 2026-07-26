@@ -1,10 +1,15 @@
 #include "peephole.hpp"
 
+#include "../cfg_analysis.hpp"
 #include "instr.hpp"
+#include <algorithm>
+#include <cstdint>
 #include <iterator>
+#include <limits>
 #include <list>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -46,6 +51,63 @@ auto log2_power_of_two(int value) -> int {
   return shift;
 }
 
+struct SignedDivisionMagic {
+  int multiplier = 0;
+  int shift = 0;
+};
+
+// Hacker's Delight, signed 32-bit invariant division.  The returned
+// multiplier/shift pair is valid over the complete i32 domain; callers still
+// handle 0, +/-1, powers of two, and INT_MIN separately.
+auto signed_division_magic(int divisor) -> std::optional<SignedDivisionMagic> {
+  if (
+    divisor == 0 || divisor == 1 || divisor == -1 ||
+    divisor == std::numeric_limits<int32_t>::min()
+  ) {
+    return std::nullopt;
+  }
+
+  auto absolute_divisor = divisor < 0 ? -static_cast<int64_t>(divisor)
+                                      : static_cast<int64_t>(divisor);
+  auto ad = static_cast<uint64_t>(absolute_divisor);
+  constexpr uint64_t two31 = uint64_t{1} << 31;
+  auto unsigned_divisor = static_cast<uint32_t>(divisor);
+  auto t = two31 + (static_cast<uint64_t>(unsigned_divisor) >> 31);
+  auto anc = t - 1 - t % ad;
+  int p = 31;
+  auto q1 = two31 / anc;
+  auto r1 = two31 - q1 * anc;
+  auto q2 = two31 / ad;
+  auto r2 = two31 - q2 * ad;
+  uint64_t delta = 0;
+  do {
+    ++p;
+    q1 *= 2;
+    r1 *= 2;
+    if (r1 >= anc) {
+      ++q1;
+      r1 -= anc;
+    }
+    q2 *= 2;
+    r2 *= 2;
+    if (r2 >= ad) {
+      ++q2;
+      r2 -= ad;
+    }
+    delta = ad - r2;
+  } while (q1 < delta || (q1 == delta && r1 == 0));
+
+  auto multiplier = static_cast<int64_t>(q2 + 1);
+  if (divisor < 0)
+    multiplier = -multiplier;
+  constexpr int64_t two32 = int64_t{1} << 32;
+  if (multiplier > std::numeric_limits<int32_t>::max())
+    multiplier -= two32;
+  if (multiplier < std::numeric_limits<int32_t>::min())
+    multiplier += two32;
+  return SignedDivisionMagic{static_cast<int>(multiplier), p - 32};
+}
+
 auto count_uses(const MachineFunction &function)
   -> std::unordered_map<int, int> {
   std::unordered_map<int, int> uses;
@@ -61,6 +123,93 @@ auto count_uses(const MachineFunction &function)
     }
   }
   return uses;
+}
+
+auto compute_sign_extended_i32_regs(const MachineFunction &function)
+  -> std::unordered_set<int> {
+  std::unordered_set<int> proven;
+  auto is_proven = [&](int reg) {
+    return reg == ZERO || proven.count(reg) != 0;
+  };
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (const auto &block : function.blocks) {
+      for (const auto &inst : block->insts) {
+        auto dst = reg_at(inst, 0);
+        if (!dst || !is_virtual(*dst) || proven.count(*dst) != 0)
+          continue;
+
+        bool result_is_sign_extended = false;
+        switch (inst.opcode) {
+        case LI:
+        case LW:
+        case LH:
+        case LB:
+        case LHU:
+        case LBU:
+        case ADDW:
+        case ADDIW:
+        case SUBW:
+        case MULW:
+        case DIVW:
+        case REMW:
+        case SLT:
+        case SLTI:
+        case SLTU:
+        case SLTIU:
+        case FCVT_W_S:
+        case FCVT_WU_S:
+        case FMV_X_W:
+          result_is_sign_extended = true;
+          break;
+        case COPY:
+          if (auto source = reg_at(inst, 1))
+            result_is_sign_extended = is_proven(*source);
+          break;
+        case PHI: {
+          result_is_sign_extended = inst.operands.size() >= 3;
+          for (size_t i = 1; i + 1 < inst.operands.size(); i += 2) {
+            if (
+              !inst.operands[i].is_reg() ||
+              !is_proven(inst.operands[i].get_reg())
+            ) {
+              result_is_sign_extended = false;
+              break;
+            }
+          }
+          break;
+        }
+        case AND:
+        case OR:
+        case XOR:
+          if (auto lhs = reg_at(inst, 1); lhs && is_proven(*lhs)) {
+            if (auto rhs = reg_at(inst, 2))
+              result_is_sign_extended = is_proven(*rhs);
+          }
+          break;
+        case ANDI:
+        case ORI:
+        case XORI:
+        case SRAI:
+          if (auto source = reg_at(inst, 1))
+            result_is_sign_extended = is_proven(*source);
+          break;
+        case SRA:
+          if (auto source = reg_at(inst, 1))
+            result_is_sign_extended = is_proven(*source);
+          break;
+        default:
+          break;
+        }
+
+        if (result_is_sign_extended)
+          changed |= proven.insert(*dst).second;
+      }
+    }
+  }
+  return proven;
 }
 
 auto make_copy(int dst, int src) -> MachineInst {
@@ -117,7 +266,9 @@ auto simplify_constant_operation(
   MachineBasicBlock &block,
   std::list<MachineInst>::iterator li,
   std::list<MachineInst>::iterator op,
-  const std::unordered_map<int, int> &uses
+  const std::unordered_map<int, int> &uses,
+  const std::unordered_set<int> &sign_extended_i32_regs,
+  bool in_hot_loop
 ) -> bool {
   if (li->opcode != LI || li->operands.size() != 2)
     return false;
@@ -211,6 +362,35 @@ auto simplify_constant_operation(
       replacement.push_back(
         make_unary_imm(SLLI, *dst, *source, log2_power_of_two(*value))
       );
+    } else if (*dst != *source && *value > 2) {
+      auto lower = static_cast<int64_t>(*value) - 1;
+      auto upper = static_cast<int64_t>(*value) + 1;
+      auto is_power_of_two_i64 = [](int64_t candidate) {
+        return candidate > 0 && (candidate & (candidate - 1)) == 0;
+      };
+      auto log2_i64 = [](int64_t candidate) {
+        int shift = 0;
+        while (candidate > 1) {
+          candidate >>= 1;
+          ++shift;
+        }
+        return shift;
+      };
+      if (is_power_of_two_i64(lower)) {
+        replacement.push_back(
+          make_unary_imm(SLLI, *dst, *source, log2_i64(lower))
+        );
+        replacement.push_back(
+          make_binary(op->opcode == MULW ? ADDW : ADD, *dst, *dst, *source)
+        );
+      } else if (is_power_of_two_i64(upper)) {
+        replacement.push_back(
+          make_unary_imm(SLLI, *dst, *source, log2_i64(upper))
+        );
+        replacement.push_back(
+          make_binary(op->opcode == MULW ? SUBW : SUB, *dst, *dst, *source)
+        );
+      }
     }
     break;
   case DIVW:
@@ -221,12 +401,20 @@ auto simplify_constant_operation(
     } else if (is_power_of_two(*value) && *value <= (1 << 30)) {
       // Signed division truncates toward zero.  Add the sign-dependent bias
       // before the arithmetic shift to avoid rounding negative values down.
-      // Reuse the result register for the short-lived sign, bias, and
-      // adjusted values; this keeps the expansion from raising spill pressure.
+      // ADDIW first establishes the sign-extension that DIVW would apply to
+      // an arbitrary i32 producer.  Plain RV64 bitwise operations do not
+      // preserve that property, so using SRAI directly on source is unsound.
+      // Reuse the result register for the normalized value, sign, bias, and
+      // adjusted values to avoid raising spill pressure.
       if (*dst == *source)
         break;
       auto shift = log2_power_of_two(*value);
-      replacement.push_back(make_unary_imm(SRAI, *dst, *source, 31));
+      if (sign_extended_i32_regs.count(*source) == 0) {
+        replacement.push_back(make_unary_imm(ADDIW, *dst, *source, 0));
+        replacement.push_back(make_unary_imm(SRAI, *dst, *dst, 31));
+      } else {
+        replacement.push_back(make_unary_imm(SRAI, *dst, *source, 31));
+      }
       if (*value - 1 <= 2047) {
         replacement.push_back(make_unary_imm(ANDI, *dst, *dst, *value - 1));
       } else {
@@ -236,6 +424,32 @@ auto simplify_constant_operation(
       }
       replacement.push_back(make_binary(ADDW, *dst, *source, *dst));
       replacement.push_back(make_unary_imm(SRAI, *dst, *dst, shift));
+    } else if (in_hot_loop && *dst != *source) {
+      auto magic = signed_division_magic(*value);
+      if (!magic)
+        break;
+      auto multiplier = function.new_vreg();
+      auto correction = function.new_vreg();
+      auto normalized = *source;
+      replacement.push_back(make_li(multiplier, magic->multiplier));
+      // DIVW interprets only the low i32 and sign-extends it.  Normalize the
+      // dividend explicitly before the 64-bit multiply so this expansion is
+      // valid for every machine producer, including AND/OR/XOR/SLL.
+      if (sign_extended_i32_regs.count(*source) == 0) {
+        replacement.push_back(make_unary_imm(ADDIW, correction, *source, 0));
+        normalized = correction;
+      }
+      replacement.push_back(make_binary(MUL, *dst, normalized, multiplier));
+      replacement.push_back(make_unary_imm(SRAI, *dst, *dst, 32));
+      if (*value > 0 && magic->multiplier < 0) {
+        replacement.push_back(make_binary(ADDW, *dst, *dst, normalized));
+      } else if (*value < 0 && magic->multiplier > 0) {
+        replacement.push_back(make_binary(SUBW, *dst, *dst, normalized));
+      }
+      if (magic->shift > 0)
+        replacement.push_back(make_unary_imm(SRAI, *dst, *dst, magic->shift));
+      replacement.push_back(make_unary_imm(SRLI, correction, *dst, 63));
+      replacement.push_back(make_binary(ADDW, *dst, *dst, correction));
     }
     break;
   case REMW:
@@ -312,17 +526,41 @@ auto simplify_local_operation(
 } // namespace
 
 auto run_peephole(MachineFunction &function) -> void {
+  low_ir::DominatorTree dom;
+  dom.compute(function);
+  low_ir::LoopInfo loop_info;
+  loop_info.compute(function, dom);
+  std::unordered_set<MachineBasicBlock *> hot_loop_blocks;
+  const auto &loops = loop_info.get_loops();
+  for (const auto &loop : loops) {
+    auto has_subloop =
+      std::any_of(loops.begin(), loops.end(), [&](const auto &other) {
+        return &other != &loop && loop.blocks.count(other.header) != 0 &&
+               other.blocks.size() < loop.blocks.size();
+      });
+    if (!has_subloop)
+      hot_loop_blocks.insert(loop.blocks.begin(), loop.blocks.end());
+  }
+
   bool changed = true;
   while (changed) {
     changed = false;
     auto uses = count_uses(function);
+    auto sign_extended_i32_regs = compute_sign_extended_i32_regs(function);
     for (auto &block_ptr : function.blocks) {
       auto &block = *block_ptr;
       for (auto it = block.insts.begin(); it != block.insts.end();) {
         auto next = std::next(it);
         if (
-          next != block.insts.end() &&
-          simplify_constant_operation(function, block, it, next, uses)
+          next != block.insts.end() && simplify_constant_operation(
+                                         function,
+                                         block,
+                                         it,
+                                         next,
+                                         uses,
+                                         sign_extended_i32_regs,
+                                         hot_loop_blocks.count(&block) != 0
+                                       )
         ) {
           changed = true;
           it = block.insts.begin();

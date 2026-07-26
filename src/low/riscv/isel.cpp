@@ -6,6 +6,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <unordered_set>
@@ -351,6 +352,7 @@ auto arg_reg_for_type(const std::shared_ptr<Type> &type, int index) -> int {
 
 auto select_getptr(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   Seq seq;
+  auto result_was_preallocated = ctx.value_regs.count(op.result) != 0;
   auto dst = def_reg(ctx, op.result);
   auto base = use_reg(ctx, op.operands[0], seq);
   auto cur = base;
@@ -379,6 +381,18 @@ auto select_getptr(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
             .add_imm(static_cast<int>(offset));
           return seq.take();
         }
+        if (
+          offset >= std::numeric_limits<int>::min() &&
+          offset <= std::numeric_limits<int>::max()
+        ) {
+          auto offset_reg =
+            materialize_int_constant(ctx, static_cast<int>(offset), seq);
+          seq.emit(ADD)
+            .add_reg(dst, true, false)
+            .add_reg(base)
+            .add_reg(offset_reg);
+          return seq.take();
+        }
       }
     }
   }
@@ -390,6 +404,41 @@ auto select_getptr(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
       seq.emit(LD).add_reg(loaded, true, false).add_reg(cur).add_imm(0);
       cur = loaded;
       continue;
+    }
+
+    auto next = (&step == &plan.steps.back()) ? dst : ctx.function->new_vreg(8);
+    auto *index_value = op.operands[step.index_pos + 1];
+    if (index_value->kind == ValueKind::Constant) {
+      auto *constant = static_cast<Constant *>(index_value);
+      if (std::holds_alternative<int>(constant->val)) {
+        auto offset =
+          static_cast<int64_t>(std::get<int>(constant->val)) * step.scale;
+        if (offset == 0)
+          continue;
+        if (offset >= -2048 && offset <= 2047) {
+          seq.emit(ADDI)
+            .add_reg(next, true, false)
+            .add_reg(cur)
+            .add_imm(static_cast<int>(offset));
+          cur = next;
+          defined_dst = next == dst;
+          continue;
+        }
+        if (
+          offset >= std::numeric_limits<int>::min() &&
+          offset <= std::numeric_limits<int>::max()
+        ) {
+          auto offset_reg =
+            materialize_int_constant(ctx, static_cast<int>(offset), seq);
+          seq.emit(ADD)
+            .add_reg(next, true, false)
+            .add_reg(cur)
+            .add_reg(offset_reg);
+          cur = next;
+          defined_dst = next == dst;
+          continue;
+        }
+      }
     }
 
     auto idx = use_reg(ctx, op.operands[step.index_pos + 1], seq);
@@ -409,13 +458,16 @@ auto select_getptr(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
       auto size_reg = materialize_int_constant(ctx, step.scale, seq);
       seq.emit(MUL).add_reg(scaled, true, false).add_reg(idx).add_reg(size_reg);
     }
-    auto next = (&step == &plan.steps.back()) ? dst : ctx.function->new_vreg(8);
     seq.emit(ADD).add_reg(next, true, false).add_reg(cur).add_reg(scaled);
     cur = next;
     defined_dst = next == dst;
   }
 
   if (!defined_dst) {
+    if (!result_was_preallocated) {
+      ctx.value_regs[op.result] = cur;
+      return seq.take();
+    }
     seq.emit(COPY).add_reg(dst, true, false).add_reg(cur);
   }
 
@@ -597,10 +649,27 @@ auto select_phi(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
 
 auto select_memset(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   Seq seq;
+  if (op.operands.size() != 3 || op.operands[2]->kind != ValueKind::Constant) {
+    throw std::logic_error("memset requires a constant byte-splat value");
+  }
   auto ptr = use_reg(ctx, op.operands[0], seq);
   auto elem_count = use_reg(ctx, op.operands[1], seq);
   auto elem_size = pointee_size(op.operands[0]->type);
   auto byte_count = elem_count;
+
+  uint32_t fill_bits = 0;
+  auto *fill_constant = static_cast<Constant *>(op.operands[2]);
+  if (std::holds_alternative<int>(fill_constant->val)) {
+    fill_bits = static_cast<uint32_t>(std::get<int>(fill_constant->val));
+  } else {
+    auto fill_float = std::get<float>(fill_constant->val);
+    static_assert(sizeof(fill_bits) == sizeof(fill_float));
+    std::memcpy(&fill_bits, &fill_float, sizeof(fill_bits));
+  }
+  auto fill_byte = fill_bits & 0xffu;
+  if (fill_bits != fill_byte * 0x01010101u) {
+    throw std::logic_error("memset value is not a byte splat");
+  }
 
   if (elem_size > 1) {
     byte_count = ctx.function->new_vreg();
@@ -623,7 +692,13 @@ auto select_memset(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   }
 
   seq.emit(COPY).add_reg(A0, true, false).add_reg(ptr);
-  seq.emit(COPY).add_reg(A1, true, false).add_reg(ZERO);
+  if (fill_byte == 0) {
+    seq.emit(COPY).add_reg(A1, true, false).add_reg(ZERO);
+  } else {
+    auto fill_reg =
+      materialize_int_constant(ctx, static_cast<int>(fill_byte), seq);
+    seq.emit(COPY).add_reg(A1, true, false).add_reg(fill_reg);
+  }
   seq.emit(COPY).add_reg(A2, true, false).add_reg(byte_count);
   seq.emit(CALL).add_operand(low_ir::MachineOperand::symbol("memset"));
   return seq.take();

@@ -349,6 +349,9 @@ auto compute_liveness(low_ir::MachineFunction &function) -> LivenessInfo {
         continue;
       }
 
+      // Uses conceptually observe the value before any definition made by the
+      // same instruction.  This ordering matters for tied read-modify-write
+      // forms such as `addiw v, v, 1` created by proven Phi coalescing.
       for (const auto &operand : inst.operands) {
         if (!operand.is_reg())
           continue;
@@ -357,12 +360,15 @@ auto compute_liveness(low_ir::MachineFunction &function) -> LivenessInfo {
         if (!is_virtual_reg(reg))
           continue;
 
-        if (is_use_operand(operand) && !def.count(reg)) {
+        if (is_use_operand(operand) && !def.count(reg))
           use.insert(reg);
-        }
-        if (operand.is_def()) {
+      }
+      for (const auto &operand : inst.operands) {
+        if (!operand.is_reg())
+          continue;
+        auto reg = operand.get_reg();
+        if (is_virtual_reg(reg) && operand.is_def())
           def.insert(reg);
-        }
       }
     }
 
@@ -1566,6 +1572,600 @@ auto prepare_phi_operands(low_ir::MachineFunction &function) -> void {
   }
 }
 
+auto coalesce_backedge_phi_defs(low_ir::MachineFunction &function) -> void {
+  struct RegFacts {
+    size_t defs = 0;
+    size_t uses = 0;
+    low_ir::MachineInst *def_inst = nullptr;
+    low_ir::MachineBasicBlock *def_block = nullptr;
+    low_ir::MachineOperand *def_operand = nullptr;
+  };
+  std::unordered_map<int, RegFacts> facts;
+  for (auto &block : function.blocks) {
+    for (auto &inst : block->insts) {
+      for (auto &operand : inst.operands) {
+        if (!operand.is_reg() || !is_virtual_reg(operand.get_reg()))
+          continue;
+        auto &reg_facts = facts[operand.get_reg()];
+        if (operand.is_def()) {
+          ++reg_facts.defs;
+          reg_facts.def_inst = &inst;
+          reg_facts.def_block = block.get();
+          reg_facts.def_operand = &operand;
+        }
+        if (is_use_operand(operand))
+          ++reg_facts.uses;
+      }
+    }
+  }
+
+  low_ir::DominatorTree dom;
+  dom.compute(function);
+
+  struct Candidate {
+    int source = -1;
+    int destination = -1;
+    low_ir::MachineOperand *source_def = nullptr;
+    low_ir::MachineOperand *phi_incoming = nullptr;
+  };
+  std::vector<Candidate> candidates;
+
+  auto storage_size = [&](int reg) {
+    auto it = function.vreg_storage_sizes.find(reg);
+    return it == function.vreg_storage_sizes.end() ? 4 : it->second;
+  };
+
+  for (auto &block : function.blocks) {
+    auto *header = block.get();
+    if (!dom.is_reachable(header))
+      continue;
+    for (auto &phi : header->insts) {
+      if (phi.opcode != PHI)
+        break;
+      if (
+        phi.operands.empty() || !phi.operands[0].is_reg() ||
+        !phi.operands[0].is_def()
+      ) {
+        continue;
+      }
+      auto destination = phi.operands[0].get_reg();
+      if (!is_virtual_reg(destination))
+        continue;
+      auto destination_facts = facts.find(destination);
+      if (
+        destination_facts == facts.end() ||
+        destination_facts->second.defs != 1 ||
+        destination_facts->second.def_inst != &phi
+      ) {
+        continue;
+      }
+
+      std::vector<size_t> backedge_operands;
+      for (size_t i = 1; i + 1 < phi.operands.size(); i += 2) {
+        if (
+          !phi.operands[i].is_reg() ||
+          phi.operands[i + 1].kind != low_ir::MachineOperand::MBB
+        ) {
+          continue;
+        }
+        auto *pred =
+          std::get<low_ir::MachineBasicBlock *>(phi.operands[i + 1].data);
+        if (
+          dom.is_reachable(pred) && dom.dominates(header, pred) &&
+          pred->succs.size() == 1 && pred->succs.front() == header
+        ) {
+          backedge_operands.push_back(i);
+        }
+      }
+      if (backedge_operands.size() != 1)
+        continue;
+
+      auto incoming_index = backedge_operands.front();
+      auto source = phi.operands[incoming_index].get_reg();
+      auto *pred = std::get<low_ir::MachineBasicBlock *>(
+        phi.operands[incoming_index + 1].data
+      );
+      auto source_facts = facts.find(source);
+      if (
+        source == destination || !is_virtual_reg(source) ||
+        source_facts == facts.end() || source_facts->second.defs != 1 ||
+        source_facts->second.uses != 1 ||
+        source_facts->second.def_block != pred ||
+        !source_facts->second.def_inst ||
+        source_facts->second.def_inst->opcode == PHI ||
+        !source_facts->second.def_operand ||
+        storage_size(source) != storage_size(destination)
+      ) {
+        continue;
+      }
+
+      // Renaming the update definition clobbers the current Phi value at that
+      // point.  It is valid only when the old value is dead for the remainder
+      // of the latch.  Uses in the defining instruction itself are intentional
+      // read-modify-write operations and remain safe.
+      bool after_definition = false;
+      bool old_destination_needed = false;
+      for (auto &inst : pred->insts) {
+        if (&inst == source_facts->second.def_inst) {
+          after_definition = true;
+          continue;
+        }
+        if (!after_definition)
+          continue;
+        old_destination_needed |= std::any_of(
+          inst.operands.begin(), inst.operands.end(), [&](auto &op) {
+            return op.is_reg() && op.get_reg() == destination;
+          }
+        );
+      }
+      if (!after_definition || old_destination_needed)
+        continue;
+
+      // Phi operands are parallel edge uses.  If another Phi consumes the old
+      // destination on this backedge, overwriting it in the latch would change
+      // that independent incoming value.
+      for (auto &other_phi : header->insts) {
+        if (other_phi.opcode != PHI)
+          break;
+        for (size_t i = 1; i + 1 < other_phi.operands.size(); i += 2) {
+          if (
+            other_phi.operands[i].is_reg() &&
+            other_phi.operands[i].get_reg() == destination &&
+            other_phi.operands[i + 1].kind == low_ir::MachineOperand::MBB &&
+            std::get<low_ir::MachineBasicBlock *>(
+              other_phi.operands[i + 1].data
+            ) == pred
+          ) {
+            old_destination_needed = true;
+          }
+        }
+      }
+      if (old_destination_needed)
+        continue;
+
+      candidates.push_back(
+        {source,
+         destination,
+         source_facts->second.def_operand,
+         &phi.operands[incoming_index]}
+      );
+    }
+  }
+
+  for (const auto &candidate : candidates) {
+    std::get<low_ir::MachineOperand::RegData>(candidate.source_def->data).id =
+      candidate.destination;
+    std::get<low_ir::MachineOperand::RegData>(candidate.phi_incoming->data).id =
+      candidate.destination;
+    function.vreg_storage_sizes.erase(candidate.source);
+  }
+}
+
+auto is_conditional_branch(int opcode) -> bool {
+  return opcode == BEQ || opcode == BNE || opcode == BLT || opcode == BGE ||
+         opcode == BLTU || opcode == BGEU;
+}
+
+auto branch_target(low_ir::MachineInst &inst) -> low_ir::MachineBasicBlock * {
+  if (
+    inst.operands.empty() ||
+    inst.operands.back().kind != low_ir::MachineOperand::MBB
+  ) {
+    return nullptr;
+  }
+  return std::get<low_ir::MachineBasicBlock *>(inst.operands.back().data);
+}
+
+auto is_unconditional_jump(const low_ir::MachineInst &inst) -> bool {
+  return inst.opcode == JAL && inst.operands.size() == 2 &&
+         inst.operands[0].is_reg() &&
+         inst.operands[0].get_reg() == static_cast<int>(ZERO) &&
+         inst.operands[1].kind == low_ir::MachineOperand::MBB;
+}
+
+auto first_terminator(low_ir::MachineBasicBlock &block)
+  -> std::list<low_ir::MachineInst>::iterator {
+  return std::find_if(
+    block.insts.begin(), block.insts.end(), [](const auto &mi) {
+      return is_conditional_branch(mi.opcode) || mi.opcode == JAL ||
+             mi.opcode == JALR || mi.opcode == RET || mi.opcode == RET_NOFRAME;
+    }
+  );
+}
+
+auto hoist_loop_materializations(low_ir::MachineFunction &function) -> void {
+  low_ir::DominatorTree dom;
+  dom.compute(function);
+  low_ir::LoopInfo loop_info;
+  loop_info.compute(function, dom);
+  const auto &loops = loop_info.get_loops();
+
+  std::unordered_map<int, size_t> def_count;
+  std::unordered_map<int, std::vector<low_ir::MachineBasicBlock *>> use_blocks;
+  std::unordered_map<int, std::vector<low_ir::MachineInst *>> use_insts;
+  for (auto &block : function.blocks) {
+    for (auto &inst : block->insts) {
+      for (const auto &operand : inst.operands) {
+        if (!operand.is_reg() || !is_virtual_reg(operand.get_reg()))
+          continue;
+        if (operand.is_def())
+          ++def_count[operand.get_reg()];
+        if (is_use_operand(operand)) {
+          use_blocks[operand.get_reg()].push_back(block.get());
+          use_insts[operand.get_reg()].push_back(&inst);
+        }
+      }
+    }
+  }
+
+  for (const auto &loop : loops) {
+    auto has_subloop =
+      std::any_of(loops.begin(), loops.end(), [&](const auto &other) {
+        return &other != &loop && loop.blocks.count(other.header) != 0 &&
+               other.blocks.size() < loop.blocks.size();
+      });
+    if (has_subloop)
+      continue;
+    if (std::any_of(loop.blocks.begin(), loop.blocks.end(), [](auto *block) {
+          return std::any_of(
+            block->insts.begin(), block->insts.end(), [](auto &mi) {
+              return mi.opcode == CALL;
+            }
+          );
+        })) {
+      continue;
+    }
+
+    std::vector<low_ir::MachineBasicBlock *> outside_preds;
+    for (auto *pred : loop.header->preds) {
+      if (loop.blocks.count(pred) == 0)
+        outside_preds.push_back(pred);
+    }
+    if (outside_preds.size() != 1)
+      continue;
+    auto *preheader = outside_preds.front();
+    if (preheader->succs.size() != 1 || preheader->succs.front() != loop.header)
+      continue;
+
+    std::vector<low_ir::MachineBasicBlock *> latches;
+    for (auto *block : loop.blocks) {
+      if (
+        std::find(block->succs.begin(), block->succs.end(), loop.header) !=
+        block->succs.end()
+      ) {
+        latches.push_back(block);
+      }
+    }
+    if (latches.empty())
+      continue;
+
+    // LI/LA are pure, but extending one value across a loop can still turn a
+    // dynamic-instruction win into spill traffic.  Model the projected
+    // pre-allocation liveness.  General materializations retain two registers
+    // of headroom.  A proven tied ADD recurrence may consume one additional
+    // register without increasing the loop's pre-existing peak by more than
+    // one; this is the address-step case where removing the repeated LI has a
+    // direct per-iteration payoff.  Other high-pressure loops remain intact.
+    // This is deliberately a proof of available capacity, not a constant- or
+    // benchmark-specific allowlist.
+    auto intervals = build_intervals(function);
+    auto layout = compute_block_layout(function);
+    std::unordered_map<low_ir::MachineBasicBlock *, BlockLayout> block_layout;
+    for (const auto &entry : layout)
+      block_layout.emplace(entry.block, entry);
+    std::unordered_set<int> projected_invariants;
+    int original_peak_pressure = 0;
+    for (auto *block : loop.blocks) {
+      auto found_layout = block_layout.find(block);
+      if (found_layout == block_layout.end())
+        continue;
+      for (int pos = found_layout->second.start; pos < found_layout->second.end;
+           ++pos) {
+        auto pressure = static_cast<int>(std::count_if(
+          intervals.begin(), intervals.end(), [&](const auto &interval) {
+            return interval.reg_class != RegClass::Float &&
+                   contains_pos(interval, pos);
+          }
+        ));
+        original_peak_pressure = std::max(original_peak_pressure, pressure);
+      }
+    }
+    auto fits_pressure_budget = [&](int candidate, bool recurrence_step) {
+      auto integer_pressure_budget =
+        recurrence_step ? std::max(10, original_peak_pressure + 1) : 10;
+      for (auto *block : loop.blocks) {
+        auto found_layout = block_layout.find(block);
+        if (found_layout == block_layout.end())
+          return false;
+        for (int pos = found_layout->second.start;
+             pos < found_layout->second.end;
+             ++pos) {
+          int pressure = 0;
+          for (const auto &interval : intervals) {
+            if (
+              interval.reg_class != RegClass::Float &&
+              contains_pos(interval, pos)
+            ) {
+              ++pressure;
+            }
+          }
+          for (auto invariant : projected_invariants) {
+            auto original = std::find_if(
+              intervals.begin(), intervals.end(), [&](const auto &interval) {
+                return interval.vreg == invariant;
+              }
+            );
+            if (original == intervals.end() || !contains_pos(*original, pos))
+              ++pressure;
+          }
+          auto original = std::find_if(
+            intervals.begin(), intervals.end(), [&](const auto &interval) {
+              return interval.vreg == candidate;
+            }
+          );
+          if (original == intervals.end() || !contains_pos(*original, pos))
+            ++pressure;
+          if (pressure > integer_pressure_budget)
+            return false;
+        }
+      }
+      return true;
+    };
+
+    struct Candidate {
+      low_ir::MachineBasicBlock *block = nullptr;
+      std::list<low_ir::MachineInst>::iterator inst;
+    };
+    std::vector<Candidate> candidates;
+    for (auto *block : loop.blocks) {
+      if (!std::all_of(latches.begin(), latches.end(), [&](auto *latch) {
+            return dom.dominates(block, latch);
+          })) {
+        continue;
+      }
+      for (auto it = block->insts.begin(); it != block->insts.end(); ++it) {
+        if (
+          (it->opcode != LI && it->opcode != LA) || it->operands.empty() ||
+          !it->operands[0].is_reg() || !it->operands[0].is_def()
+        ) {
+          continue;
+        }
+        auto destination = it->operands[0].get_reg();
+        if (!is_virtual_reg(destination) || def_count[destination] != 1)
+          continue;
+        auto uses = use_blocks.find(destination);
+        if (
+          uses == use_blocks.end() || uses->second.empty() ||
+          !std::all_of(
+            uses->second.begin(), uses->second.end(), [&](auto *use) {
+              return loop.blocks.count(use) != 0;
+            }
+          )
+        ) {
+          continue;
+        }
+        auto recurrence_step = false;
+        if (it->opcode == LI) {
+          auto use_it = use_insts.find(destination);
+          if (use_it != use_insts.end() && use_it->second.size() == 1) {
+            auto *use = use_it->second.front();
+            if (
+              use->opcode == ADD && use->operands.size() == 3 &&
+              use->operands[0].is_reg() && use->operands[1].is_reg() &&
+              use->operands[2].is_reg()
+            ) {
+              auto result = use->operands[0].get_reg();
+              auto lhs = use->operands[1].get_reg();
+              auto rhs = use->operands[2].get_reg();
+              recurrence_step = (lhs == destination && rhs == result) ||
+                                (rhs == destination && lhs == result);
+            }
+          }
+        }
+        if (!fits_pressure_budget(destination, recurrence_step))
+          continue;
+        projected_invariants.insert(destination);
+        candidates.push_back({block, it});
+      }
+    }
+
+    auto insert_pos = first_terminator(*preheader);
+    for (auto &candidate : candidates) {
+      preheader->insts.splice(
+        insert_pos, candidate.block->insts, candidate.inst
+      );
+    }
+  }
+}
+
+auto rotate_one_canonical_loop(low_ir::MachineFunction &function) -> bool {
+  low_ir::DominatorTree dom;
+  dom.compute(function);
+  low_ir::LoopInfo loop_info;
+  loop_info.compute(function, dom);
+
+  for (const auto &loop : loop_info.get_loops()) {
+    auto *header = loop.header;
+    std::vector<low_ir::MachineBasicBlock *> latches;
+    std::vector<low_ir::MachineBasicBlock *> outside_preds;
+    for (auto *pred : header->preds) {
+      if (loop.blocks.count(pred) != 0)
+        latches.push_back(pred);
+      else
+        outside_preds.push_back(pred);
+    }
+    if (
+      latches.size() != 1 || outside_preds.size() != 1 ||
+      header->preds.size() != 2 || header->succs.size() != 2
+    ) {
+      continue;
+    }
+    auto *latch = latches.front();
+    if (
+      latch->succs.size() != 1 || latch->succs.front() != header ||
+      latch->insts.empty() || !is_unconditional_jump(latch->insts.back()) ||
+      branch_target(latch->insts.back()) != header
+    ) {
+      continue;
+    }
+
+    auto first_non_phi = std::find_if(
+      header->insts.begin(), header->insts.end(), [](const auto &mi) {
+        return mi.opcode != PHI;
+      }
+    );
+    if (
+      first_non_phi == header->insts.begin() ||
+      first_non_phi == header->insts.end()
+    )
+      continue;
+    auto jump = std::next(first_non_phi);
+    if (
+      !is_conditional_branch(first_non_phi->opcode) ||
+      jump == header->insts.end() || std::next(jump) != header->insts.end() ||
+      !is_unconditional_jump(*jump)
+    ) {
+      continue;
+    }
+    auto *continue_block = branch_target(*first_non_phi);
+    auto *exit_block = branch_target(*jump);
+    if (
+      !continue_block || !exit_block || continue_block == header ||
+      loop.blocks.count(continue_block) == 0 ||
+      loop.blocks.count(exit_block) != 0 ||
+      (!continue_block->insts.empty() &&
+       continue_block->insts.front().opcode == PHI) ||
+      (!exit_block->insts.empty() && exit_block->insts.front().opcode == PHI)
+    ) {
+      continue;
+    }
+
+    bool phis_are_self_carried = true;
+    for (auto it = header->insts.begin(); it != first_non_phi; ++it) {
+      if (it->operands.empty() || !it->operands[0].is_reg()) {
+        phis_are_self_carried = false;
+        break;
+      }
+      auto destination = it->operands[0].get_reg();
+      size_t latch_incoming = 0;
+      for (size_t i = 1; i + 1 < it->operands.size(); i += 2) {
+        if (
+          it->operands[i + 1].kind == low_ir::MachineOperand::MBB &&
+          std::get<low_ir::MachineBasicBlock *>(it->operands[i + 1].data) ==
+            latch
+        ) {
+          ++latch_incoming;
+          phis_are_self_carried &= it->operands[i].is_reg() &&
+                                   it->operands[i].get_reg() == destination;
+        }
+      }
+      phis_are_self_carried &= latch_incoming == 1;
+    }
+    if (!phis_are_self_carried)
+      continue;
+
+    for (auto it = header->insts.begin(); it != first_non_phi; ++it) {
+      for (size_t i = 1; i + 1 < it->operands.size();) {
+        if (
+          it->operands[i + 1].kind == low_ir::MachineOperand::MBB &&
+          std::get<low_ir::MachineBasicBlock *>(it->operands[i + 1].data) ==
+            latch
+        ) {
+          it->operands.erase(
+            it->operands.begin() + static_cast<long>(i),
+            it->operands.begin() + static_cast<long>(i + 2)
+          );
+          break;
+        }
+        i += 2;
+      }
+    }
+
+    auto rotated_branch = *first_non_phi;
+    rotated_branch.operands.back().data = continue_block;
+    latch->insts.pop_back();
+    latch->insts.push_back(std::move(rotated_branch));
+    latch->insts.emplace_back(JAL)
+      .add_reg(ZERO, true, false)
+      .add_mbb(exit_block);
+
+    header->preds.erase(
+      std::remove(header->preds.begin(), header->preds.end(), latch),
+      header->preds.end()
+    );
+    latch->succs = {continue_block, exit_block};
+    if (
+      std::find(
+        continue_block->preds.begin(), continue_block->preds.end(), latch
+      ) == continue_block->preds.end()
+    ) {
+      continue_block->preds.push_back(latch);
+    }
+    if (
+      std::find(exit_block->preds.begin(), exit_block->preds.end(), latch) ==
+      exit_block->preds.end()
+    ) {
+      exit_block->preds.push_back(latch);
+    }
+    return true;
+  }
+  return false;
+}
+
+auto rotate_canonical_loops(low_ir::MachineFunction &function) -> void {
+  while (rotate_one_canonical_loop(function)) {
+  }
+}
+
+auto invert_branch(int opcode) -> int {
+  switch (opcode) {
+  case BEQ:
+    return BNE;
+  case BNE:
+    return BEQ;
+  case BLT:
+    return BGE;
+  case BGE:
+    return BLT;
+  case BLTU:
+    return BGEU;
+  case BGEU:
+    return BLTU;
+  default:
+    return opcode;
+  }
+}
+
+auto eliminate_fallthrough_jumps(low_ir::MachineFunction &function) -> void {
+  for (auto block_it = function.blocks.begin();
+       block_it != function.blocks.end();
+       ++block_it) {
+    auto next_block = std::next(block_it);
+    if (next_block == function.blocks.end() || (*block_it)->insts.empty())
+      continue;
+    auto &insts = (*block_it)->insts;
+    auto jump = std::prev(insts.end());
+    if (!is_unconditional_jump(*jump))
+      continue;
+    auto *jump_target = branch_target(*jump);
+    if (jump_target == next_block->get()) {
+      insts.erase(jump);
+      continue;
+    }
+    if (jump == insts.begin())
+      continue;
+    auto branch = std::prev(jump);
+    if (
+      is_conditional_branch(branch->opcode) &&
+      branch_target(*branch) == next_block->get()
+    ) {
+      branch->opcode = invert_branch(branch->opcode);
+      branch->operands.back().data = jump_target;
+      insts.erase(jump);
+    }
+  }
+}
+
 struct Location {
   enum class Kind : uint8_t {
     Invalid,
@@ -2149,6 +2749,9 @@ auto run_ra(low_ir::MachineFunction &function, bool dump_ra, bool emit_ra)
   -> void {
   RegAllocPrinter printer{dump_ra};
   detail::prepare_phi_operands(function);
+  detail::coalesce_backedge_phi_defs(function);
+  detail::hoist_loop_materializations(function);
+  detail::rotate_canonical_loops(function);
   detail::plan_frame_region(function);
   auto split_context = detail::build_split_context(function);
 
@@ -2232,6 +2835,7 @@ auto run_ra(low_ir::MachineFunction &function, bool dump_ra, bool emit_ra)
   detail::eliminate_spill_stores(function);
   detail::resolve_parallel_copies(function);
   detail::finalize_frame_region(function);
+  detail::eliminate_fallthrough_jumps(function);
 
   printer.dump_function(function);
 }
