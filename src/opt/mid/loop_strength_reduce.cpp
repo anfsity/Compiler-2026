@@ -14,13 +14,23 @@ auto LoopStrengthReduce::run(
     return exodus::opt::PreservedAnalysis::all();
 
   auto &loop_info = am.get_result<LoopAnalysis>(func);
+  auto &dom_result = am.get_result<DominanceAnalysis>(func);
+  dom = &dom_result;
   build_op_block_map(func);
 
   bool changed = false;
-  for (auto *loop : loop_info.get_loops_innermost_first())
+  for (auto *loop : loop_info.get_loops_innermost_first()) {
+    // A recurrence in a non-innermost loop stays live across its complete
+    // subloops.  That long live range can cost more spills than the occasional
+    // outer-loop address calculation saves, so only form short-lived pointer
+    // recurrences here.
+    if (!loop->get_subloops().empty())
+      continue;
     changed |= reduce_getptrs(func, *loop);
+  }
 
   op_blocks.clear();
+  dom = nullptr;
   if (!changed)
     return exodus::opt::PreservedAnalysis::all();
 
@@ -287,10 +297,6 @@ auto LoopStrengthReduce::index_is_no_wrap(
   } else {
     return false;
   }
-  auto bound = integer_constant(bound_value);
-  if (!bound)
-    return false;
-
   bool true_is_continue = loop.contains(branch->successors[0]);
   if (!true_is_continue) {
     switch (predicate) {
@@ -310,6 +316,25 @@ auto LoopStrengthReduce::index_is_no_wrap(
       break;
     }
   }
+
+  if (!bound_value->type->is_i32())
+    return false;
+
+  // A strict comparison against any i32 bound proves that the unit update
+  // executed on the continuing edge cannot cross the corresponding i32
+  // endpoint.  Keep dynamic-bound reasoning deliberately limited to the
+  // direct induction value; offsets and negations need a separate range proof.
+  if (
+    form->coefficient == 1 && form->offset == 0 &&
+    ((induction.step == 1 && predicate == OpCode::Lt) ||
+     (induction.step == -1 && predicate == OpCode::Gt))
+  ) {
+    return true;
+  }
+
+  auto bound = integer_constant(bound_value);
+  if (!bound || !initial)
+    return false;
 
   int64_t iv_min = 0;
   int64_t iv_max = 0;
@@ -399,8 +424,9 @@ auto LoopStrengthReduce::clone_initial_expression(
   auto block_it = op_blocks.find(creator);
   if (
     !creator || block_it == op_blocks.end() || !loop.contains(block_it->second)
-  )
-    return value;
+  ) {
+    return value_available_in_preheader(value, preheader) ? value : nullptr;
+  }
   if (!is_clonable_expression(*creator, loop) || !creator->result)
     return nullptr;
 
@@ -421,6 +447,58 @@ auto LoopStrengthReduce::clone_initial_expression(
   op_blocks[clone] = preheader;
   cache[value] = clone->result;
   return clone->result;
+}
+
+auto LoopStrengthReduce::value_available_in_preheader(
+  Value *value, Block *preheader
+) const -> bool {
+  if (!value || !preheader)
+    return false;
+  if (value->kind != ValueKind::OpResult)
+    return true;
+
+  auto *creator = static_cast<Op *>(static_cast<OpResult *>(value)->creator);
+  auto block_it = op_blocks.find(creator);
+  if (!creator || block_it == op_blocks.end())
+    return false;
+  auto *def_block = block_it->second;
+  if (def_block != preheader)
+    return dom && dom->dominate(def_block, preheader);
+  if (preheader->insts.empty())
+    return false;
+
+  auto insertion_point = std::prev(preheader->insts.end());
+  return std::find(preheader->insts.begin(), insertion_point, creator) !=
+         insertion_point;
+}
+
+auto LoopStrengthReduce::can_clone_initial_expression(
+  Value *value,
+  Value *induction,
+  Value *initial,
+  const Loop &loop,
+  Block *preheader
+) const -> bool {
+  if (value == induction)
+    return value_available_in_preheader(initial, preheader);
+  if (!value || value->kind != ValueKind::OpResult)
+    return value != nullptr;
+
+  auto *creator = static_cast<Op *>(static_cast<OpResult *>(value)->creator);
+  auto block_it = op_blocks.find(creator);
+  if (!creator || block_it == op_blocks.end())
+    return false;
+  if (!loop.contains(block_it->second))
+    return value_available_in_preheader(value, preheader);
+  if (!creator->result || !is_clonable_expression(*creator, loop))
+    return false;
+  return std::all_of(
+    creator->operands.begin(), creator->operands.end(), [&](Value *operand) {
+      return can_clone_initial_expression(
+        operand, induction, initial, loop, preheader
+      );
+    }
+  );
 }
 
 auto LoopStrengthReduce::reduce_getptrs(LinearFunction &func, const Loop &loop)
@@ -463,43 +541,97 @@ auto LoopStrengthReduce::reduce_getptr(
   std::unordered_map<Value *, Value *> &cache
 ) -> bool {
   if (
-    !getptr->result || getptr->operands.size() != 2 ||
+    !getptr->result || getptr->operands.size() < 2 ||
     !getptr->operands[0]->type->is_ptr() || !getptr->result->type->is_ptr()
   ) {
     return false;
   }
-  if (getptr->operands[0]->kind == ValueKind::OpResult) {
-    auto *base_creator =
-      static_cast<Op *>(static_cast<OpResult *>(getptr->operands[0])->creator);
-    auto base_block = op_blocks.find(base_creator);
-    if (
-      base_creator && base_block != op_blocks.end() &&
-      loop.contains(base_block->second)
-    ) {
-      return false;
-    }
-  }
-  auto plan =
-    ir::analyze_getptr(getptr->operands[0]->type, getptr->result->type, 1);
+  auto *preheader = loop.get_preheader();
   if (
-    plan.reads_memory || plan.steps.size() != 1 ||
-    plan.steps.front().kind != ir::GetPtrStep::Kind::Index
+    !preheader || !value_available_in_preheader(getptr->operands[0], preheader)
+  )
+    return false;
+  auto getptr_block = op_blocks.find(getptr);
+  if (
+    getptr_block == op_blocks.end() || !dom ||
+    !dom->dominate(getptr_block->second, induction.latch)
   ) {
     return false;
   }
 
-  auto coefficient =
-    linear_coefficient(getptr->operands[1], induction.phi->result, loop);
-  if (!coefficient || (*coefficient != 1 && *coefficient != -1))
+  auto index_count = getptr->operands.size() - 1;
+  auto plan = ir::analyze_getptr(
+    getptr->operands[0]->type, getptr->result->type, index_count
+  );
+  if (
+    plan.reads_memory || plan.steps.size() != index_count ||
+    std::any_of(plan.steps.begin(), plan.steps.end(), [](const auto &step) {
+      return step.kind != ir::GetPtrStep::Kind::Index;
+    })
+  ) {
     return false;
-  auto cost = expression_cost(getptr->operands[1], induction.phi->result, loop);
-  if (!cost || *cost == 0)
-    return false;
-  if (!index_is_no_wrap(getptr->operands[1], loop, induction))
+  }
+
+  size_t varying_index = index_count;
+  int varying_coefficient = 0;
+  int varying_scale = 0;
+  unsigned original_cost = 0;
+  for (const auto &step : plan.steps) {
+    if (step.index_pos >= index_count || step.scale <= 0)
+      return false;
+    auto *index = getptr->operands[step.index_pos + 1];
+    auto coefficient = linear_coefficient(index, induction.phi->result, loop);
+    if (!coefficient)
+      return false;
+    if (*coefficient != 0) {
+      if (
+        varying_index != index_count ||
+        (*coefficient != 1 && *coefficient != -1)
+      ) {
+        return false;
+      }
+      varying_index = step.index_pos;
+      varying_coefficient = *coefficient;
+      varying_scale = step.scale;
+      auto expression = expression_cost(index, induction.phi->result, loop);
+      if (!expression)
+        return false;
+      original_cost += *expression;
+    } else if (!value_available_in_preheader(index, preheader)) {
+      return false;
+    }
+
+    // Every pure index step needs an address add, and a non-unit scale needs
+    // at least one additional instruction in the current RISC-V lowering.
+    original_cost += 1 + static_cast<unsigned>(step.scale != 1);
+  }
+  if (varying_index == index_count)
     return false;
 
-  long long pointer_step =
-    static_cast<long long>(*coefficient) * induction.step;
+  auto *varying_value = getptr->operands[varying_index + 1];
+  if (!index_is_no_wrap(varying_value, loop, induction))
+    return false;
+  if (!can_clone_initial_expression(
+        varying_value, induction.phi->result, induction.initial, loop, preheader
+      ))
+    return false;
+
+  auto update_plan =
+    ir::analyze_getptr(getptr->result->type, getptr->result->type, 1);
+  if (
+    update_plan.reads_memory || update_plan.steps.size() != 1 ||
+    update_plan.steps.front().kind != ir::GetPtrStep::Kind::Index ||
+    update_plan.steps.front().scale <= 0
+  ) {
+    return false;
+  }
+
+  auto byte_step = static_cast<int64_t>(varying_coefficient) *
+                   static_cast<int64_t>(induction.step) * varying_scale;
+  auto update_scale = update_plan.steps.front().scale;
+  if (byte_step % update_scale != 0)
+    return false;
+  auto pointer_step = byte_step / update_scale;
   if (
     pointer_step < std::numeric_limits<int>::min() ||
     pointer_step > std::numeric_limits<int>::max()
@@ -507,27 +639,43 @@ auto LoopStrengthReduce::reduce_getptr(
     return false;
   }
 
+  unsigned update_cost = 0;
+  if (byte_step >= -2048 && byte_step <= 2047) {
+    update_cost = 1;
+  } else if (
+    byte_step >= std::numeric_limits<int>::min() &&
+    byte_step <= std::numeric_limits<int>::max()
+  ) {
+    update_cost = 2;
+  } else {
+    update_cost = 2 + static_cast<unsigned>(update_scale != 1);
+  }
+  // Reserve one instruction for a possible backedge Phi copy.  Simple
+  // one-index addressing therefore stays unchanged unless the recurrence has
+  // a clear instruction-count advantage.
+  if (original_cost <= update_cost + 1)
+    return false;
+
   auto *initial_index = clone_initial_expression(
-    getptr->operands[1],
+    varying_value,
     induction.phi->result,
     induction.initial,
     loop,
-    loop.get_preheader(),
+    preheader,
     cache
   );
   if (!initial_index)
     return false;
 
   auto *initial_pointer = module->make_op(OpCode::GetPtr);
-  initial_pointer->operands = {getptr->operands[0], initial_index};
+  initial_pointer->operands = getptr->operands;
+  initial_pointer->operands[varying_index + 1] = initial_index;
   initial_pointer->result =
     module->ctx->make_value<OpResult>(getptr->result->type, initial_pointer);
   for (auto *operand : initial_pointer->operands)
     operand->addUse(initial_pointer);
-  loop.get_preheader()->insts.insert(
-    std::prev(loop.get_preheader()->insts.end()), initial_pointer
-  );
-  op_blocks[initial_pointer] = loop.get_preheader();
+  preheader->insts.insert(std::prev(preheader->insts.end()), initial_pointer);
+  op_blocks[initial_pointer] = preheader;
 
   auto *pointer_phi = module->make_op(OpCode::Phi, PhiPayload{});
   pointer_phi->result =
@@ -548,7 +696,7 @@ auto LoopStrengthReduce::reduce_getptr(
 
   auto &incoming = std::get<PhiPayload>(pointer_phi->payload).incoming;
   incoming = {
-    {loop.get_preheader(), initial_pointer->result},
+    {preheader, initial_pointer->result},
     {induction.latch, next_pointer->result},
   };
   initial_pointer->result->addUse(pointer_phi);

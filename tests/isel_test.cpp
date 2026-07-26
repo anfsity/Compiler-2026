@@ -100,25 +100,25 @@ auto test_select_multidim_getptr_stride() -> void {
   auto mf = lower_function(func);
   auto &insts = mf->blocks.front()->insts;
 
-  bool saw_first_dim_scale = false;
-  bool saw_second_dim_shift = false;
+  bool saw_first_dim_offset = false;
+  bool saw_second_dim_offset = false;
   for (const auto &mi : insts) {
     if (
-      mi.opcode == LI && mi.operands.size() == 2 &&
-      get_imm(mi.operands[1]) == 12
+      mi.opcode == ADDI && mi.operands.size() == 3 &&
+      get_imm(mi.operands[2]) == 12
     ) {
-      saw_first_dim_scale = true;
+      saw_first_dim_offset = true;
     }
     if (
-      mi.opcode == SLLI && mi.operands.size() == 3 &&
-      get_imm(mi.operands[2]) == 2
+      mi.opcode == ADDI && mi.operands.size() == 3 &&
+      get_imm(mi.operands[2]) == 8
     ) {
-      saw_second_dim_shift = true;
+      saw_second_dim_offset = true;
     }
   }
 
-  require(saw_first_dim_scale);
-  require(saw_second_dim_shift);
+  require(saw_first_dim_offset);
+  require(saw_second_dim_offset);
 
   std::cout << "test_select_multidim_getptr_stride passed!\n";
 }
@@ -152,16 +152,16 @@ auto test_select_array_parameter_getptr_stride() -> void {
   func.blocks.push_back(std::move(entry));
 
   auto mf = lower_function(func);
-  bool saw_scale_8 = false;
+  bool saw_offset_8 = false;
   for (const auto &mi : mf->blocks.front()->insts) {
     if (
-      mi.opcode == SLLI && mi.operands.size() == 3 &&
-      get_imm(mi.operands[2]) == 3
+      mi.opcode == ADDI && mi.operands.size() == 3 &&
+      get_imm(mi.operands[2]) == 8
     ) {
-      saw_scale_8 = true;
+      saw_offset_8 = true;
     }
   }
-  require(saw_scale_8);
+  require(saw_offset_8);
 
   std::cout << "test_select_array_parameter_getptr_stride passed!\n";
 }
@@ -265,7 +265,7 @@ auto test_select_global_addr() -> void {
   std::cout << "test_select_global_addr passed!\n";
 }
 
-auto test_select_global_addr_materializes_each_use() -> void {
+auto test_select_global_addr_reuses_within_block() -> void {
   IRContext ctx;
   MidModule module;
   module.ctx = &ctx;
@@ -305,9 +305,9 @@ auto test_select_global_addr_materializes_each_use() -> void {
       ++la_count;
     }
   }
-  require(la_count == 2);
+  require(la_count == 1);
 
-  std::cout << "test_select_global_addr_materializes_each_use passed!\n";
+  std::cout << "test_select_global_addr_reuses_within_block passed!\n";
 }
 
 auto test_select_getptr_implicit_load() -> void {
@@ -433,8 +433,8 @@ auto test_select_array_parameter_slot_preserves_stride() -> void {
       saw_pointer_load = true;
     }
     if (
-      mi.opcode == LI && mi.operands.size() == 2 &&
-      get_imm(mi.operands[1]) == 20
+      mi.opcode == ADDI && mi.operands.size() == 3 &&
+      get_imm(mi.operands[2]) == 20
     ) {
       saw_row_stride = true;
     }
@@ -451,7 +451,7 @@ int main() {
   test_select_array_parameter_getptr_stride();
   test_select_stack_passed_args();
   test_select_global_addr();
-  test_select_global_addr_materializes_each_use();
+  test_select_global_addr_reuses_within_block();
   test_select_getptr_implicit_load();
   test_select_getptr_parameter_slot_implicit_load();
   test_select_array_parameter_slot_preserves_stride();
