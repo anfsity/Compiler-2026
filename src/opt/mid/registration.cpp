@@ -5,6 +5,7 @@
 #include "inliner.hpp"
 #include "inst_combine.hpp"
 #include "licm.hpp"
+#include "loop_idiom_recognize.hpp"
 #include "loop_simplify.hpp"
 #include "loop_strength_reduce.hpp"
 #include "mem2reg.hpp"
@@ -36,6 +37,11 @@ static exodus::opt::RegisterLinearFunctionPass<GVN>
 static exodus::opt::RegisterLinearFunctionPass<LoopStrengthReduce>
   reg_loop_strength_reduce(
     "loop_strength_reduce", "reduce affine loop address calculations"
+  );
+
+static exodus::opt::RegisterLinearFunctionPass<LoopIdiomRecognize>
+  reg_loop_idiom_recognize(
+    "loop_idiom_recognize", "recognize proven loop memory idioms"
   );
 
 static exodus::opt::RegisterLinearFunctionPass<CFGSimplify>
