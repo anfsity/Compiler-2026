@@ -2,6 +2,7 @@
 #include "cfg_simplify.hpp"
 #include "dce.hpp"
 #include "gvn.hpp"
+#include "inliner.hpp"
 #include "inst_combine.hpp"
 #include "licm.hpp"
 #include "loop_simplify.hpp"
@@ -16,6 +17,9 @@ static exodus::opt::RegisterLinearFunctionPass<Mem2Reg>
 
 static exodus::opt::RegisterLinearFunctionPass<TailRecursionElim>
   reg_tail_recursion_elim("tail_recursion_elim", "tail recursion elimination");
+
+static exodus::opt::RegisterLinearFunctionPass<Inliner>
+  reg_inliner("mid_inliner", "cost-aware CFG inlining");
 
 static exodus::opt::RegisterLinearFunctionPass<InstCombine>
   reg_inst_combine("instcombine", "instruction combining");

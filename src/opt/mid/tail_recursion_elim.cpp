@@ -169,6 +169,7 @@ auto TailRecursionElim::run(
 
   rewriter.finalize(func);
   rebuild_cfg(func);
+  func.tail_recursion_eliminated = true;
 
   return exodus::opt::PreservedAnalysis::none();
 }
