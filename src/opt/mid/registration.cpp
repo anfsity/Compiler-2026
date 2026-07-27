@@ -8,6 +8,7 @@
 #include "loop_idiom_recognize.hpp"
 #include "loop_simplify.hpp"
 #include "loop_strength_reduce.hpp"
+#include "loop_unroll.hpp"
 #include "mem2reg.hpp"
 #include "tail_recursion_elim.hpp"
 
@@ -43,6 +44,9 @@ static exodus::opt::RegisterLinearFunctionPass<LoopIdiomRecognize>
   reg_loop_idiom_recognize(
     "loop_idiom_recognize", "recognize proven loop memory idioms"
   );
+
+static exodus::opt::RegisterLinearFunctionPass<LoopUnroll>
+  reg_loop_unroll("loop_unroll", "fully unroll proven short exact-trip loops");
 
 static exodus::opt::RegisterLinearFunctionPass<CFGSimplify>
   reg_cfg_simplify("cfg_simplify", "control-flow graph simplification");

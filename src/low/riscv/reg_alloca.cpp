@@ -1773,6 +1773,93 @@ auto first_terminator(low_ir::MachineBasicBlock &block)
   );
 }
 
+auto make_natural_loops_contiguous(low_ir::MachineFunction &function) -> void {
+  low_ir::DominatorTree dom;
+  dom.compute(function);
+  low_ir::LoopInfo loop_info;
+  loop_info.compute(function, dom);
+
+  std::vector<const low_ir::NaturalLoop *> loops;
+  loops.reserve(loop_info.get_loops().size());
+  for (const auto &loop : loop_info.get_loops())
+    loops.push_back(&loop);
+  std::sort(loops.begin(), loops.end(), [](const auto *lhs, const auto *rhs) {
+    if (lhs->blocks.size() != rhs->blocks.size())
+      return lhs->blocks.size() < rhs->blocks.size();
+    return lhs->header->id < rhs->header->id;
+  });
+
+  for (const auto *loop : loops) {
+    auto first = function.blocks.end();
+    auto last = function.blocks.end();
+    for (auto it = function.blocks.begin(); it != function.blocks.end(); ++it) {
+      if (!loop->contains(it->get()))
+        continue;
+      if (first == function.blocks.end())
+        first = it;
+      last = it;
+    }
+    if (first == function.blocks.end() || first == last)
+      continue;
+
+    std::list<std::unique_ptr<low_ir::MachineBasicBlock>> displaced;
+    for (auto it = first; it != last;) {
+      auto current = it++;
+      if (!loop->contains(current->get()))
+        displaced.splice(displaced.end(), function.blocks, current);
+    }
+    function.blocks.splice(std::next(last), displaced);
+  }
+}
+
+auto materialize_conditional_fallthroughs(low_ir::MachineFunction &function)
+  -> bool {
+  // Loop rotation encodes the false edge with the current layout.  Restore
+  // explicit edges before any post-RA block movement so layout cannot alter
+  // control flow.
+  std::vector<
+    std::pair<low_ir::MachineBasicBlock *, low_ir::MachineBasicBlock *>>
+    fallthroughs;
+  for (auto &block : function.blocks) {
+    if (block->insts.empty())
+      return false;
+    auto &last = block->insts.back();
+    if (!is_conditional_branch(last.opcode)) {
+      if (
+        !is_unconditional_jump(last) && last.opcode != JALR &&
+        last.opcode != RET && last.opcode != RET_NOFRAME
+      ) {
+        return false;
+      }
+      continue;
+    }
+
+    auto *taken = branch_target(last);
+    if (!taken || block->succs.size() != 2)
+      return false;
+    bool saw_taken = false;
+    low_ir::MachineBasicBlock *fallthrough = nullptr;
+    for (auto *successor : block->succs) {
+      if (successor == taken) {
+        saw_taken = true;
+        continue;
+      }
+      if (fallthrough && fallthrough != successor)
+        return false;
+      fallthrough = successor;
+    }
+    if (!saw_taken || !fallthrough)
+      return false;
+    fallthroughs.emplace_back(block.get(), fallthrough);
+  }
+  for (const auto &[block, fallthrough] : fallthroughs) {
+    block->insts.emplace_back(JAL)
+      .add_reg(ZERO, true, false)
+      .add_mbb(fallthrough);
+  }
+  return true;
+}
+
 auto hoist_loop_materializations(low_ir::MachineFunction &function) -> void {
   low_ir::DominatorTree dom;
   dom.compute(function);
@@ -2835,6 +2922,8 @@ auto run_ra(low_ir::MachineFunction &function, bool dump_ra, bool emit_ra)
   detail::eliminate_spill_stores(function);
   detail::resolve_parallel_copies(function);
   detail::finalize_frame_region(function);
+  if (detail::materialize_conditional_fallthroughs(function))
+    detail::make_natural_loops_contiguous(function);
   detail::eliminate_fallthrough_jumps(function);
 
   printer.dump_function(function);

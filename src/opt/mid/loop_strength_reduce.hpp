@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../mid/loop.hpp"
+#include "../../mid/affine_loop.hpp"
 #include "../../mid/rewriter.hpp"
 #include <optional>
 #include <unordered_map>
@@ -15,27 +15,18 @@ public:
     -> exodus::opt::PreservedAnalysis;
 
 private:
-  struct Induction {
-    Op *phi = nullptr;
-    Value *initial = nullptr;
-    Block *latch = nullptr;
-    int step = 0;
-  };
-
-  struct AffineForm {
-    int64_t coefficient = 0;
-    int64_t offset = 0;
-  };
-
   MidModule *module;
   DomTree *dom = nullptr;
+  AffineLoopInfo *affine_loops = nullptr;
   std::unordered_map<Op *, Block *> op_blocks;
 
   auto build_op_block_map(LinearFunction &func) -> void;
-  auto find_inductions(const Loop &loop) const -> std::vector<Induction>;
   auto
   linear_coefficient(Value *value, Value *induction, const Loop &loop) const
     -> std::optional<int>;
+  auto matches_migrated_affine_shape(
+    Value *value, Value *induction, const Loop &loop
+  ) const -> bool;
   auto expression_cost(Value *value, Value *induction, const Loop &loop) const
     -> std::optional<unsigned>;
   auto clone_initial_expression(
@@ -53,23 +44,15 @@ private:
     const Loop &loop,
     Block *preheader
   ) const -> bool;
-  auto value_available_in_preheader(Value *value, Block *preheader) const
-    -> bool;
   auto reduce_getptrs(LinearFunction &func, const Loop &loop) -> bool;
   auto reduce_getptr(
     Op *getptr,
     const Loop &loop,
-    const Induction &induction,
+    const CountedLoopInfo &counted,
     MidIRRewriter &rewriter,
     std::unordered_map<Value *, Value *> &cache
   ) -> bool;
 
-  static auto integer_constant(Value *value) -> std::optional<int>;
-  auto affine_form(Value *value, Value *induction, const Loop &loop) const
-    -> std::optional<AffineForm>;
-  auto index_is_no_wrap(
-    Value *index, const Loop &loop, const Induction &induction
-  ) const -> bool;
   auto is_clonable_expression(const Op &op, const Loop &loop) const -> bool;
 };
 

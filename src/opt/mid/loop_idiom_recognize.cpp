@@ -1,6 +1,8 @@
 #include "loop_idiom_recognize.hpp"
 
 #include "../../base/getptr.hpp"
+#include "../../mid/memory.hpp"
+#include "../../mid/rewriter.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -15,13 +17,20 @@ auto LoopIdiomRecognize::run(
     return exodus::opt::PreservedAnalysis::all();
 
   auto &loop_info = am.get_result<LoopAnalysis>(func);
+  affine_loops = &am.get_result<AffineLoopAnalysis>(func);
   build_op_block_map(func);
 
   bool changed = false;
-  for (auto *loop : loop_info.get_loops_innermost_first())
-    changed |= replace_single_store_loop(*loop);
+  for (auto *loop : loop_info.get_loops_innermost_first()) {
+    if (replace_single_store_loop(*loop)) {
+      changed = true;
+      continue;
+    }
+    changed |= hoist_independent_store(func, *loop);
+  }
 
   op_blocks.clear();
+  affine_loops = nullptr;
   return changed ? exodus::opt::PreservedAnalysis::none()
                  : exodus::opt::PreservedAnalysis::all();
 }
@@ -60,124 +69,8 @@ auto LoopIdiomRecognize::is_byte_splat_constant(Value *value) -> bool {
   return bits == byte * 0x01010101u;
 }
 
-auto LoopIdiomRecognize::match_counted_loop(const Loop &loop) const
-  -> std::optional<CountedLoop> {
-  if (
-    !loop.get_preheader() || loop.get_blocks().size() != 2 ||
-    loop.get_back_edges().size() != 1 ||
-    loop.get_exiting_blocks().size() != 1 ||
-    loop.get_exiting_blocks().front() != loop.get_header() ||
-    loop.get_exit_blocks().size() != 1
-  ) {
-    return std::nullopt;
-  }
-
-  auto *preheader = loop.get_preheader();
-  auto *header = loop.get_header();
-  auto *latch = loop.get_back_edges().front().first;
-  auto *exit = loop.get_exit_blocks().front();
-  if (
-    latch == header || !loop.contains(latch) ||
-    (!exit->insts.empty() && exit->insts.front()->code == OpCode::Phi) ||
-    header->insts.empty() || latch->insts.empty()
-  ) {
-    return std::nullopt;
-  }
-
-  auto *branch = header->insts.back();
-  if (
-    branch->code != OpCode::Branch || branch->operands.size() != 1 ||
-    branch->successors.size() != 2 || branch->successors[0] != latch ||
-    branch->successors[1] != exit
-  ) {
-    return std::nullopt;
-  }
-
-  auto *condition = branch->operands[0];
-  if (!condition || condition->kind != ValueKind::OpResult)
-    return std::nullopt;
-  auto *compare =
-    static_cast<Op *>(static_cast<OpResult *>(condition)->creator);
-  auto compare_block = op_blocks.find(compare);
-  if (
-    !compare || compare_block == op_blocks.end() ||
-    compare_block->second != header || compare->code != OpCode::Lt ||
-    compare->operands.size() != 2
-  ) {
-    return std::nullopt;
-  }
-
-  auto *induction = compare->operands[0];
-  auto *bound = compare->operands[1];
-  if (
-    !induction || induction->kind != ValueKind::OpResult || !bound ||
-    !bound->type->is_i32()
-  ) {
-    return std::nullopt;
-  }
-  if (bound->kind == ValueKind::OpResult) {
-    auto *bound_definition =
-      static_cast<Op *>(static_cast<OpResult *>(bound)->creator);
-    auto bound_block = op_blocks.find(bound_definition);
-    if (bound_block == op_blocks.end() || loop.contains(bound_block->second)) {
-      return std::nullopt;
-    }
-  }
-  auto *phi = static_cast<Op *>(static_cast<OpResult *>(induction)->creator);
-  auto phi_block = op_blocks.find(phi);
-  if (
-    !phi || phi_block == op_blocks.end() || phi_block->second != header ||
-    phi->code != OpCode::Phi || !phi->result || phi->result != induction ||
-    !phi->result->type->is_i32()
-  ) {
-    return std::nullopt;
-  }
-
-  Value *initial = nullptr;
-  Value *backedge = nullptr;
-  for (const auto &[pred, value] :
-       std::get<PhiPayload>(phi->payload).incoming) {
-    if (pred == preheader)
-      initial = value;
-    else if (pred == latch)
-      backedge = value;
-    else
-      return std::nullopt;
-  }
-  if (
-    integer_constant(initial) != 0 || !backedge ||
-    backedge->kind != ValueKind::OpResult
-  ) {
-    return std::nullopt;
-  }
-
-  auto *update = static_cast<Op *>(static_cast<OpResult *>(backedge)->creator);
-  auto update_block = op_blocks.find(update);
-  if (
-    !update || update_block == op_blocks.end() ||
-    update_block->second != latch || update->code != OpCode::Add ||
-    update->operands.size() != 2 ||
-    !((update->operands[0] == induction &&
-       integer_constant(update->operands[1]) == 1) ||
-      (update->operands[1] == induction &&
-       integer_constant(update->operands[0]) == 1))
-  ) {
-    return std::nullopt;
-  }
-
-  auto *terminator = latch->insts.back();
-  if (
-    terminator->code != OpCode::Jump || terminator->successors.size() != 1 ||
-    terminator->successors.front() != header
-  ) {
-    return std::nullopt;
-  }
-
-  return CountedLoop{preheader, header, latch, exit, phi, bound};
-}
-
 auto LoopIdiomRecognize::match_contiguous_pointer(
-  Value *pointer, const CountedLoop &loop
+  Value *pointer, const CountedLoopInfo &loop
 ) const -> bool {
   if (
     !pointer || pointer->kind != ValueKind::OpResult || !pointer->type->is_ptr()
@@ -234,7 +127,7 @@ auto LoopIdiomRecognize::match_contiguous_pointer(
       auto operand_index = step.index_pos + 1;
       if (operand_index >= definition->operands.size())
         return false;
-      if (definition->operands[operand_index] == loop.induction_phi->result) {
+      if (definition->operands[operand_index] == loop.induction.phi->result) {
         if (step.scale != element_size)
           return false;
         ++induction_indices;
@@ -351,7 +244,26 @@ auto LoopIdiomRecognize::reset_operands(Op *op, std::vector<Value *> operands)
 }
 
 auto LoopIdiomRecognize::replace_single_store_loop(const Loop &loop) -> bool {
-  auto counted = match_counted_loop(loop);
+  auto counted =
+    affine_loops ? affine_loops->match_counted_loop(loop) : std::nullopt;
+  if (
+    !counted || loop.get_blocks().size() != 2 ||
+    counted->continuation != counted->latch || !counted->continue_on_true ||
+    !counted->induction_on_lhs || !counted->compare ||
+    counted->compare->code != OpCode::Lt ||
+    integer_constant(counted->induction.initial) != 0 ||
+    counted->induction.step != 1 || !counted->induction.update ||
+    counted->induction.update->code != OpCode::Add ||
+    counted->induction.predicate != OpCode::Lt ||
+    (!counted->exit->insts.empty() &&
+     counted->exit->insts.front()->code == OpCode::Phi) ||
+    counted->latch->insts.empty() ||
+    counted->latch->insts.back()->code != OpCode::Jump ||
+    counted->latch->insts.back()->successors.size() != 1 ||
+    counted->latch->insts.back()->successors.front() != counted->header
+  ) {
+    return false;
+  }
   if (!counted || has_escaping_result(loop))
     return false;
 
@@ -413,11 +325,250 @@ auto LoopIdiomRecognize::replace_single_store_loop(const Loop &loop) -> bool {
   auto *fill = store->operands[0];
   store->code = OpCode::Memset;
   store->payload = EmptyPayload{};
-  reset_operands(store, {pointer, counted->bound, fill});
+  reset_operands(store, {pointer, counted->induction.bound, fill});
 
   auto *terminator = counted->latch->insts.back();
   terminator->successors = {counted->exit};
   return true;
+}
+
+auto LoopIdiomRecognize::get_initial_pointer(
+  Value *pointer, const CountedLoopInfo &loop
+) const -> Value * {
+  if (
+    !pointer || pointer->kind != ValueKind::OpResult || !pointer->type->is_ptr()
+  ) {
+    return nullptr;
+  }
+  auto *phi = static_cast<Op *>(static_cast<OpResult *>(pointer)->creator);
+  auto phi_block = op_blocks.find(phi);
+  if (
+    !phi || phi_block == op_blocks.end() || phi_block->second != loop.header ||
+    phi->code != OpCode::Phi || phi->result != pointer
+  ) {
+    return nullptr;
+  }
+
+  Value *initial = nullptr;
+  size_t backedge_incoming = 0;
+  for (const auto &[pred, value] :
+       std::get<PhiPayload>(phi->payload).incoming) {
+    if (pred == loop.preheader) {
+      if (initial)
+        return nullptr;
+      initial = value;
+    } else if (pred == loop.latch) {
+      ++backedge_incoming;
+    } else {
+      return nullptr;
+    }
+  }
+  return initial && backedge_incoming == 1 ? initial : nullptr;
+}
+
+auto LoopIdiomRecognize::memory_accesses_are_independent(
+  Op *store, const Loop &loop, const CountedLoopInfo &counted
+) const -> bool {
+  BasicAliasAnalysis alias_analysis;
+  auto store_location = alias_analysis.get_location(*store);
+  if (!store_location)
+    return false;
+
+  for (auto *block : loop.get_blocks()) {
+    for (auto *op : block->insts) {
+      if (op == store)
+        continue;
+      if (
+        op->code == OpCode::Call || op->code == OpCode::Memset ||
+        op->code == OpCode::Alloca || op->code == OpCode::Ret
+      )
+        return false;
+      if (op->code == OpCode::Load || op->code == OpCode::Store) {
+        if (block != counted.latch)
+          return false;
+        auto location = alias_analysis.get_location(*op);
+        if (
+          !location || alias_analysis.alias(*store_location, *location) !=
+                         AliasResult::NoAlias
+        ) {
+          return false;
+        }
+        continue;
+      }
+      if (op->code != OpCode::GetPtr)
+        continue;
+      if (
+        !op->result || op->operands.empty() ||
+        !op->operands[0]->type->is_ptr() || !op->result->type->is_ptr() ||
+        ir::analyze_getptr(
+          op->operands[0]->type, op->result->type, op->operands.size() - 1
+        )
+          .reads_memory
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+auto LoopIdiomRecognize::hoist_independent_store(
+  LinearFunction &func, const Loop &loop
+) -> bool {
+  auto counted =
+    affine_loops ? affine_loops->match_counted_loop(loop) : std::nullopt;
+  if (
+    !counted || loop.get_blocks().size() != 2 ||
+    counted->continuation != counted->latch || !counted->continue_on_true ||
+    !counted->induction_on_lhs || !counted->compare ||
+    counted->compare->code != OpCode::Lt ||
+    integer_constant(counted->induction.initial) != 0 ||
+    counted->induction.step != 1 || !counted->induction.update ||
+    counted->induction.update->code != OpCode::Add ||
+    counted->induction.predicate != OpCode::Lt ||
+    (!counted->exit->insts.empty() &&
+     counted->exit->insts.front()->code == OpCode::Phi) ||
+    counted->latch->insts.empty() ||
+    counted->latch->insts.back()->code != OpCode::Jump ||
+    counted->latch->insts.back()->successors.size() != 1 ||
+    counted->latch->insts.back()->successors.front() != counted->header ||
+    !module || !module->ctx || has_escaping_result(loop)
+  ) {
+    return false;
+  }
+
+  Op *candidate = nullptr;
+  size_t store_count = 0;
+  for (auto *block : loop.get_blocks()) {
+    for (auto *op : block->insts) {
+      if (op->code != OpCode::Store)
+        continue;
+      ++store_count;
+      if (
+        op_blocks.at(op) != counted->latch || op->operands.size() != 2 ||
+        !is_byte_splat_constant(op->operands[0]) ||
+        !match_contiguous_pointer(op->operands[1], *counted) ||
+        !get_initial_pointer(op->operands[1], *counted)
+      ) {
+        continue;
+      }
+      if (candidate)
+        return false;
+      candidate = op;
+    }
+  }
+  if (
+    store_count < 2 || !candidate ||
+    !memory_accesses_are_independent(candidate, loop, *counted)
+  ) {
+    return false;
+  }
+
+  auto *preheader_terminator = counted->preheader->insts.empty()
+                                 ? nullptr
+                                 : counted->preheader->insts.back();
+  if (
+    !preheader_terminator || preheader_terminator->code != OpCode::Jump ||
+    preheader_terminator->successors.size() != 1 ||
+    preheader_terminator->successors.front() != counted->header
+  ) {
+    return false;
+  }
+
+  std::vector<Op *> header_phis;
+  for (auto *op : counted->header->insts) {
+    if (op->code != OpCode::Phi)
+      break;
+    size_t preheader_incoming = 0;
+    size_t backedge_incoming = 0;
+    for (const auto &[pred, value] :
+         std::get<PhiPayload>(op->payload).incoming) {
+      (void)value;
+      preheader_incoming += pred == counted->preheader;
+      backedge_incoming += pred == counted->latch;
+    }
+    if (
+      preheader_incoming != 1 || backedge_incoming != 1 ||
+      std::get<PhiPayload>(op->payload).incoming.size() != 2
+    )
+      return false;
+    header_phis.push_back(op);
+  }
+
+  auto header_it = std::find_if(
+    func.blocks.begin(), func.blocks.end(), [&](const auto &block) {
+      return block.get() == counted->header;
+    }
+  );
+  if (header_it == func.blocks.end())
+    return false;
+
+  auto guard_ptr = std::make_unique<Block>(
+    static_cast<int>(func.blocks.size()),
+    counted->header->name + "_memset_guard"
+  );
+  auto init_ptr = std::make_unique<Block>(
+    static_cast<int>(func.blocks.size() + 1),
+    counted->header->name + "_memset_init"
+  );
+  auto *guard = guard_ptr.get();
+  auto *init = init_ptr.get();
+
+  auto *condition = module->make_op(OpCode::Lt);
+  condition->operands = {
+    counted->induction.initial,
+    counted->induction.bound,
+  };
+  condition->result = module->ctx->make_value<OpResult>(Bool::get(), condition);
+  for (auto *operand : condition->operands)
+    operand->addUse(condition);
+  guard->insts.push_back(condition);
+
+  auto *branch = module->make_op(OpCode::Branch);
+  branch->operands = {condition->result};
+  condition->result->addUse(branch);
+  branch->successors = {init, counted->exit};
+  guard->insts.push_back(branch);
+
+  auto *initial_pointer = get_initial_pointer(candidate->operands[1], *counted);
+  auto *memset = module->make_op(OpCode::Memset);
+  memset->operands = {
+    initial_pointer,
+    counted->induction.bound,
+    candidate->operands[0],
+  };
+  for (auto *operand : memset->operands)
+    operand->addUse(memset);
+  init->insts.push_back(memset);
+
+  auto *jump = module->make_op(OpCode::Jump);
+  jump->successors = {counted->header};
+  init->insts.push_back(jump);
+
+  preheader_terminator->successors = {guard};
+  for (auto *phi : header_phis) {
+    for (auto &[pred, value] : std::get<PhiPayload>(phi->payload).incoming) {
+      (void)value;
+      if (pred == counted->preheader)
+        pred = init;
+    }
+  }
+
+  func.blocks.insert(header_it, std::move(guard_ptr));
+  func.blocks.insert(header_it, std::move(init_ptr));
+  renumber_blocks(func);
+
+  MidIRRewriter rewriter;
+  rewriter.set_scope(func);
+  rewriter.eraseOp(candidate);
+  rewriter.finalize(func);
+  return true;
+}
+
+auto LoopIdiomRecognize::renumber_blocks(LinearFunction &func) -> void {
+  int id = 0;
+  for (auto &block : func.blocks)
+    block->id = id++;
 }
 
 } // namespace exodus::mid_ir::opt

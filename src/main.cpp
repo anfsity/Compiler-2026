@@ -16,6 +16,7 @@
 #include "low/riscv/isel.hpp"
 #include "low/riscv/machine_printer.hpp"
 #include "low/riscv/reg_alloca.hpp"
+#include "mid/affine_loop.hpp"
 #include "mid/dom.hpp"
 #include "mid/flatten.hpp"
 #include "mid/ir_printer.hpp"
@@ -23,6 +24,7 @@
 #include "opt/AnalysisManager.hpp"
 #include "opt/PassBuilder.hpp"
 #include "opt/PassManager.hpp"
+#include "opt/high/local_array_summary.hpp"
 #include "opt/mid/dead_function_elimination.hpp"
 
 using namespace exodus::ast;
@@ -172,6 +174,7 @@ private:
   auto run_high_opt() -> void {
     PassBuilder pb(module.get());
     FunctionAnalysisManager fam;
+    fam.register_pass<exodus::high_ir::opt::LocalArraySummaryAnalysis>();
     ModuleAnalysisManager mam;
 
     auto instrumentation = [&](const std::string &name, const auto &unit) {
@@ -235,6 +238,7 @@ private:
     LinearFunctionAnalysisManager lfam;
     lfam.register_pass<DominanceAnalysis>();
     lfam.register_pass<LoopAnalysis>();
+    lfam.register_pass<AffineLoopAnalysis>();
 
     auto instrumentation = [&](const std::string &name, const auto &unit) {
       this->instrument(name, unit);
