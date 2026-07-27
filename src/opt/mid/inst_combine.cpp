@@ -303,8 +303,9 @@ auto InstCombine::register_rules() -> void {
 }
 
 auto InstCombine::run(
-  LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager &
+  LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager &am
 ) -> exodus::opt::PreservedAnalysis {
+  collect_affine_mod_proofs(func, am);
   bool ever_changed = false;
 
   // Keep this fixed point local to the pass. This also makes an explicit
@@ -323,14 +324,52 @@ auto InstCombine::run(
     ever_changed = true;
   }
 
+  affine_non_negative_mods.clear();
   return ever_changed ? exodus::opt::PreservedAnalysis::none()
                       : exodus::opt::PreservedAnalysis::all();
+}
+
+auto InstCombine::collect_affine_mod_proofs(
+  LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager &am
+) -> void {
+  affine_non_negative_mods.clear();
+  auto &loops = am.get_result<LoopAnalysis>(func);
+  auto &affine = am.get_result<AffineLoopAnalysis>(func);
+
+  for (auto &block : func.blocks) {
+    auto *innermost = loops.get_loop_for(block.get());
+    if (!innermost)
+      continue;
+    for (auto *op : block->insts) {
+      if (op->code != OpCode::Mod || op->operands.size() != 2)
+        continue;
+      auto divisor = int_constant(op->operands[1]);
+      if (!divisor || !is_power_of_two(*divisor))
+        continue;
+
+      for (auto *loop = innermost; loop; loop = loop->get_parent()) {
+        auto counted = affine.match_counted_loop(*loop);
+        if (
+          counted && affine.is_non_negative(op->operands[0], *counted, *loop)
+        ) {
+          affine_non_negative_mods.insert(op);
+          break;
+        }
+      }
+    }
+  }
 }
 
 auto InstCombine::combine_block(LinearFunction &func, Block &block) -> bool {
   bool changed = false;
   for (auto it = block.insts.begin(); it != block.insts.end(); ++it) {
-    CombineContext ctx{module, &func, &block, *it};
+    CombineContext ctx{
+      module,
+      &func,
+      &block,
+      *it,
+      affine_non_negative_mods.count(*it) != 0,
+    };
     auto result = rules.apply(ctx);
     if (!result)
       continue;
@@ -419,7 +458,10 @@ auto InstCombine::simplify_mod(const CombineContext &ctx)
 
   // Boundedness and signedness are independent facts.  A non-negative value
   // does not need a finite range here: x % 2^k is exactly x & (2^k - 1).
-  if (*rhs > 0 && is_power_of_two(*rhs) && is_proven_non_negative(lhs)) {
+  if (
+    *rhs > 0 && is_power_of_two(*rhs) &&
+    (is_proven_non_negative(lhs) || ctx.affine_non_negative)
+  ) {
     auto *mask = make_i32(ctx.module, *rhs - 1);
     auto *and_op = make_binary(ctx.module, OpCode::And, lhs, mask);
     return CombineResult{and_op->result, {and_op}};

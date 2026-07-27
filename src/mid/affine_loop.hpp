@@ -8,6 +8,23 @@
 
 namespace exodus::mid_ir {
 
+struct AffineForm {
+  // Mathematical form only.  Consumers that change i32 evaluation must also
+  // call is_no_wrap() to prove every source operation over the loop range.
+  int64_t coefficient = 0;
+  int64_t offset = 0;
+};
+
+struct IntegerRange {
+  // Inclusive enclosure. minimum > maximum denotes an empty iteration set;
+  // exact is false when the interval includes unreachable values or holes.
+  int64_t minimum = 0;
+  int64_t maximum = -1;
+  bool exact = false;
+
+  auto empty() const -> bool { return minimum > maximum; }
+};
+
 struct InductionInfo {
   Op *phi = nullptr;
   Value *initial = nullptr;
@@ -32,24 +49,46 @@ struct CountedLoopInfo {
 
 class AffineLoopInfo {
 public:
-  auto compute(LinearFunction &func, LoopInfo &loops) -> void;
+  auto compute(LinearFunction &func, LoopInfo &loops, DomTree &dom) -> void;
 
   auto get_inductions(const Loop &loop) const -> std::vector<InductionInfo>;
   auto match_counted_loop(const Loop &loop) const
     -> std::optional<CountedLoopInfo>;
   auto exact_trip_count(const CountedLoopInfo &loop) const
     -> std::optional<uint64_t>;
+  auto affine_form(
+    Value *value, const CountedLoopInfo &counted, const Loop &loop
+  ) const -> std::optional<AffineForm>;
+  auto induction_range(const CountedLoopInfo &loop) const
+    -> std::optional<IntegerRange>;
+  auto is_no_wrap(
+    Value *value, const CountedLoopInfo &counted, const Loop &loop
+  ) const -> bool;
+  auto is_non_negative(
+    Value *value, const CountedLoopInfo &counted, const Loop &loop
+  ) const -> bool;
+  auto is_available_at_preheader(Value *value, Block *preheader) const -> bool;
 
   static auto integer_constant(Value *value) -> std::optional<int32_t>;
 
 private:
   std::unordered_map<Op *, Block *> op_blocks;
+  DomTree *dom = nullptr;
 
   auto definition_block(Value *value) const -> Block *;
   auto loop_invariant(Value *value, const Loop &loop) const -> bool;
   auto normalized_condition(
     Op *compare, Value *induction, bool true_is_continue
   ) const -> std::optional<std::pair<OpCode, Value *>>;
+  auto expression_is_no_wrap(
+    Value *value,
+    const CountedLoopInfo &counted,
+    const Loop &loop,
+    const IntegerRange &range
+  ) const -> bool;
+  auto induction_update_is_no_wrap(
+    const CountedLoopInfo &counted, const IntegerRange &range
+  ) const -> bool;
 };
 
 struct AffineLoopAnalysis {
@@ -58,8 +97,9 @@ struct AffineLoopAnalysis {
   auto run(LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager &am)
     -> Result {
     auto &loops = am.get_result<LoopAnalysis>(func);
+    auto &dom = am.get_result<DominanceAnalysis>(func);
     AffineLoopInfo info;
-    info.compute(func, loops);
+    info.compute(func, loops, dom);
     return info;
   }
 };

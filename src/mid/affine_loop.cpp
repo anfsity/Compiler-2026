@@ -46,14 +46,258 @@ auto is_compare(OpCode code) -> bool {
          code == OpCode::Le || code == OpCode::Gt || code == OpCode::Ge;
 }
 
+auto checked_i64(__int128 value) -> std::optional<int64_t> {
+  if (
+    value < std::numeric_limits<int64_t>::min() ||
+    value > std::numeric_limits<int64_t>::max()
+  ) {
+    return std::nullopt;
+  }
+  return static_cast<int64_t>(value);
+}
+
+auto range_of_form(const AffineForm &form, const IntegerRange &range)
+  -> std::optional<IntegerRange> {
+  if (range.empty())
+    return IntegerRange{0, -1, range.exact};
+
+  auto first = checked_i64(
+    static_cast<__int128>(form.coefficient) * range.minimum + form.offset
+  );
+  auto last = checked_i64(
+    static_cast<__int128>(form.coefficient) * range.maximum + form.offset
+  );
+  if (!first || !last)
+    return std::nullopt;
+  return IntegerRange{
+    std::min(*first, *last), std::max(*first, *last), range.exact
+  };
+}
+
+auto fits_i32(const IntegerRange &range) -> bool {
+  return range.empty() ||
+         (range.minimum >= std::numeric_limits<int32_t>::min() &&
+          range.maximum <= std::numeric_limits<int32_t>::max());
+}
+
 } // namespace
 
-auto AffineLoopInfo::compute(LinearFunction &func, LoopInfo &) -> void {
+auto AffineLoopInfo::compute(
+  LinearFunction &func, LoopInfo &, DomTree &dom_tree
+) -> void {
   op_blocks.clear();
+  dom = &dom_tree;
   for (auto &block : func.blocks) {
     for (auto *op : block->insts)
       op_blocks[op] = block.get();
   }
+}
+
+auto AffineLoopInfo::affine_form(
+  Value *value, const CountedLoopInfo &counted, const Loop &loop
+) const -> std::optional<AffineForm> {
+  if (!value)
+    return std::nullopt;
+  if (value == counted.induction.phi->result)
+    return AffineForm{1, 0};
+  if (auto constant = integer_constant(value))
+    return AffineForm{0, *constant};
+  if (value->kind != ValueKind::OpResult)
+    return std::nullopt;
+
+  auto *creator = static_cast<Op *>(static_cast<OpResult *>(value)->creator);
+  auto block = op_blocks.find(creator);
+  if (
+    !creator || block == op_blocks.end() || !loop.contains(block->second) ||
+    creator->operands.size() != 2 ||
+    (creator->code != OpCode::Add && creator->code != OpCode::Sub &&
+     creator->code != OpCode::Mul)
+  ) {
+    return std::nullopt;
+  }
+
+  auto lhs = affine_form(creator->operands[0], counted, loop);
+  auto rhs = affine_form(creator->operands[1], counted, loop);
+  if (!lhs || !rhs)
+    return std::nullopt;
+
+  std::optional<int64_t> coefficient;
+  std::optional<int64_t> offset;
+  if (creator->code == OpCode::Mul) {
+    if (lhs->coefficient != 0 && rhs->coefficient != 0)
+      return std::nullopt;
+    coefficient = checked_i64(
+      static_cast<__int128>(lhs->coefficient) * rhs->offset +
+      static_cast<__int128>(rhs->coefficient) * lhs->offset
+    );
+    offset = checked_i64(static_cast<__int128>(lhs->offset) * rhs->offset);
+  } else {
+    coefficient = checked_i64(
+      creator->code == OpCode::Add
+        ? static_cast<__int128>(lhs->coefficient) + rhs->coefficient
+        : static_cast<__int128>(lhs->coefficient) - rhs->coefficient
+    );
+    offset = checked_i64(
+      creator->code == OpCode::Add
+        ? static_cast<__int128>(lhs->offset) + rhs->offset
+        : static_cast<__int128>(lhs->offset) - rhs->offset
+    );
+  }
+  if (!coefficient || !offset)
+    return std::nullopt;
+  return AffineForm{*coefficient, *offset};
+}
+
+auto AffineLoopInfo::induction_range(const CountedLoopInfo &loop) const
+  -> std::optional<IntegerRange> {
+  auto initial = integer_constant(loop.induction.initial);
+  if (!initial || loop.induction.step == 0)
+    return std::nullopt;
+
+  auto bound = integer_constant(loop.induction.bound);
+  const auto step = loop.induction.step;
+  int64_t minimum = *initial;
+  int64_t maximum = *initial;
+
+  if (step > 0) {
+    if (
+      loop.induction.predicate != OpCode::Lt &&
+      loop.induction.predicate != OpCode::Le
+    ) {
+      return std::nullopt;
+    }
+    maximum = bound ? static_cast<int64_t>(*bound)
+                    : std::numeric_limits<int32_t>::max();
+    if (loop.induction.predicate == OpCode::Lt)
+      --maximum;
+  } else {
+    if (
+      loop.induction.predicate != OpCode::Gt &&
+      loop.induction.predicate != OpCode::Ge
+    ) {
+      return std::nullopt;
+    }
+    minimum = bound ? static_cast<int64_t>(*bound)
+                    : std::numeric_limits<int32_t>::min();
+    if (loop.induction.predicate == OpCode::Gt)
+      ++minimum;
+  }
+
+  const bool empty = minimum > maximum;
+  const bool exact = bound && (empty || step == 1 || step == -1);
+  return IntegerRange{minimum, maximum, exact};
+}
+
+auto AffineLoopInfo::induction_update_is_no_wrap(
+  const CountedLoopInfo &counted, const IntegerRange &range
+) const -> bool {
+  if (range.empty())
+    return true;
+
+  const auto step = counted.induction.step;
+  if (
+    (step == 1 && counted.induction.predicate == OpCode::Lt) ||
+    (step == -1 && counted.induction.predicate == OpCode::Gt)
+  ) {
+    return true;
+  }
+  if (!integer_constant(counted.induction.bound))
+    return false;
+
+  const auto endpoint = step > 0 ? range.maximum : range.minimum;
+  const auto updated = static_cast<__int128>(endpoint) + step;
+  return updated >= std::numeric_limits<int32_t>::min() &&
+         updated <= std::numeric_limits<int32_t>::max();
+}
+
+auto AffineLoopInfo::expression_is_no_wrap(
+  Value *value,
+  const CountedLoopInfo &counted,
+  const Loop &loop,
+  const IntegerRange &range
+) const -> bool {
+  if (!value)
+    return false;
+  if (value == counted.induction.phi->result || integer_constant(value))
+    return true;
+  if (value->kind != ValueKind::OpResult)
+    return false;
+
+  auto *creator = static_cast<Op *>(static_cast<OpResult *>(value)->creator);
+  auto block = op_blocks.find(creator);
+  if (
+    !creator || block == op_blocks.end() || !loop.contains(block->second) ||
+    creator->operands.size() != 2 ||
+    (creator->code != OpCode::Add && creator->code != OpCode::Sub &&
+     creator->code != OpCode::Mul)
+  ) {
+    return false;
+  }
+  if (
+    !expression_is_no_wrap(creator->operands[0], counted, loop, range) ||
+    !expression_is_no_wrap(creator->operands[1], counted, loop, range)
+  ) {
+    return false;
+  }
+
+  auto form = affine_form(value, counted, loop);
+  auto value_range = form ? range_of_form(*form, range) : std::nullopt;
+  return value_range && fits_i32(*value_range);
+}
+
+auto AffineLoopInfo::is_no_wrap(
+  Value *value, const CountedLoopInfo &counted, const Loop &loop
+) const -> bool {
+  auto range = induction_range(counted);
+  auto initial = integer_constant(counted.induction.initial);
+  if (!range || !initial || !induction_update_is_no_wrap(counted, *range))
+    return false;
+
+  // Some consumers materialize the initial affine expression in a preheader.
+  // Keep the shared query safe for them even when the loop body never runs.
+  auto evaluation_range =
+    range->empty() ? IntegerRange{*initial, *initial, true} : *range;
+  return affine_form(value, counted, loop) &&
+         expression_is_no_wrap(value, counted, loop, evaluation_range);
+}
+
+auto AffineLoopInfo::is_non_negative(
+  Value *value, const CountedLoopInfo &counted, const Loop &loop
+) const -> bool {
+  if (!is_no_wrap(value, counted, loop))
+    return false;
+  auto range = induction_range(counted);
+  auto initial = integer_constant(counted.induction.initial);
+  auto form = affine_form(value, counted, loop);
+  if (!range || !initial || !form)
+    return false;
+  auto evaluation_range =
+    range->empty() ? IntegerRange{*initial, *initial, true} : *range;
+  auto value_range = range_of_form(*form, evaluation_range);
+  return value_range && !value_range->empty() && value_range->minimum >= 0;
+}
+
+auto AffineLoopInfo::is_available_at_preheader(
+  Value *value, Block *preheader
+) const -> bool {
+  if (!value || !preheader)
+    return false;
+  if (value->kind != ValueKind::OpResult)
+    return true;
+
+  auto *creator = static_cast<Op *>(static_cast<OpResult *>(value)->creator);
+  auto block = op_blocks.find(creator);
+  if (!creator || block == op_blocks.end())
+    return false;
+  auto *definition = block->second;
+  if (definition != preheader)
+    return dom && dom->dominate(definition, preheader);
+  if (preheader->insts.empty())
+    return false;
+
+  auto insertion_point = std::prev(preheader->insts.end());
+  return std::find(preheader->insts.begin(), insertion_point, creator) !=
+         insertion_point;
 }
 
 auto AffineLoopInfo::integer_constant(Value *value) -> std::optional<int32_t> {

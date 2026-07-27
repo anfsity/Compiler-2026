@@ -1,11 +1,12 @@
 #pragma once
 
-#include "../../mid/ir.hpp"
+#include "../../mid/affine_loop.hpp"
 #include "../../mid/rewriter.hpp"
 #include "../AnalysisManager.hpp"
 #include <functional>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace exodus::mid_ir::opt {
@@ -15,6 +16,7 @@ struct CombineContext {
   LinearFunction *function = nullptr;
   Block *block = nullptr;
   Op *op = nullptr;
+  bool affine_non_negative = false;
 };
 
 struct CombineResult {
@@ -53,6 +55,7 @@ class InstCombine {
   MidModule *module;
   MidIRRewriter rewriter;
   CombineRuleSet rules;
+  std::unordered_set<Op *> affine_non_negative_mods;
 
 public:
   explicit InstCombine(MidModule *m);
@@ -61,6 +64,9 @@ public:
     -> exodus::opt::PreservedAnalysis;
 
 private:
+  auto collect_affine_mod_proofs(
+    LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager &am
+  ) -> void;
   auto combine_block(LinearFunction &func, Block &block) -> bool;
   auto
   apply(Block &block, std::list<Op *>::iterator it, const CombineResult &result)
