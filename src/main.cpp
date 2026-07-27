@@ -16,6 +16,7 @@
 #include "low/riscv/isel.hpp"
 #include "low/riscv/machine_printer.hpp"
 #include "low/riscv/reg_alloca.hpp"
+#include "mid/affine_loop.hpp"
 #include "mid/dom.hpp"
 #include "mid/flatten.hpp"
 #include "mid/ir_printer.hpp"
@@ -222,6 +223,7 @@ private:
     LinearFunctionAnalysisManager lfam;
     lfam.register_pass<DominanceAnalysis>();
     lfam.register_pass<LoopAnalysis>();
+    lfam.register_pass<AffineLoopAnalysis>();
 
     auto instrumentation = [&](const std::string &name, const auto &unit) {
       this->instrument(name, unit);
