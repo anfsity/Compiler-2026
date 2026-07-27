@@ -6,6 +6,7 @@
 #include "inliner.hpp"
 #include "inst_simplify.hpp"
 #include "ipcp.hpp"
+#include "local_array_loop_specialize.hpp"
 #include "loop_recurrence_simplify.hpp"
 #include "loop_unswitch.hpp"
 #include "memoization.hpp"
@@ -46,6 +47,12 @@ static exodus::opt::RegisterFunctionPass<ReturnInsertion> reg_return_insertion(
 static exodus::opt::RegisterFunctionPass<LoopUnswitch> reg_loop_unswitch(
   "loop_unswitch", "unswitch proven invariant branches in small loops"
 );
+
+static exodus::opt::RegisterFunctionPass<LocalArrayLoopSpecialize>
+  reg_local_array_loop_specialize(
+    "local_array_loop_specialize",
+    "specialize counted loops from proven local-array values"
+  );
 
 static exodus::opt::RegisterFunctionPass<CP>
   reg_const_prop("const_prop", "constant propagation");

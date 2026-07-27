@@ -24,6 +24,7 @@
 #include "opt/AnalysisManager.hpp"
 #include "opt/PassBuilder.hpp"
 #include "opt/PassManager.hpp"
+#include "opt/high/local_array_summary.hpp"
 #include "opt/mid/dead_function_elimination.hpp"
 
 using namespace exodus::ast;
@@ -160,6 +161,7 @@ private:
   auto run_high_opt() -> void {
     PassBuilder pb(module.get());
     FunctionAnalysisManager fam;
+    fam.register_pass<exodus::high_ir::opt::LocalArraySummaryAnalysis>();
     ModuleAnalysisManager mam;
 
     auto instrumentation = [&](const std::string &name, const auto &unit) {
