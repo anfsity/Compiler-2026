@@ -10,6 +10,7 @@
 #include "loop_recurrence_simplify.hpp"
 #include "loop_unswitch.hpp"
 #include "memoization.hpp"
+#include "pure_call_loop_sink.hpp"
 #include "region_simplify.hpp"
 #include "return_insertion.hpp"
 #include "sdce.hpp"
@@ -27,6 +28,12 @@ static exodus::opt::RegisterModulePass<GlobalInitPromotion>
 static exodus::opt::RegisterModulePass<IdempotentLoopSimplify>
   reg_idempotent_loop_simplify(
     "idempotent_loop_simplify", "collapse proven idempotent counted loops"
+  );
+
+static exodus::opt::RegisterModulePass<PureCallLoopSink>
+  reg_pure_call_loop_sink(
+    "pure_call_loop_sink",
+    "sink pure last-iteration calls out of guarded countdown loops"
   );
 
 static exodus::opt::RegisterModulePass<Inliner>
