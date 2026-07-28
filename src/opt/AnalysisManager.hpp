@@ -72,9 +72,16 @@ template <typename IRUnitT>
 struct AnalysisManager {
   template <typename PassT>
   auto register_pass() -> void {
-    generators[typeid(PassT)] = [](IRUnitT &ir, AnalysisManager &am) {
-      return AnalysisResult(PassT{}, PassT{}.run(ir, am));
-    };
+    register_pass(PassT{});
+  }
+
+  template <typename PassT>
+  auto register_pass(PassT pass) -> void {
+    generators[typeid(PassT)] =
+      [pass](IRUnitT &ir, AnalysisManager &am) mutable {
+        auto result = pass.run(ir, am);
+        return AnalysisResult(pass, std::move(result));
+      };
   }
 
   template <typename PassT>

@@ -17,12 +17,156 @@ auto LoopSimplify::run(
       changed |= create_preheader(func, *loop);
   }
 
+  if (!changed) {
+    for (auto *loop : loop_info.get_loops_innermost_first()) {
+      if (loop->get_back_edges().size() > 1) {
+        changed = create_single_latch(func, *loop);
+        break;
+      }
+    }
+  }
+
   if (!changed)
     return exodus::opt::PreservedAnalysis::all();
 
   renumber_blocks(func);
   rebuild_cfg(func);
   return exodus::opt::PreservedAnalysis::none();
+}
+
+auto LoopSimplify::create_single_latch(LinearFunction &func, Loop &loop)
+  -> bool {
+  auto *header = loop.get_header();
+  if (!header || loop.get_back_edges().size() < 2)
+    return false;
+
+  std::vector<Block *> backedge_blocks;
+  for (const auto &[source, sink] : loop.get_back_edges()) {
+    if (
+      sink != header ||
+      std::find(backedge_blocks.begin(), backedge_blocks.end(), source) !=
+        backedge_blocks.end()
+    ) {
+      continue;
+    }
+    backedge_blocks.push_back(source);
+  }
+  if (backedge_blocks.size() < 2)
+    return false;
+
+  auto header_it = std::find_if(
+    func.blocks.begin(),
+    func.blocks.end(),
+    [header](const std::unique_ptr<Block> &block) {
+      return block.get() == header;
+    }
+  );
+  if (header_it == func.blocks.end())
+    return false;
+
+  auto latch_ptr = std::make_unique<Block>(
+    static_cast<int>(func.blocks.size()), header->name + "_latch"
+  );
+  auto *latch = latch_ptr.get();
+  func.blocks.insert(header_it, std::move(latch_ptr));
+
+  std::unordered_set<Block *> backedge_set(
+    backedge_blocks.begin(), backedge_blocks.end()
+  );
+  for (auto *block : backedge_blocks) {
+    if (block->insts.empty())
+      return false;
+    auto *terminator = block->insts.back();
+    bool retargeted = false;
+    for (auto *&successor : terminator->successors) {
+      if (successor == header) {
+        successor = latch;
+        retargeted = true;
+      }
+    }
+    if (!retargeted)
+      return false;
+  }
+
+  for (auto *phi : header->insts) {
+    if (phi->code != OpCode::Phi)
+      break;
+    const auto incoming = std::get<PhiPayload>(phi->payload).incoming;
+    std::vector<std::pair<Block *, Value *>> backedge_incoming;
+    std::vector<std::pair<Block *, Value *>> header_incoming;
+    for (const auto &entry : incoming) {
+      if (backedge_set.count(entry.first))
+        backedge_incoming.push_back(entry);
+      else
+        header_incoming.push_back(entry);
+    }
+    if (backedge_incoming.size() != backedge_blocks.size())
+      return false;
+
+    Value *latch_value = backedge_incoming.front().second;
+    const bool all_same = std::all_of(
+      backedge_incoming.begin(),
+      backedge_incoming.end(),
+      [latch_value](const auto &entry) { return entry.second == latch_value; }
+    );
+    if (!all_same) {
+      Op *representative = nullptr;
+      bool identical_update = true;
+      for (const auto &[block, value] : backedge_incoming) {
+        (void)block;
+        if (!value || value->kind != ValueKind::OpResult) {
+          identical_update = false;
+          break;
+        }
+        auto *candidate =
+          static_cast<Op *>(static_cast<OpResult *>(value)->creator);
+        if (
+          !candidate || !candidate->result || candidate->operands.size() != 2 ||
+          (candidate->code != OpCode::Add && candidate->code != OpCode::Sub)
+        ) {
+          identical_update = false;
+          break;
+        }
+        if (!representative) {
+          representative = candidate;
+          continue;
+        }
+        if (
+          candidate->code != representative->code ||
+          candidate->operands != representative->operands
+        ) {
+          identical_update = false;
+          break;
+        }
+      }
+
+      if (identical_update) {
+        auto *update = module->make_op(representative->code);
+        update->operands = representative->operands;
+        for (auto *operand : update->operands)
+          operand->addUse(update);
+        update->result = module->ctx->make_value<OpResult>(
+          representative->result->type, update
+        );
+        latch->insts.push_back(update);
+        latch_value = update->result;
+      } else {
+        auto *latch_phi = module->make_op(OpCode::Phi, PhiPayload{});
+        latch_phi->result =
+          module->ctx->make_value<OpResult>(phi->result->type, latch_phi);
+        reset_phi_incoming(latch_phi, backedge_incoming);
+        latch->insts.push_back(latch_phi);
+        latch_value = latch_phi->result;
+      }
+    }
+    header_incoming.push_back({latch, latch_value});
+    reset_phi_incoming(phi, std::move(header_incoming));
+  }
+
+  auto *jump = module->make_op(OpCode::Jump);
+  jump->successors.push_back(header);
+  latch->insts.push_back(jump);
+  return true;
 }
 
 auto LoopSimplify::create_preheader(LinearFunction &func, Loop &loop) -> bool {
