@@ -34,3 +34,4 @@ bin/
 *.o
 compiler2025/
 compiler2026/
+docs/performance

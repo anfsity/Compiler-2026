@@ -250,8 +250,12 @@ auto LoopStrengthReduce::reduce_getptrs(LinearFunction &func, const Loop &loop)
   std::vector<Op *> candidates;
   for (auto *block : loop.get_blocks()) {
     for (auto *op : block->insts) {
-      if (op->code == OpCode::GetPtr)
+      if (
+        op->code == OpCode::GetPtr && op->result && op->operands.size() >= 2 &&
+        op->operands[0]->type->is_ptr() && op->result->type->is_ptr()
+      ) {
         candidates.push_back(op);
+      }
     }
   }
 
@@ -259,11 +263,130 @@ auto LoopStrengthReduce::reduce_getptrs(LinearFunction &func, const Loop &loop)
   rewriter.set_scope(func);
   bool changed = false;
   std::unordered_map<Value *, Value *> cache;
+  struct FormedRecurrence {
+    std::vector<Value *> operands;
+    std::shared_ptr<Type> result_type;
+    Value *value = nullptr;
+  };
+  std::vector<FormedRecurrence> formed;
+  bool formed_implicit_slot_recurrence = false;
   for (auto *getptr : candidates) {
-    changed |= reduce_getptr(getptr, loop, *counted, rewriter, cache);
+    auto duplicate = std::find_if(
+      formed.begin(), formed.end(), [&](const FormedRecurrence &recurrence) {
+        return recurrence.operands == getptr->operands &&
+               recurrence.result_type == getptr->result->type;
+      }
+    );
+    if (duplicate != formed.end()) {
+      rewriter.replace_all_uses_with(getptr->result, duplicate->value);
+      rewriter.eraseOp(getptr);
+      op_blocks.erase(getptr);
+      changed = true;
+      continue;
+    }
+
+    auto plan = ir::analyze_getptr(
+      getptr->operands[0]->type,
+      getptr->result->type,
+      getptr->operands.size() - 1
+    );
+    const bool reads_immutable_slot =
+      plan.reads_memory &&
+      immutable_local_pointer_slot(getptr->operands[0], loop.get_preheader());
+    const bool has_identical_candidate =
+      std::any_of(candidates.begin(), candidates.end(), [&](Op *other) {
+        return other != getptr && other->result &&
+               other->operands == getptr->operands &&
+               other->result->type == getptr->result->type;
+      });
+    if (
+      reads_immutable_slot &&
+      (formed_implicit_slot_recurrence || !has_identical_candidate)
+    )
+      continue;
+
+    Value *replacement = nullptr;
+    if (!reduce_getptr(getptr, loop, *counted, rewriter, cache, &replacement)) {
+      continue;
+    }
+    formed.push_back({getptr->operands, getptr->result->type, replacement});
+    formed_implicit_slot_recurrence |= reads_immutable_slot;
+    changed = true;
   }
   rewriter.finalize(func);
   return changed;
+}
+
+auto LoopStrengthReduce::immutable_local_pointer_slot(
+  Value *base, Block *preheader
+) const -> bool {
+  if (
+    !base || base->kind != ValueKind::OpResult || !base->type->is_ptr() ||
+    !preheader
+  ) {
+    return false;
+  }
+
+  auto *alloca = static_cast<Op *>(static_cast<OpResult *>(base)->creator);
+  auto alloca_block = op_blocks.find(alloca);
+  if (
+    !alloca || alloca->code != OpCode::Alloca || !alloca->result ||
+    alloca->result != base || alloca_block == op_blocks.end() || !dom ||
+    !dom->dominate(alloca_block->second, preheader)
+  ) {
+    return false;
+  }
+
+  auto stored_type = std::static_pointer_cast<Ptr>(base->type)->target;
+  if (!stored_type || !stored_type->is_ptr())
+    return false;
+
+  Op *initial_store = nullptr;
+  for (const auto &[user, block] : op_blocks) {
+    (void)block;
+    if (user->code == OpCode::Phi) {
+      const auto &incoming = std::get<PhiPayload>(user->payload).incoming;
+      if (std::any_of(incoming.begin(), incoming.end(), [&](const auto &edge) {
+            return edge.second == base;
+          })) {
+        return false;
+      }
+      continue;
+    }
+    const bool uses_base =
+      std::find(user->operands.begin(), user->operands.end(), base) !=
+      user->operands.end();
+    if (!uses_base)
+      continue;
+    if (
+      user->code == OpCode::Store && user->operands.size() == 2 &&
+      user->operands[1] == base
+    ) {
+      if (
+        initial_store || !user->operands[0] ||
+        user->operands[0]->type != stored_type
+      ) {
+        return false;
+      }
+      initial_store = user;
+      continue;
+    }
+    if (
+      user->code != OpCode::GetPtr || user->operands.empty() ||
+      user->operands[0] != base
+    ) {
+      return false;
+    }
+  }
+  if (!initial_store)
+    return false;
+
+  auto store_block = op_blocks.find(initial_store);
+  return store_block != op_blocks.end() &&
+         dom->dominate(store_block->second, preheader) &&
+         affine_loops->is_available_at_preheader(
+           initial_store->operands[0], preheader
+         );
 }
 
 auto LoopStrengthReduce::reduce_getptr(
@@ -271,8 +394,11 @@ auto LoopStrengthReduce::reduce_getptr(
   const Loop &loop,
   const CountedLoopInfo &counted,
   MidIRRewriter &rewriter,
-  std::unordered_map<Value *, Value *> &cache
+  std::unordered_map<Value *, Value *> &cache,
+  Value **replacement
 ) -> bool {
+  if (replacement)
+    *replacement = nullptr;
   const auto &induction = counted.induction;
   if (
     !getptr->result || getptr->operands.size() < 2 ||
@@ -298,11 +424,46 @@ auto LoopStrengthReduce::reduce_getptr(
   auto plan = ir::analyze_getptr(
     getptr->operands[0]->type, getptr->result->type, index_count
   );
+  const bool reads_immutable_slot =
+    plan.reads_memory &&
+    immutable_local_pointer_slot(getptr->operands[0], preheader);
+  bool has_non_store_use = false;
+  if (reads_immutable_slot) {
+    for (const auto &[user, block] : op_blocks) {
+      (void)block;
+      bool uses_result =
+        std::find(
+          user->operands.begin(), user->operands.end(), getptr->result
+        ) != user->operands.end();
+      if (!uses_result)
+        continue;
+      if (
+        user->code != OpCode::Store || user->operands.size() != 2 ||
+        user->operands[1] != getptr->result
+      ) {
+        has_non_store_use = true;
+        break;
+      }
+    }
+  }
   if (
-    plan.reads_memory || plan.steps.size() != index_count ||
-    std::any_of(plan.steps.begin(), plan.steps.end(), [](const auto &step) {
-      return step.kind != ir::GetPtrStep::Kind::Index;
-    })
+    (plan.reads_memory && !reads_immutable_slot) ||
+    (reads_immutable_slot && !has_non_store_use) ||
+    std::count_if(
+      plan.steps.begin(),
+      plan.steps.end(),
+      [](const auto &step) { return step.kind == ir::GetPtrStep::Kind::Index; }
+    ) != static_cast<std::ptrdiff_t>(index_count) ||
+    std::count_if(
+      plan.steps.begin(),
+      plan.steps.end(),
+      [](const auto &step) {
+        return step.kind == ir::GetPtrStep::Kind::ImplicitLoad;
+      }
+    ) != static_cast<std::ptrdiff_t>(reads_immutable_slot ? 1 : 0) ||
+    (reads_immutable_slot &&
+     (plan.steps.empty() ||
+      plan.steps.front().kind != ir::GetPtrStep::Kind::ImplicitLoad))
   ) {
     return false;
   }
@@ -312,6 +473,12 @@ auto LoopStrengthReduce::reduce_getptr(
   int varying_scale = 0;
   unsigned original_cost = 0;
   for (const auto &step : plan.steps) {
+    if (step.kind == ir::GetPtrStep::Kind::ImplicitLoad) {
+      // The immutable pointer slot is loaded once in the recurrence preheader
+      // instead of once per source GetPtr execution.
+      ++original_cost;
+      continue;
+    }
     if (step.index_pos >= index_count || step.scale <= 0)
       return false;
     auto *index = getptr->operands[step.index_pos + 1];
@@ -465,6 +632,8 @@ auto LoopStrengthReduce::reduce_getptr(
   rewriter.replace_all_uses_with(getptr->result, pointer_phi->result);
   rewriter.eraseOp(getptr);
   op_blocks.erase(getptr);
+  if (replacement)
+    *replacement = pointer_phi->result;
   return true;
 }
 

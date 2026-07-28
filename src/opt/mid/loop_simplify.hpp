@@ -18,6 +18,7 @@ private:
   MidModule *module;
 
   auto create_preheader(LinearFunction &func, Loop &loop) -> bool;
+  auto create_single_latch(LinearFunction &func, Loop &loop) -> bool;
   auto rewrite_header_phis(
     Block *header,
     Block *preheader,

@@ -10,6 +10,7 @@
 #include "loop_strength_reduce.hpp"
 #include "loop_unroll.hpp"
 #include "mem2reg.hpp"
+#include "polyhedral_opt.hpp"
 #include "tail_recursion_elim.hpp"
 
 namespace exodus::mid_ir::opt {
@@ -34,6 +35,12 @@ static exodus::opt::RegisterLinearFunctionPass<LICM>
 
 static exodus::opt::RegisterLinearFunctionPass<GVN>
   reg_gvn("gvn", "global value numbering");
+
+static exodus::opt::RegisterLinearFunctionPass<DCE>
+  reg_early_dce("early_dce", "remove dead SSA before loop scheduling");
+
+static exodus::opt::RegisterLinearFunctionPass<PolyhedralOpt>
+  reg_polyhedral_opt("polyhedral_opt", "proof-gated affine loop scheduling");
 
 static exodus::opt::RegisterLinearFunctionPass<LoopStrengthReduce>
   reg_loop_strength_reduce(

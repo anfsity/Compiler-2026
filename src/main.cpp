@@ -1,4 +1,3 @@
-#include <cstdio>
 #include <fstream>
 #include <functional>
 #include <memory>
@@ -26,6 +25,8 @@
 #include "opt/PassManager.hpp"
 #include "opt/high/local_array_summary.hpp"
 #include "opt/mid/dead_function_elimination.hpp"
+#include "opt/mid/polyhedral.hpp"
+#include "opt/mid/scalar_evolution.hpp"
 
 using namespace exodus::ast;
 using namespace exodus::high_ir;
@@ -239,6 +240,8 @@ private:
     lfam.register_pass<DominanceAnalysis>();
     lfam.register_pass<LoopAnalysis>();
     lfam.register_pass<AffineLoopAnalysis>();
+    lfam.register_pass<ScalarEvolutionAnalysis>();
+    lfam.register_pass(PolyhedralAnalysis{mid_module.get()});
 
     auto instrumentation = [&](const std::string &name, const auto &unit) {
       this->instrument(name, unit);
