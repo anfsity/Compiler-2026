@@ -50,8 +50,12 @@ private:
     const Loop &loop,
     const CountedLoopInfo &counted,
     MidIRRewriter &rewriter,
-    std::unordered_map<Value *, Value *> &cache
+    std::unordered_map<Value *, Value *> &cache,
+    Value **replacement
   ) -> bool;
+
+  auto immutable_local_pointer_slot(Value *base, Block *preheader) const
+    -> bool;
 
   auto is_clonable_expression(const Op &op, const Loop &loop) const -> bool;
 };
