@@ -575,7 +575,14 @@ auto PolyhedralOpt::prepare_reduction(
       outer->induction.phi->result,
       inner->induction.phi->result
     );
-    if (!output_strides || output_strides->second != 0)
+    // Scalar expansion is valid only when each outer iteration owns a
+    // distinct output element.  A zero outer byte stride would merge all
+    // reductions into one location before scheduling, even if interchange is
+    // later rejected by the dependence analysis.
+    if (
+      !output_strides || output_strides->first == 0 ||
+      output_strides->second != 0
+    )
       continue;
 
     auto output_location = alias.get_location(output_getptr->result);
