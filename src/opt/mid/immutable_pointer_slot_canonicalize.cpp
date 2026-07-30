@@ -1,0 +1,223 @@
+#include "immutable_pointer_slot_canonicalize.hpp"
+
+#include <algorithm>
+
+namespace exodus::mid_ir::opt {
+
+auto ImmutablePointerSlotCanonicalize::run(
+  LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager &am
+) -> exodus::opt::PreservedAnalysis {
+  if (func.blocks.empty())
+    return exodus::opt::PreservedAnalysis::all();
+
+  auto &dom = am.get_result<DominanceAnalysis>(func);
+  build_scope(func);
+
+  std::vector<Candidate> candidates;
+  for (auto &block : func.blocks) {
+    for (auto *op : block->insts) {
+      if (op->code != OpCode::Alloca)
+        continue;
+      if (auto candidate = collect_candidate(op, dom))
+        candidates.push_back(std::move(*candidate));
+    }
+  }
+
+  if (candidates.empty()) {
+    op_blocks.clear();
+    scope.clear();
+    return exodus::opt::PreservedAnalysis::all();
+  }
+
+  MidIRRewriter rewriter;
+  rewriter.set_scope(func);
+  for (const auto &candidate : candidates) {
+    for (auto *getptr : candidate.getptrs) {
+      auto *old_base = getptr->operands[0];
+      getptr->operands[0] = candidate.stored_pointer;
+      candidate.stored_pointer->addUse(getptr);
+      old_base->rmUse(getptr);
+    }
+    rewriter.eraseOp(candidate.store);
+    rewriter.eraseOp(candidate.alloca);
+  }
+  rewriter.finalize(func);
+
+  op_blocks.clear();
+  scope.clear();
+  return exodus::opt::PreservedAnalysis::none();
+}
+
+auto ImmutablePointerSlotCanonicalize::build_scope(LinearFunction &func)
+  -> void {
+  op_blocks.clear();
+  scope.clear();
+  for (auto &block : func.blocks) {
+    for (auto *op : block->insts) {
+      op_blocks[op] = block.get();
+      scope.insert(op);
+    }
+  }
+}
+
+auto ImmutablePointerSlotCanonicalize::dominates(
+  Op *definition, Op *use, DomTree &dom
+) const -> bool {
+  auto definition_block = op_blocks.find(definition);
+  auto use_block = op_blocks.find(use);
+  if (
+    !definition || !use || definition_block == op_blocks.end() ||
+    use_block == op_blocks.end()
+  ) {
+    return false;
+  }
+  if (definition_block->second != use_block->second)
+    return dom.dominate(definition_block->second, use_block->second);
+
+  for (auto *op : definition_block->second->insts) {
+    if (op == definition)
+      return true;
+    if (op == use)
+      return false;
+  }
+  return false;
+}
+
+auto ImmutablePointerSlotCanonicalize::collect_candidate(
+  Op *alloca, DomTree &dom
+) const -> std::optional<Candidate> {
+  if (
+    !alloca || !alloca->result || !alloca->result->type ||
+    !alloca->result->type->is_ptr()
+  ) {
+    return std::nullopt;
+  }
+
+  auto stored_type =
+    std::static_pointer_cast<Ptr>(alloca->result->type)->target;
+  if (!stored_type || !stored_type->is_ptr())
+    return std::nullopt;
+
+  Candidate candidate;
+  candidate.alloca = alloca;
+  std::unordered_set<Op *> seen_users;
+  for (auto *user_base : alloca->result->users) {
+    auto *user = static_cast<Op *>(user_base);
+    // High and Mid IR share Value objects during flattening, so the use list
+    // also contains upstream High IR operations.  Only Mid operations in this
+    // function are part of the escape proof.
+    if (!user || !scope.count(user))
+      continue;
+    if (!seen_users.insert(user).second)
+      continue;
+
+    const auto occurrences = static_cast<size_t>(
+      std::count(user->operands.begin(), user->operands.end(), alloca->result)
+    );
+    if (
+      user->code == OpCode::Store && user->operands.size() == 2 &&
+      user->operands[1] == alloca->result && occurrences == 1
+    ) {
+      if (
+        candidate.store || !user->operands[0] ||
+        user->operands[0]->type != stored_type
+      ) {
+        return std::nullopt;
+      }
+      candidate.store = user;
+      candidate.stored_pointer = user->operands[0];
+      continue;
+    }
+
+    if (
+      user->code != OpCode::GetPtr || user->operands.size() < 2 ||
+      user->operands[0] != alloca->result || occurrences != 1
+    ) {
+      return std::nullopt;
+    }
+    candidate.getptrs.push_back(user);
+  }
+
+  if (
+    !candidate.store || !candidate.stored_pointer ||
+    candidate.getptrs.empty() || !dominates(alloca, candidate.store, dom)
+  ) {
+    return std::nullopt;
+  }
+  if (candidate.stored_pointer->kind == ValueKind::OpResult) {
+    auto *definition = static_cast<Op *>(
+      static_cast<OpResult *>(candidate.stored_pointer)->creator
+    );
+    if (
+      !definition || !scope.count(definition) ||
+      !dominates(definition, candidate.store, dom)
+    ) {
+      return std::nullopt;
+    }
+  }
+
+  for (auto *getptr : candidate.getptrs) {
+    if (
+      !dominates(alloca, getptr, dom) ||
+      !dominates(candidate.store, getptr, dom) ||
+      !preserves_getptr_plan(getptr, candidate.stored_pointer)
+    ) {
+      return std::nullopt;
+    }
+  }
+  return candidate;
+}
+
+auto ImmutablePointerSlotCanonicalize::preserves_getptr_plan(
+  Op *getptr, Value *replacement
+) -> bool {
+  if (
+    !getptr || !getptr->result || !getptr->result->type || !replacement ||
+    !replacement->type
+  )
+    return false;
+  const auto *payload = std::get_if<GetPtrPayload>(&getptr->payload);
+  if (
+    !payload || !payload->layout_type ||
+    replacement->type != payload->layout_type
+  ) {
+    return false;
+  }
+
+  auto before = mid_ir::analyze_getptr(*getptr);
+  const auto implicit_loads = std::count_if(
+    before.steps.begin(), before.steps.end(), [](const ir::GetPtrStep &step) {
+      return step.kind == ir::GetPtrStep::Kind::ImplicitLoad;
+    }
+  );
+  if (
+    !before.valid || !before.reads_memory || implicit_loads != 1 ||
+    before.steps.empty() ||
+    before.steps.front().kind != ir::GetPtrStep::Kind::ImplicitLoad
+  ) {
+    return false;
+  }
+
+  auto after = ir::analyze_getptr_with_layout(
+    replacement->type,
+    payload->layout_type,
+    getptr->result->type,
+    getptr->operands.size() - 1
+  );
+  if (
+    !after.valid || after.reads_memory ||
+    before.steps.size() != after.steps.size() + 1 ||
+    !ir::same_getptr_byte_offset_plan(before, after)
+  ) {
+    return false;
+  }
+  return std::equal(
+    std::next(before.steps.begin()),
+    before.steps.end(),
+    after.steps.begin(),
+    after.steps.end(),
+    ir::same_getptr_step
+  );
+}
+
+} // namespace exodus::mid_ir::opt

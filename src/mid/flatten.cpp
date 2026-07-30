@@ -1,5 +1,7 @@
 #include "flatten.hpp"
 
+#include "getptr.hpp"
+
 namespace exodus::mid_ir {
 namespace {
 auto convert_opcode(high_ir::OpCode old_code) -> OpCode {
@@ -67,6 +69,8 @@ auto Flattener::convert_op(high_ir::Op *old_op) -> Op * {
   if (old_op->code == high_ir::OpCode::Call) {
     const auto &payload = std::get<high_ir::CallPayload>(old_op->payload);
     new_op->payload = CallPayload{payload.func_name};
+  } else if (old_op->code == high_ir::OpCode::GetPtr) {
+    new_op->payload = default_getptr_payload(old_op->operands.front());
   }
   return new_op;
 }

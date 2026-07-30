@@ -1,6 +1,6 @@
 #include "memory.hpp"
 
-#include "../base/getptr.hpp"
+#include "getptr.hpp"
 #include <limits>
 
 namespace exodus::mid_ir {
@@ -113,12 +113,7 @@ auto BasicAliasAnalysis::get_location_impl(
                      incoming_op->result &&
                      incoming_op->operands[0]->type->is_ptr() &&
                      incoming_op->result->type->is_ptr() &&
-                     !ir::analyze_getptr(
-                        incoming_op->operands[0]->type,
-                        incoming_op->result->type,
-                        incoming_op->operands.size() - 1
-                     )
-                        .reads_memory;
+                     !analyze_getptr(*incoming_op).reads_memory;
       }
       if (recurrence) {
         has_recurrence = true;
@@ -152,12 +147,8 @@ auto BasicAliasAnalysis::get_location_impl(
     return finish(location);
   }
 
-  auto plan = ir::analyze_getptr(
-    creator->operands[0]->type,
-    creator->result->type,
-    creator->operands.size() - 1
-  );
-  if (plan.reads_memory)
+  auto plan = analyze_getptr(*creator);
+  if (!plan.valid || plan.reads_memory)
     return finish(location);
 
   auto base = get_location_impl(creator->operands[0], size, active);

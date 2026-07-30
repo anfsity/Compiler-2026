@@ -1,6 +1,6 @@
 #include "loop_idiom_recognize.hpp"
 
-#include "../../base/getptr.hpp"
+#include "../../mid/getptr.hpp"
 #include "../../mid/memory.hpp"
 #include "../../mid/rewriter.hpp"
 #include <algorithm>
@@ -105,16 +105,12 @@ auto LoopIdiomRecognize::match_contiguous_pointer(
         return false;
       }
     }
-    auto plan = ir::analyze_getptr(
-      definition->operands[0]->type,
-      definition->result->type,
-      definition->operands.size() - 1
-    );
+    auto plan = mid_ir::analyze_getptr(*definition);
     // An implicit pointer load must remain live across the memset call and can
     // force the array arguments into callee-saved registers.  Keep this first
     // idiom deliberately limited to pure address formation; a later lowering
     // can revisit pointer-slot loads together with call/pressure costs.
-    if (plan.reads_memory)
+    if (!plan.valid || plan.reads_memory)
       return false;
     auto element_type = std::static_pointer_cast<Ptr>(pointer->type)->target;
     if (!element_type)
@@ -189,10 +185,10 @@ auto LoopIdiomRecognize::match_contiguous_pointer(
   ) {
     return false;
   }
-  auto plan =
-    ir::analyze_getptr(update->operands[0]->type, update->result->type, 1);
+  auto plan = mid_ir::analyze_getptr(*update);
   auto element_type = std::static_pointer_cast<Ptr>(pointer->type)->target;
-  return !plan.reads_memory && plan.steps.size() == 1 && element_type &&
+  return plan.valid && !plan.reads_memory && plan.steps.size() == 1 &&
+         element_type &&
          plan.steps.front().kind == ir::GetPtrStep::Kind::Index &&
          plan.steps.front().scale == element_type->byte_size();
 }
@@ -311,12 +307,8 @@ auto LoopIdiomRecognize::replace_single_store_loop(const Loop &loop) -> bool {
         !op->operands[0]->type->is_ptr() || !op->result->type->is_ptr()
       )
         return false;
-      if (
-        ir::analyze_getptr(
-          op->operands[0]->type, op->result->type, op->operands.size() - 1
-        )
-          .reads_memory
-      ) {
+      auto plan = mid_ir::analyze_getptr(*op);
+      if (!plan.valid || plan.reads_memory) {
         return false;
       }
     }
@@ -399,12 +391,12 @@ auto LoopIdiomRecognize::memory_accesses_are_independent(
         continue;
       if (
         !op->result || op->operands.empty() ||
-        !op->operands[0]->type->is_ptr() || !op->result->type->is_ptr() ||
-        ir::analyze_getptr(
-          op->operands[0]->type, op->result->type, op->operands.size() - 1
-        )
-          .reads_memory
+        !op->operands[0]->type->is_ptr() || !op->result->type->is_ptr()
       ) {
+        return false;
+      }
+      auto plan = mid_ir::analyze_getptr(*op);
+      if (!plan.valid || plan.reads_memory) {
         return false;
       }
     }

@@ -1,7 +1,9 @@
 #include "inliner.hpp"
 
 #include "../../mid/dom.hpp"
+#include "../../mid/getptr.hpp"
 #include "../../mid/loop.hpp"
+#include "../../mid/memory.hpp"
 #include "../../mid/rewriter.hpp"
 #include <algorithm>
 #include <iterator>
@@ -52,7 +54,7 @@ auto Inliner::run(
         continue;
       auto callee_cost = cost(*callee);
       if (
-        !should_inline(func, *callee, callee_cost, loop_depth) ||
+        !should_inline(func, *callee, *call, callee_cost, loop_depth) ||
         !validate_callee(*callee, *call)
       ) {
         continue;
@@ -156,7 +158,8 @@ auto Inliner::cost(LinearFunction &func) const -> Cost {
 
 auto Inliner::should_inline(
   const LinearFunction &caller,
-  const LinearFunction &callee,
+  LinearFunction &callee,
+  const Op &call,
   const Cost &callee_cost,
   unsigned loop_depth
 ) const -> bool {
@@ -188,6 +191,11 @@ auto Inliner::should_inline(
                  callee_cost.calls * 10 + callee_cost.writes * 2 +
                  callee_cost.allocas * 6 + callee_cost.loops * 28 +
                  callee_cost.max_loop_depth * 8;
+  if (callee_cost.calls == 0 && exposes_noalias_specialization(callee, call)) {
+    const auto loop_penalty =
+      callee_cost.loops * 28 + callee_cost.max_loop_depth * 8;
+    score -= std::min(score, loop_penalty);
+  }
   size_t threshold = 52;
   if (loop_depth > 0)
     threshold += 64 + std::min<unsigned>(loop_depth - 1, 2) * 12;
@@ -213,6 +221,101 @@ auto Inliner::should_inline(
     threshold = threshold > 24 ? threshold - 24 : 0;
 
   return score <= threshold;
+}
+
+auto Inliner::exposes_noalias_specialization(
+  LinearFunction &callee, const Op &call
+) const -> bool {
+  if (call.operands.size() != callee.args.size())
+    return false;
+
+  std::unordered_map<Value *, size_t> formal_indices;
+  for (size_t index = 0; index < callee.args.size(); ++index) {
+    if (
+      callee.args[index] && callee.args[index]->type &&
+      callee.args[index]->type->is_ptr()
+    )
+      formal_indices[callee.args[index]] = index;
+  }
+  if (formal_indices.size() < 2)
+    return false;
+
+  DomTree dom;
+  dom.compute(callee);
+  LoopInfo loops;
+  loops.compute(callee, dom);
+  BasicAliasAnalysis alias;
+  struct Access {
+    size_t formal = 0;
+    Loop *loop = nullptr;
+  };
+  std::vector<Access> reads;
+  std::vector<Access> writes;
+
+  for (const auto &block : callee.blocks) {
+    auto *loop = loops.get_loop_for(block.get());
+    for (auto *op : block->insts) {
+      if (op->code == OpCode::Call)
+        return false;
+      if (op->code == OpCode::GetPtr) {
+        auto plan = mid_ir::analyze_getptr(*op);
+        if (!plan.valid || plan.reads_memory)
+          return false;
+        continue;
+      }
+      if (
+        op->code != OpCode::Load && op->code != OpCode::Store &&
+        op->code != OpCode::Memset
+      ) {
+        continue;
+      }
+
+      auto location = alias.get_location(*op);
+      if (!location || !location->root)
+        return false;
+      auto formal = formal_indices.find(location->root);
+      if (formal == formal_indices.end() || !loop)
+        continue;
+      if (op->code == OpCode::Load)
+        reads.push_back({formal->second, loop});
+      else
+        writes.push_back({formal->second, loop});
+    }
+  }
+
+  std::vector<std::pair<size_t, size_t>> alias_pairs;
+  for (const auto &read : reads) {
+    for (const auto &write : writes) {
+      if (read.loop == write.loop && read.formal != write.formal)
+        alias_pairs.push_back({read.formal, write.formal});
+    }
+  }
+  std::sort(alias_pairs.begin(), alias_pairs.end());
+  alias_pairs.erase(
+    std::unique(alias_pairs.begin(), alias_pairs.end()), alias_pairs.end()
+  );
+  if (alias_pairs.empty())
+    return false;
+
+  std::vector<MemoryLocation> actual_locations(callee.args.size());
+  for (const auto &[formal, index] : formal_indices) {
+    (void)formal;
+    if (
+      !call.operands[index] || !call.operands[index]->type ||
+      !call.operands[index]->type->is_ptr()
+    )
+      return false;
+    actual_locations[index] = alias.get_location(call.operands[index]);
+    if (!actual_locations[index].root)
+      return false;
+  }
+  return std::all_of(
+    alias_pairs.begin(), alias_pairs.end(), [&](const auto &pair) {
+      return alias.alias(
+               actual_locations[pair.first], actual_locations[pair.second]
+             ) == AliasResult::NoAlias;
+    }
+  );
 }
 
 auto Inliner::validate_callee(
@@ -404,7 +507,7 @@ auto Inliner::inline_call(
       } else if (old_op->code == OpCode::Phi) {
         cloned_op = module->make_op(OpCode::Phi, PhiPayload{});
       } else {
-        cloned_op = module->make_op(old_op->code);
+        cloned_op = module->make_op(old_op->code, old_op->payload);
       }
       if (old_op->result) {
         cloned_op->result =

@@ -41,10 +41,14 @@ private:
   auto cost(LinearFunction &func) const -> Cost;
   auto should_inline(
     const LinearFunction &caller,
-    const LinearFunction &callee,
+    LinearFunction &callee,
+    const Op &call,
     const Cost &callee_cost,
     unsigned loop_depth
   ) const -> bool;
+  auto
+  exposes_noalias_specialization(LinearFunction &callee, const Op &call) const
+    -> bool;
   auto validate_callee(const LinearFunction &callee, const Op &call) const
     -> bool;
   auto inline_call(

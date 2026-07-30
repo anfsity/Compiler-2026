@@ -1,6 +1,6 @@
 #include "polyhedral_opt.hpp"
 
-#include "../../base/getptr.hpp"
+#include "../../mid/getptr.hpp"
 #include "../../mid/rewriter.hpp"
 #include <algorithm>
 #include <limits>
@@ -117,10 +117,8 @@ auto getptr_strides(
   ) {
     return std::nullopt;
   }
-  auto plan = ir::analyze_getptr(
-    getptr->operands[0]->type, getptr->result->type, getptr->operands.size() - 1
-  );
-  if (plan.reads_memory)
+  auto plan = mid_ir::analyze_getptr(*getptr);
+  if (!plan.valid || plan.reads_memory)
     return std::nullopt;
 
   std::vector<SCEVAffineExpr> subscripts;
@@ -162,7 +160,8 @@ auto compatible_getptr_plans(
   const ir::GetPtrPlan &lhs, const ir::GetPtrPlan &rhs
 ) -> bool {
   if (
-    lhs.reads_memory || rhs.reads_memory || lhs.steps.size() != rhs.steps.size()
+    !lhs.valid || !rhs.valid || lhs.reads_memory || rhs.reads_memory ||
+    lhs.steps.size() != rhs.steps.size()
   )
     return false;
   for (size_t index = 0; index < lhs.steps.size(); ++index) {
@@ -198,12 +197,8 @@ auto row_delayed_access_capacity(
     return std::nullopt;
   }
 
-  auto output_plan = ir::analyze_getptr(
-    output->operands[0]->type, output->result->type, output->operands.size() - 1
-  );
-  auto input_plan = ir::analyze_getptr(
-    input->operands[0]->type, input->result->type, input->operands.size() - 1
-  );
+  auto output_plan = mid_ir::analyze_getptr(*output);
+  auto input_plan = mid_ir::analyze_getptr(*input);
   if (!compatible_getptr_plans(output_plan, input_plan))
     return std::nullopt;
 
@@ -807,6 +802,10 @@ auto PolyhedralOpt::prepare_reduction(
       }
     }
     append_operands(init_pointer, std::move(init_pointer_operands));
+    init_pointer->payload =
+      scratch_alloca
+        ? Op::Payload{default_getptr_payload(scratch_alloca->result)}
+        : output_getptr->payload;
     init_pointer->result = module->ctx->make_value<OpResult>(
       output_getptr->result->type, init_pointer
     );
@@ -859,6 +858,8 @@ auto PolyhedralOpt::prepare_reduction(
         accumulation_pointer,
         {scratch_alloca->result, outer->induction.phi->result}
       );
+      accumulation_pointer->payload =
+        default_getptr_payload(scratch_alloca->result);
       accumulation_pointer->result = module->ctx->make_value<OpResult>(
         output_getptr->result->type, accumulation_pointer
       );
@@ -955,6 +956,7 @@ auto PolyhedralOpt::prepare_reduction(
       append_operands(
         scratch_pointer, {scratch_alloca->result, writeback_phi->result}
       );
+      scratch_pointer->payload = default_getptr_payload(scratch_alloca->result);
       scratch_pointer->result = module->ctx->make_value<OpResult>(
         output_getptr->result->type, scratch_pointer
       );
@@ -975,6 +977,7 @@ auto PolyhedralOpt::prepare_reduction(
         ));
       }
       append_operands(writeback_pointer, std::move(writeback_pointer_operands));
+      writeback_pointer->payload = output_getptr->payload;
       writeback_pointer->result = module->ctx->make_value<OpResult>(
         output_getptr->result->type, writeback_pointer
       );

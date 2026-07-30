@@ -1,6 +1,6 @@
 #include "gvn.hpp"
 
-#include "../../base/getptr.hpp"
+#include "../../mid/getptr.hpp"
 #include <algorithm>
 #include <unordered_set>
 
@@ -64,6 +64,7 @@ auto GVN::prepare_inherited_state(Block *block, MemoryState &state) -> void {
   }
 
   bool has_load = false;
+  bool has_store = false;
   std::vector<Block *> worklist(block->preds.begin(), block->preds.end());
   std::unordered_set<Block *> visited;
   while (!worklist.empty()) {
@@ -81,6 +82,11 @@ auto GVN::prepare_inherited_state(Block *block, MemoryState &state) -> void {
         has_load = true;
         continue;
       }
+      if (op->code == OpCode::Store) {
+        has_store = true;
+        invalidate_for_write(state, alias_analysis.get_location(*op));
+        continue;
+      }
       if (is_memory_barrier(op)) {
         state.clear();
         return;
@@ -91,9 +97,9 @@ auto GVN::prepare_inherited_state(Block *block, MemoryState &state) -> void {
     );
   }
 
-  // A read along one incoming path can observe a pending store.  It does not
-  // invalidate dominating load values when no path can write memory.
-  if (has_load)
+  // Path-local reads or writes make stored-value forwarding ambiguous at the
+  // join.  Dominating loads survive only when every path write is NoAlias.
+  if (has_load || has_store)
     state.stored_values.clear();
   state.pending_stores.clear();
 }
@@ -107,28 +113,34 @@ auto GVN::process_op(
       auto stored = state.stored_values.find(address_number);
       stored != state.stored_values.end()
     ) {
-      rewriter.replace_all_uses_with(op->result, stored->second);
+      rewriter.replace_all_uses_with(op->result, stored->second.value);
       rewriter.eraseOp(op);
-      value_numbers[op->result] = number_value(stored->second);
+      value_numbers[op->result] = number_value(stored->second.value);
       changed = true;
       return;
     }
 
-    // A load through a different value number may still alias a preceding
-    // store. Stop forwarding and dead-store tracking at that point.
-    state.stored_values.clear();
-    state.pending_stores.clear();
+    auto location = alias_analysis.get_location(*op);
+    observe_read(state, location);
     Expression expression{
       OpCode::Load, op->result->type.get(), {address_number}
     };
     auto it = state.loads.find(expression);
     if (it != state.loads.end()) {
-      rewriter.replace_all_uses_with(op->result, it->second);
+      rewriter.replace_all_uses_with(op->result, it->second.value);
       rewriter.eraseOp(op);
-      value_numbers[op->result] = number_value(it->second);
+      value_numbers[op->result] = number_value(it->second.value);
       changed = true;
     } else {
-      state.loads.emplace(expression, op->result);
+      state.loads.emplace(
+        expression,
+        MemoryState::LoadFact{
+          op->result,
+          location.value_or(
+            MemoryLocation{op->operands[0], nullptr, std::nullopt, 0}
+          ),
+        }
+      );
       value_numbers[op->result] = next_number++;
     }
     return;
@@ -140,12 +152,16 @@ auto GVN::process_op(
       auto previous = state.pending_stores.find(address_number);
       previous != state.pending_stores.end()
     ) {
-      rewriter.eraseOp(previous->second);
+      rewriter.eraseOp(previous->second.operation);
       changed = true;
     }
-    state.clear();
-    state.stored_values[address_number] = op->operands[0];
-    state.pending_stores[address_number] = op;
+    auto location = alias_analysis.get_location(*op);
+    invalidate_for_write(state, location);
+    auto memory_location = location.value_or(
+      MemoryLocation{op->operands[1], nullptr, std::nullopt, 0}
+    );
+    state.stored_values[address_number] = {op->operands[0], memory_location};
+    state.pending_stores[address_number] = {op, memory_location};
     return;
   }
 
@@ -196,6 +212,40 @@ auto GVN::process_op(
   value_numbers[op->result] = next_number++;
 }
 
+auto GVN::invalidate_for_write(
+  MemoryState &state, const std::optional<MemoryLocation> &location
+) -> void {
+  auto may_alias = [&](const MemoryLocation &candidate) {
+    return !location || alias_analysis.may_alias(candidate, *location);
+  };
+  for (auto it = state.loads.begin(); it != state.loads.end();) {
+    if (may_alias(it->second.location))
+      it = state.loads.erase(it);
+    else
+      ++it;
+  }
+  for (auto it = state.stored_values.begin();
+       it != state.stored_values.end();) {
+    if (may_alias(it->second.location))
+      it = state.stored_values.erase(it);
+    else
+      ++it;
+  }
+}
+
+auto GVN::observe_read(
+  MemoryState &state, const std::optional<MemoryLocation> &location
+) -> void {
+  for (auto it = state.pending_stores.begin();
+       it != state.pending_stores.end();) {
+    if (!location || alias_analysis.may_alias(it->second.location, *location)) {
+      it = state.pending_stores.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 auto GVN::number_value(Value *value) -> ValueNumber {
   if (!value)
     return 0;
@@ -233,6 +283,8 @@ auto GVN::build_expression(Op *op) -> std::optional<Expression> {
     return std::nullopt;
 
   Expression expression{op->code, op->result->type.get(), {}};
+  if (op->code == OpCode::GetPtr)
+    expression.getptr_layout_type = getptr_layout_type(*op).get();
   expression.operands.reserve(op->operands.size());
   for (auto *operand : op->operands) {
     expression.operands.push_back(number_value(operand));
@@ -305,15 +357,13 @@ auto GVN::reads_memory_through_getptr(const Op *op) -> bool {
   ) {
     return false;
   }
-  return ir::analyze_getptr(
-           op->operands[0]->type, op->result->type, op->operands.size() - 1
-  )
-    .reads_memory;
+  auto plan = mid_ir::analyze_getptr(*op);
+  return !plan.valid || plan.reads_memory;
 }
 
 auto GVN::is_memory_barrier(const Op *op) -> bool {
-  return op && (op->code == OpCode::Store || op->code == OpCode::Memset ||
-                op->code == OpCode::Call || reads_memory_through_getptr(op));
+  return op && (op->code == OpCode::Memset || op->code == OpCode::Call ||
+                reads_memory_through_getptr(op));
 }
 
 auto GVN::is_commutative(OpCode code) -> bool {
