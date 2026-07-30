@@ -6,6 +6,7 @@
 #include "../../mid/rewriter.hpp"
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace exodus::mid_ir::opt {
@@ -69,6 +70,7 @@ class GVN {
   MidIRRewriter rewriter;
   DomTree *dom = nullptr;
   std::unordered_map<Value *, ValueNumber> value_numbers;
+  std::unordered_map<Op *, Block *> op_blocks;
   std::unordered_map<std::string, ValueNumber> constant_numbers;
   std::unordered_map<Expression, Value *, ExpressionHash> available;
   bool changed = false;
@@ -83,8 +85,19 @@ public:
 private:
   auto visit(Block *block, MemoryState state) -> void;
   auto prepare_inherited_state(Block *block, MemoryState &state) -> void;
-  auto process_op(Op *op, MemoryState &state, std::vector<Expression> &inserted)
-    -> void;
+  auto process_op(
+    Block *block, Op *op, MemoryState &state, std::vector<Expression> &inserted
+  ) -> void;
+  auto is_redundant_source_store(Block *block, Op *store) const -> bool;
+  auto accesses_cannot_partially_alias(
+    const MemoryLocation &lhs, const MemoryLocation &rhs
+  ) const -> bool;
+  auto pointer_offset_is_multiple_of(
+    Value *pointer,
+    Value *root,
+    size_t modulus,
+    std::unordered_set<Value *> &active
+  ) const -> bool;
   auto invalidate_for_write(
     MemoryState &state, const std::optional<MemoryLocation> &location
   ) -> void;

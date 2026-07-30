@@ -20,6 +20,15 @@ auto LoopIdiomRecognize::run(
   affine_loops = &am.get_result<AffineLoopAnalysis>(func);
   build_op_block_map(func);
 
+  // Store sinking changes the CFG.  Apply one proven rewrite and let the
+  // fixed-point pipeline rebuild loop and dominance analyses before looking
+  // for another opportunity.
+  if (sink_partial_store(func)) {
+    op_blocks.clear();
+    affine_loops = nullptr;
+    return exodus::opt::PreservedAnalysis::none();
+  }
+
   bool changed = false;
   for (auto *loop : loop_info.get_loops_innermost_first()) {
     if (replace_single_store_loop(*loop)) {
@@ -40,6 +49,207 @@ auto LoopIdiomRecognize::build_op_block_map(LinearFunction &func) -> void {
   for (auto &block : func.blocks) {
     for (auto *op : block->insts)
       op_blocks[op] = block.get();
+  }
+}
+
+auto LoopIdiomRecognize::sink_partial_store(LinearFunction &func) -> bool {
+  for (auto &block_ptr : func.blocks) {
+    auto *block = block_ptr.get();
+    if (block->insts.empty())
+      continue;
+
+    auto *terminator = block->insts.back();
+    if (
+      terminator->code != OpCode::Branch || terminator->operands.size() != 1 ||
+      terminator->successors.size() != 2
+    ) {
+      continue;
+    }
+
+    auto store_it = block->insts.end();
+    --store_it;
+    bool found_store = false;
+    while (store_it != block->insts.begin()) {
+      --store_it;
+      if ((*store_it)->code == OpCode::Store) {
+        found_store = true;
+        break;
+      }
+    }
+    if (!found_store || !can_move_store_across_branch(*store_it, terminator))
+      continue;
+
+    auto *source_store = *store_it;
+    Block *overwrite = nullptr;
+    Block *merge = nullptr;
+    size_t overwrite_index = 0;
+    for (size_t index = 0; index < 2; ++index) {
+      auto *candidate = terminator->successors[index];
+      if (!candidate || candidate->insts.size() != 2)
+        continue;
+      auto candidate_it = candidate->insts.begin();
+      auto *overwrite_store = *candidate_it;
+      auto *jump = *std::next(candidate_it);
+      if (
+        overwrite_store->code != OpCode::Store ||
+        overwrite_store->operands.size() != 2 || jump->code != OpCode::Jump ||
+        jump->successors.size() != 1 ||
+        !same_memory_access(source_store, overwrite_store)
+      ) {
+        continue;
+      }
+      auto bypass_index = index == 0 ? 1u : 0u;
+      auto *candidate_merge = jump->successors.front();
+      if (
+        !candidate_merge || candidate_merge == candidate ||
+        terminator->successors[bypass_index] != candidate_merge
+      ) {
+        continue;
+      }
+      overwrite = candidate;
+      merge = candidate_merge;
+      overwrite_index = index;
+      break;
+    }
+
+    if (!overwrite || !merge)
+      continue;
+    if (std::any_of(merge->insts.begin(), merge->insts.end(), [](const Op *op) {
+          return op->code == OpCode::Phi;
+        })) {
+      continue;
+    }
+
+    auto merge_it = std::find_if(
+      func.blocks.begin(), func.blocks.end(), [merge](const auto &candidate) {
+        return candidate.get() == merge;
+      }
+    );
+    if (merge_it == func.blocks.end())
+      continue;
+
+    auto bypass_ptr = std::make_unique<Block>(
+      static_cast<int>(func.blocks.size()), merge->name + "_store_bypass"
+    );
+    auto *bypass = bypass_ptr.get();
+    bypass->insts.splice(bypass->insts.end(), block->insts, store_it);
+
+    auto *jump = module->make_op(OpCode::Jump);
+    jump->successors.push_back(merge);
+    bypass->insts.push_back(jump);
+    terminator->successors[overwrite_index == 0 ? 1 : 0] = bypass;
+
+    func.blocks.insert(merge_it, std::move(bypass_ptr));
+    renumber_blocks(func);
+    rebuild_cfg(func);
+    return true;
+  }
+  return false;
+}
+
+auto LoopIdiomRecognize::can_move_store_across_branch(
+  Op *store, Op *branch
+) const -> bool {
+  if (
+    !store || !branch || store->code != OpCode::Store ||
+    store->operands.size() != 2
+  ) {
+    return false;
+  }
+  auto block_it = op_blocks.find(branch);
+  if (block_it == op_blocks.end())
+    return false;
+  auto &insts = block_it->second->insts;
+  auto store_it = std::find(insts.begin(), insts.end(), store);
+  auto branch_it = std::find(insts.begin(), insts.end(), branch);
+  if (
+    store_it == insts.end() || branch_it == insts.end() ||
+    std::distance(store_it, branch_it) <= 0
+  ) {
+    return false;
+  }
+  for (auto it = std::next(store_it); it != branch_it; ++it) {
+    if (!is_side_effect_free(*it))
+      return false;
+  }
+  return true;
+}
+
+auto LoopIdiomRecognize::is_side_effect_free(const Op *op) const -> bool {
+  if (!op)
+    return false;
+  switch (op->code) {
+  case OpCode::Add:
+  case OpCode::Sub:
+  case OpCode::Mul:
+  case OpCode::Div:
+  case OpCode::Mod:
+  case OpCode::FAdd:
+  case OpCode::FSub:
+  case OpCode::FMul:
+  case OpCode::FDiv:
+  case OpCode::I2F:
+  case OpCode::F2I:
+  case OpCode::ZExt:
+  case OpCode::Eq:
+  case OpCode::Ne:
+  case OpCode::Lt:
+  case OpCode::Gt:
+  case OpCode::Le:
+  case OpCode::Ge:
+  case OpCode::And:
+  case OpCode::Or:
+  case OpCode::Xor:
+  case OpCode::Shl:
+  case OpCode::Shr:
+    return true;
+  case OpCode::GetPtr: {
+    auto plan = mid_ir::analyze_getptr(*op);
+    return plan.valid && !plan.reads_memory;
+  }
+  default:
+    return false;
+  }
+}
+
+auto LoopIdiomRecognize::same_memory_access(Op *lhs, Op *rhs) const -> bool {
+  if (
+    !lhs || !rhs || lhs->code != OpCode::Store || rhs->code != OpCode::Store ||
+    lhs->operands.size() != 2 || rhs->operands.size() != 2 ||
+    !lhs->operands[0] || !rhs->operands[0] ||
+    lhs->operands[0]->type != rhs->operands[0]->type
+  ) {
+    return false;
+  }
+  BasicAliasAnalysis alias_analysis;
+  auto lhs_location = alias_analysis.get_location(*lhs);
+  auto rhs_location = alias_analysis.get_location(*rhs);
+  if (
+    !lhs_location || !rhs_location || lhs_location->size == 0 ||
+    lhs_location->size != rhs_location->size
+  ) {
+    return false;
+  }
+  return lhs->operands[1] == rhs->operands[1] ||
+         alias_analysis.alias(*lhs_location, *rhs_location) ==
+           AliasResult::MustAlias;
+}
+
+auto LoopIdiomRecognize::rebuild_cfg(LinearFunction &func) -> void {
+  for (auto &block : func.blocks) {
+    block->preds.clear();
+    block->succs.clear();
+  }
+  for (auto &block : func.blocks) {
+    if (block->insts.empty())
+      continue;
+    auto *terminator = block->insts.back();
+    for (auto *successor : terminator->successors) {
+      if (!successor)
+        continue;
+      block->succs.push_back(successor);
+      successor->preds.push_back(block.get());
+    }
   }
 }
 

@@ -11,6 +11,7 @@
 #include "loop_strength_reduce.hpp"
 #include "loop_unroll.hpp"
 #include "mem2reg.hpp"
+#include "monotonic_guard_tighten.hpp"
 #include "polyhedral_opt.hpp"
 #include "tail_recursion_elim.hpp"
 
@@ -45,6 +46,11 @@ static exodus::opt::RegisterLinearFunctionPass<GVN>
 
 static exodus::opt::RegisterLinearFunctionPass<DCE>
   reg_early_dce("early_dce", "remove dead SSA before loop scheduling");
+
+static exodus::opt::RegisterLinearFunctionPass<MonotonicGuardTighten>
+  reg_monotonic_guard_tighten(
+    "monotonic_guard_tighten", "tighten proven effect-free loop guard suffixes"
+  );
 
 static exodus::opt::RegisterLinearFunctionPass<PolyhedralOpt>
   reg_polyhedral_opt("polyhedral_opt", "proof-gated affine loop scheduling");
