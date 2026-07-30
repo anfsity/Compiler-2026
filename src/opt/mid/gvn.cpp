@@ -1,6 +1,6 @@
 #include "gvn.hpp"
 
-#include "../../base/getptr.hpp"
+#include "../../mid/getptr.hpp"
 #include <algorithm>
 #include <unordered_set>
 
@@ -16,11 +16,17 @@ auto GVN::run(
 
   rewriter.set_scope(func);
   value_numbers.clear();
+  op_blocks.clear();
   constant_numbers.clear();
   available.clear();
   changed = false;
   next_number = 0;
   dom = &dom_result;
+
+  for (auto &block : func.blocks) {
+    for (auto *op : block->insts)
+      op_blocks[op] = block.get();
+  }
 
   visit(func.blocks.front().get(), {});
   rewriter.finalize(func);
@@ -36,7 +42,7 @@ auto GVN::visit(Block *block, MemoryState state) -> void {
   std::vector<Expression> inserted;
 
   for (auto *op : block->insts) {
-    process_op(op, state, inserted);
+    process_op(block, op, state, inserted);
   }
 
   // A store in one arm does not make a dominating store dead on sibling arms.
@@ -64,6 +70,7 @@ auto GVN::prepare_inherited_state(Block *block, MemoryState &state) -> void {
   }
 
   bool has_load = false;
+  bool has_store = false;
   std::vector<Block *> worklist(block->preds.begin(), block->preds.end());
   std::unordered_set<Block *> visited;
   while (!worklist.empty()) {
@@ -81,6 +88,11 @@ auto GVN::prepare_inherited_state(Block *block, MemoryState &state) -> void {
         has_load = true;
         continue;
       }
+      if (op->code == OpCode::Store) {
+        has_store = true;
+        invalidate_for_write(state, alias_analysis.get_location(*op));
+        continue;
+      }
       if (is_memory_barrier(op)) {
         state.clear();
         return;
@@ -91,15 +103,15 @@ auto GVN::prepare_inherited_state(Block *block, MemoryState &state) -> void {
     );
   }
 
-  // A read along one incoming path can observe a pending store.  It does not
-  // invalidate dominating load values when no path can write memory.
-  if (has_load)
+  // Path-local reads or writes make stored-value forwarding ambiguous at the
+  // join.  Dominating loads survive only when every path write is NoAlias.
+  if (has_load || has_store)
     state.stored_values.clear();
   state.pending_stores.clear();
 }
 
 auto GVN::process_op(
-  Op *op, MemoryState &state, std::vector<Expression> &inserted
+  Block *block, Op *op, MemoryState &state, std::vector<Expression> &inserted
 ) -> void {
   if (op->code == OpCode::Load && op->result && !op->operands.empty()) {
     auto address_number = number_value(op->operands[0]);
@@ -107,45 +119,61 @@ auto GVN::process_op(
       auto stored = state.stored_values.find(address_number);
       stored != state.stored_values.end()
     ) {
-      rewriter.replace_all_uses_with(op->result, stored->second);
+      rewriter.replace_all_uses_with(op->result, stored->second.value);
       rewriter.eraseOp(op);
-      value_numbers[op->result] = number_value(stored->second);
+      value_numbers[op->result] = number_value(stored->second.value);
       changed = true;
       return;
     }
 
-    // A load through a different value number may still alias a preceding
-    // store. Stop forwarding and dead-store tracking at that point.
-    state.stored_values.clear();
-    state.pending_stores.clear();
+    auto location = alias_analysis.get_location(*op);
+    observe_read(state, location);
     Expression expression{
       OpCode::Load, op->result->type.get(), {address_number}
     };
     auto it = state.loads.find(expression);
     if (it != state.loads.end()) {
-      rewriter.replace_all_uses_with(op->result, it->second);
+      rewriter.replace_all_uses_with(op->result, it->second.value);
       rewriter.eraseOp(op);
-      value_numbers[op->result] = number_value(it->second);
+      value_numbers[op->result] = number_value(it->second.value);
       changed = true;
     } else {
-      state.loads.emplace(expression, op->result);
+      state.loads.emplace(
+        expression,
+        MemoryState::LoadFact{
+          op->result,
+          location.value_or(
+            MemoryLocation{op->operands[0], nullptr, std::nullopt, 0}
+          ),
+        }
+      );
       value_numbers[op->result] = next_number++;
     }
     return;
   }
 
   if (op->code == OpCode::Store && op->operands.size() >= 2) {
+    if (is_redundant_source_store(block, op)) {
+      rewriter.eraseOp(op);
+      changed = true;
+      return;
+    }
+
     auto address_number = number_value(op->operands[1]);
     if (
       auto previous = state.pending_stores.find(address_number);
       previous != state.pending_stores.end()
     ) {
-      rewriter.eraseOp(previous->second);
+      rewriter.eraseOp(previous->second.operation);
       changed = true;
     }
-    state.clear();
-    state.stored_values[address_number] = op->operands[0];
-    state.pending_stores[address_number] = op;
+    auto location = alias_analysis.get_location(*op);
+    invalidate_for_write(state, location);
+    auto memory_location = location.value_or(
+      MemoryLocation{op->operands[1], nullptr, std::nullopt, 0}
+    );
+    state.stored_values[address_number] = {op->operands[0], memory_location};
+    state.pending_stores[address_number] = {op, memory_location};
     return;
   }
 
@@ -196,6 +224,176 @@ auto GVN::process_op(
   value_numbers[op->result] = next_number++;
 }
 
+auto GVN::is_redundant_source_store(Block *block, Op *store) const -> bool {
+  if (
+    !block || !store || store->code != OpCode::Store ||
+    store->operands.size() != 2 || block->insts.size() < 3
+  ) {
+    return false;
+  }
+
+  auto store_it = std::find(block->insts.begin(), block->insts.end(), store);
+  if (store_it == block->insts.end() || store_it == block->insts.begin())
+    return false;
+  auto destination_it = std::prev(store_it);
+  auto *destination_store = *destination_it;
+  if (
+    destination_store->code != OpCode::Store ||
+    destination_store->operands.size() != 2 ||
+    destination_store->operands[0] != store->operands[0]
+  ) {
+    return false;
+  }
+
+  auto *value = store->operands[0];
+  if (!value || value->kind != ValueKind::OpResult)
+    return false;
+  auto *source_load =
+    static_cast<Op *>(static_cast<OpResult *>(value)->creator);
+  auto source_block = op_blocks.find(source_load);
+  if (
+    !source_load || source_block == op_blocks.end() ||
+    source_block->second != block || source_load->code != OpCode::Load ||
+    !source_load->result || source_load->result != value ||
+    source_load->operands.size() != 1
+  ) {
+    return false;
+  }
+
+  auto load_it = std::find(block->insts.begin(), destination_it, source_load);
+  if (load_it == destination_it)
+    return false;
+  for (auto it = std::next(load_it); it != destination_it; ++it) {
+    auto *intervening = *it;
+    if (
+      intervening->code == OpCode::Load || intervening->code == OpCode::Store ||
+      is_memory_barrier(intervening) || !is_pure_opcode(intervening->code)
+    ) {
+      return false;
+    }
+  }
+
+  auto source_location = alias_analysis.get_location(*source_load);
+  auto final_location = alias_analysis.get_location(*store);
+  auto destination_location = alias_analysis.get_location(*destination_store);
+  if (
+    !source_location || !final_location || !destination_location ||
+    source_location->size == 0 ||
+    source_location->size != final_location->size ||
+    source_location->size != destination_location->size ||
+    alias_analysis.alias(*source_location, *final_location) !=
+      AliasResult::MustAlias
+  ) {
+    return false;
+  }
+
+  return accesses_cannot_partially_alias(
+    *source_location, *destination_location
+  );
+}
+
+auto GVN::accesses_cannot_partially_alias(
+  const MemoryLocation &lhs, const MemoryLocation &rhs
+) const -> bool {
+  if (lhs.size == 0 || lhs.size != rhs.size)
+    return false;
+  auto alias = alias_analysis.alias(lhs, rhs);
+  if (alias == AliasResult::MustAlias || alias == AliasResult::NoAlias)
+    return true;
+  if (
+    !lhs.root || lhs.root != rhs.root || !lhs.pointer || !rhs.pointer ||
+    (lhs.size & (lhs.size - 1)) != 0
+  ) {
+    return false;
+  }
+
+  // Equal-width power-of-two accesses whose offsets from the same object are
+  // both multiples of that width can only be identical or disjoint.  Keep the
+  // MayAlias fallback unless every GetPtr scale proves this alignment.
+  std::unordered_set<Value *> lhs_active;
+  std::unordered_set<Value *> rhs_active;
+  return pointer_offset_is_multiple_of(
+           lhs.pointer, lhs.root, lhs.size, lhs_active
+         ) &&
+         pointer_offset_is_multiple_of(
+           rhs.pointer, rhs.root, rhs.size, rhs_active
+         );
+}
+
+auto GVN::pointer_offset_is_multiple_of(
+  Value *pointer,
+  Value *root,
+  size_t modulus,
+  std::unordered_set<Value *> &active
+) const -> bool {
+  if (!pointer || !root || modulus == 0)
+    return false;
+  if (pointer == root)
+    return true;
+  if (pointer->kind != ValueKind::OpResult || !active.insert(pointer).second)
+    return false;
+
+  auto finish = [&active, pointer](bool result) {
+    active.erase(pointer);
+    return result;
+  };
+  auto *getptr = static_cast<Op *>(static_cast<OpResult *>(pointer)->creator);
+  if (
+    !getptr || getptr->code != OpCode::GetPtr || getptr->operands.empty() ||
+    getptr->result != pointer
+  ) {
+    return finish(false);
+  }
+  auto plan = mid_ir::analyze_getptr(*getptr);
+  if (!plan.valid || plan.reads_memory)
+    return finish(false);
+  for (const auto &step : plan.steps) {
+    if (
+      step.kind == ir::GetPtrStep::Kind::Index &&
+      (step.scale <= 0 || static_cast<size_t>(step.scale) % modulus != 0)
+    ) {
+      return finish(false);
+    }
+  }
+  return finish(
+    pointer_offset_is_multiple_of(getptr->operands[0], root, modulus, active)
+  );
+}
+
+auto GVN::invalidate_for_write(
+  MemoryState &state, const std::optional<MemoryLocation> &location
+) -> void {
+  auto may_alias = [&](const MemoryLocation &candidate) {
+    return !location || alias_analysis.may_alias(candidate, *location);
+  };
+  for (auto it = state.loads.begin(); it != state.loads.end();) {
+    if (may_alias(it->second.location))
+      it = state.loads.erase(it);
+    else
+      ++it;
+  }
+  for (auto it = state.stored_values.begin();
+       it != state.stored_values.end();) {
+    if (may_alias(it->second.location))
+      it = state.stored_values.erase(it);
+    else
+      ++it;
+  }
+}
+
+auto GVN::observe_read(
+  MemoryState &state, const std::optional<MemoryLocation> &location
+) -> void {
+  for (auto it = state.pending_stores.begin();
+       it != state.pending_stores.end();) {
+    if (!location || alias_analysis.may_alias(it->second.location, *location)) {
+      it = state.pending_stores.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 auto GVN::number_value(Value *value) -> ValueNumber {
   if (!value)
     return 0;
@@ -233,6 +431,8 @@ auto GVN::build_expression(Op *op) -> std::optional<Expression> {
     return std::nullopt;
 
   Expression expression{op->code, op->result->type.get(), {}};
+  if (op->code == OpCode::GetPtr)
+    expression.getptr_layout_type = getptr_layout_type(*op).get();
   expression.operands.reserve(op->operands.size());
   for (auto *operand : op->operands) {
     expression.operands.push_back(number_value(operand));
@@ -305,15 +505,13 @@ auto GVN::reads_memory_through_getptr(const Op *op) -> bool {
   ) {
     return false;
   }
-  return ir::analyze_getptr(
-           op->operands[0]->type, op->result->type, op->operands.size() - 1
-  )
-    .reads_memory;
+  auto plan = mid_ir::analyze_getptr(*op);
+  return !plan.valid || plan.reads_memory;
 }
 
 auto GVN::is_memory_barrier(const Op *op) -> bool {
-  return op && (op->code == OpCode::Store || op->code == OpCode::Memset ||
-                op->code == OpCode::Call || reads_memory_through_getptr(op));
+  return op && (op->code == OpCode::Memset || op->code == OpCode::Call ||
+                reads_memory_through_getptr(op));
 }
 
 auto GVN::is_commutative(OpCode code) -> bool {

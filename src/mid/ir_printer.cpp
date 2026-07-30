@@ -140,8 +140,15 @@ auto LinearIRPrinter::dump(const Op &op) -> std::string {
       op.code == OpCode::GetPtr || is_compare_opcode(op.code) ||
       is_cast_opcode(op.code)
     ) {
-      if (!op.operands.empty())
+      if (!op.operands.empty()) {
         line += " : " + op.operands[0]->type->to_string();
+        if (op.code == OpCode::GetPtr) {
+          if (const auto *payload = std::get_if<GetPtrPayload>(&op.payload)) {
+            if (payload->layout_type)
+              line += " [layout " + payload->layout_type->to_string() + "]";
+          }
+        }
+      }
     }
   }
 

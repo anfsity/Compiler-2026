@@ -1,7 +1,7 @@
 #include "polyhedral.hpp"
 
 #include "../../../3rd-party/fmt/format.h"
-#include "../../base/getptr.hpp"
+#include "../../mid/getptr.hpp"
 #include <algorithm>
 #include <limits>
 #include <numeric>
@@ -135,10 +135,8 @@ auto has_movable_preheader_ops(Block *block) -> bool {
     ) {
       return false;
     }
-    auto plan = ir::analyze_getptr(
-      op->operands[0]->type, op->result->type, op->operands.size() - 1
-    );
-    if (plan.reads_memory)
+    auto plan = analyze_getptr(*op);
+    if (!plan.valid || plan.reads_memory)
       return false;
   }
   return true;
@@ -589,11 +587,9 @@ auto PolyhedralInfo::collect_accesses(
         return false;
       }
 
-      auto plan = ir::analyze_getptr(
-        getptr->operands[0]->type,
-        getptr->result->type,
-        getptr->operands.size() - 1
-      );
+      auto plan = analyze_getptr(*getptr);
+      if (!plan.valid)
+        return false;
       if (
         std::count_if(
           plan.steps.begin(), plan.steps.end(), [](const auto &step) {

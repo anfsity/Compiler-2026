@@ -56,19 +56,12 @@ auto Mem2Reg::collect_promotable_allocas(LinearFunction &func)
     if (!type->is_ptr())
       return false;
     auto target = std::static_pointer_cast<Ptr>(type)->target;
-    if (target->is_i32() || target->is_f32() || target->is_bool())
-      return true;
-    if (!target->is_ptr())
-      return false;
-    auto pointee = std::static_pointer_cast<Ptr>(target)->target;
-    return !pointee->is_array();
+    return target->is_i32() || target->is_f32() || target->is_bool();
   };
 
   auto is_alloca_promotable = [&](Op *alloca_op) -> bool {
     if (!is_promotable_type(alloca_op->result->type))
       return false;
-    auto target =
-      std::static_pointer_cast<Ptr>(alloca_op->result->type)->target;
 
     for (auto *user : alloca_op->result->users) {
       auto *user_op = static_cast<Op *>(user);
@@ -76,11 +69,7 @@ auto Mem2Reg::collect_promotable_allocas(LinearFunction &func)
       bool is_store_to =
         (user_op->code == OpCode::Store &&
          user_op->operands[1] == alloca_op->result);
-      bool is_pointer_getptr =
-        target->is_ptr() && user_op->code == OpCode::GetPtr &&
-        !user_op->operands.empty() && user_op->operands[0] == alloca_op->result;
-
-      if (!is_load && !is_store_to && !is_pointer_getptr)
+      if (!is_load && !is_store_to)
         return false;
     }
     return true;
@@ -188,18 +177,6 @@ auto Mem2Reg::rename(
           auto *alloca = static_cast<Op *>(creator);
           stacks[alloca].push(op->operands[0]);
           push_count[alloca]++;
-        }
-      }
-    } else if (op->code == OpCode::GetPtr && !op->operands.empty()) {
-      auto *base = op->operands[0];
-      if (base->kind == ValueKind::OpResult) {
-        auto *creator = static_cast<OpResult *>(base)->creator;
-        if (stacks.count(static_cast<Op *>(creator))) {
-          auto *alloca = static_cast<Op *>(creator);
-          auto *replacement = stacks[alloca].top();
-          op->operands[0] = replacement;
-          replacement->addUse(op);
-          base->rmUse(op);
         }
       }
     }

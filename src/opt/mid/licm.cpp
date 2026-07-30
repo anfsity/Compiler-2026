@@ -1,6 +1,6 @@
 #include "licm.hpp"
 
-#include "../../base/getptr.hpp"
+#include "../../mid/getptr.hpp"
 #include <algorithm>
 #include <limits>
 
@@ -433,9 +433,13 @@ auto LICM::get_getptr_read_locations(const Op &op) const
   ) {
     return locations;
   }
-  auto plan = ir::analyze_getptr(
-    op.operands[0]->type, op.result->type, op.operands.size() - 1
-  );
+  auto plan = mid_ir::analyze_getptr(op);
+  if (!plan.valid) {
+    locations.push_back(
+      MemoryLocation{nullptr, nullptr, std::nullopt, pointer_storage_size}
+    );
+    return locations;
+  }
   if (!plan.reads_memory)
     return locations;
 
@@ -598,10 +602,8 @@ auto LICM::is_safe_to_speculate(const Op &op) -> bool {
     ) {
       return false;
     }
-    return !ir::analyze_getptr(
-              op.operands[0]->type, op.result->type, op.operands.size() - 1
-    )
-              .reads_memory;
+    auto plan = mid_ir::analyze_getptr(op);
+    return plan.valid && !plan.reads_memory;
   }
   default:
     return false;

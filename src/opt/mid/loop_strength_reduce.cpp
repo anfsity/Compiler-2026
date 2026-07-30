@@ -1,6 +1,6 @@
 #include "loop_strength_reduce.hpp"
 
-#include "../../base/getptr.hpp"
+#include "../../mid/getptr.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <limits>
@@ -266,6 +266,7 @@ auto LoopStrengthReduce::reduce_getptrs(LinearFunction &func, const Loop &loop)
   struct FormedRecurrence {
     std::vector<Value *> operands;
     std::shared_ptr<Type> result_type;
+    std::shared_ptr<Type> layout_type;
     Value *value = nullptr;
   };
   std::vector<FormedRecurrence> formed;
@@ -274,7 +275,8 @@ auto LoopStrengthReduce::reduce_getptrs(LinearFunction &func, const Loop &loop)
     auto duplicate = std::find_if(
       formed.begin(), formed.end(), [&](const FormedRecurrence &recurrence) {
         return recurrence.operands == getptr->operands &&
-               recurrence.result_type == getptr->result->type;
+               recurrence.result_type == getptr->result->type &&
+               recurrence.layout_type == getptr_layout_type(*getptr);
       }
     );
     if (duplicate != formed.end()) {
@@ -285,11 +287,9 @@ auto LoopStrengthReduce::reduce_getptrs(LinearFunction &func, const Loop &loop)
       continue;
     }
 
-    auto plan = ir::analyze_getptr(
-      getptr->operands[0]->type,
-      getptr->result->type,
-      getptr->operands.size() - 1
-    );
+    auto plan = mid_ir::analyze_getptr(*getptr);
+    if (!plan.valid)
+      continue;
     const bool reads_immutable_slot =
       plan.reads_memory &&
       immutable_local_pointer_slot(getptr->operands[0], loop.get_preheader());
@@ -309,7 +309,12 @@ auto LoopStrengthReduce::reduce_getptrs(LinearFunction &func, const Loop &loop)
     if (!reduce_getptr(getptr, loop, *counted, rewriter, cache, &replacement)) {
       continue;
     }
-    formed.push_back({getptr->operands, getptr->result->type, replacement});
+    formed.push_back(
+      {getptr->operands,
+       getptr->result->type,
+       getptr_layout_type(*getptr),
+       replacement}
+    );
     formed_implicit_slot_recurrence |= reads_immutable_slot;
     changed = true;
   }
@@ -421,9 +426,9 @@ auto LoopStrengthReduce::reduce_getptr(
   }
 
   auto index_count = getptr->operands.size() - 1;
-  auto plan = ir::analyze_getptr(
-    getptr->operands[0]->type, getptr->result->type, index_count
-  );
+  auto plan = mid_ir::analyze_getptr(*getptr);
+  if (!plan.valid)
+    return false;
   const bool reads_immutable_slot =
     plan.reads_memory &&
     immutable_local_pointer_slot(getptr->operands[0], preheader);
@@ -587,6 +592,7 @@ auto LoopStrengthReduce::reduce_getptr(
     return false;
 
   auto *initial_pointer = module->make_op(OpCode::GetPtr);
+  initial_pointer->payload = getptr->payload;
   initial_pointer->operands = getptr->operands;
   initial_pointer->operands[varying_index + 1] = initial_index;
   initial_pointer->result =
@@ -604,6 +610,7 @@ auto LoopStrengthReduce::reduce_getptr(
   auto *step_value =
     module->ctx->make_const(I32::get(), static_cast<int>(pointer_step));
   next_pointer->operands = {pointer_phi->result, step_value};
+  next_pointer->payload = default_getptr_payload(pointer_phi->result);
   next_pointer->result =
     module->ctx->make_value<OpResult>(getptr->result->type, next_pointer);
   for (auto *operand : next_pointer->operands)

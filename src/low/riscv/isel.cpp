@@ -1,7 +1,7 @@
 #include "isel.hpp"
 #include "peephole.hpp"
 
-#include "../../base/getptr.hpp"
+#include "../../mid/getptr.hpp"
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -357,9 +357,8 @@ auto select_getptr(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   auto base = use_reg(ctx, op.operands[0], seq);
   auto cur = base;
 
-  auto plan = ir::analyze_getptr(
-    op.operands[0]->type, op.result->type, op.operands.size() - 1
-  );
+  auto plan = mid_ir::analyze_getptr(op);
+  assert(plan.valid && "invalid Mid IR getptr layout");
 
   if (
     !plan.reads_memory && plan.steps.size() == 1 &&

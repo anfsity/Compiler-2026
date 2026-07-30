@@ -14,6 +14,7 @@ namespace {
 
 constexpr size_t MaxCacheEntries = (1 << 12);
 constexpr size_t MinCacheEntries = (1 << 4);
+constexpr size_t MinScopedCacheEntries = (1 << 10);
 // Bound both slot count and statically allocated key/value words.
 constexpr size_t MaxCacheWords = (1 << 14);
 // The cache stores and compares every explicit argument.  Memoizing a very
@@ -399,6 +400,7 @@ auto estimate_region(
 struct MemoizationPlan {
   std::vector<GlobalAddr *> context_globals;
   size_t cache_size = 0;
+  bool reset_on_entry = false;
 };
 
 auto next_power_of_two(size_t value) -> size_t {
@@ -426,6 +428,16 @@ auto choose_cache_size(
   return std::max(slots, MinCacheEntries);
 }
 
+auto choose_scoped_cache_size(size_t key_count) -> size_t {
+  const auto fields_per_slot = key_count + 2;
+  auto footprint_limit = MaxCacheWords / std::max<size_t>(1, fields_per_slot);
+  footprint_limit = std::min(footprint_limit, MaxCacheEntries);
+  auto slots = size_t{1};
+  while ((slots << 1) <= footprint_limit)
+    slots <<= 1;
+  return std::max(std::min(slots, MinScopedCacheEntries), MinCacheEntries);
+}
+
 auto is_memoizable(const Function &function, const OpEffects &effects)
   -> std::optional<MemoizationPlan> {
   if (
@@ -448,14 +460,16 @@ auto is_memoizable(const Function &function, const OpEffects &effects)
   )
     return std::nullopt;
 
-  // Read-only scalar globals are stable context dependencies.  In particular,
-  // DU analysis of h-1-03 shows no store to lim in the loop containing the
-  // calls, so all iterations share the same context key.  Keeping the value
-  // in the key also makes the transformation correct if a later call site
-  // observes a different value.
+  // Read-only scalar globals can be represented directly as context keys.
+  // Other read locations, including aggregate elements, cannot: hashing their
+  // pointer would not capture the memory contents.  They are nevertheless
+  // stable during one invocation because the effect summary above proves that
+  // the complete recursive computation performs no writes.  Such functions
+  // use an invocation-scoped cache that is cleared by a non-recursive wrapper.
   auto dependencies = get_global_dependencies(effects);
-  if (dependencies.size() != effects.reads.size())
-    return std::nullopt;
+  const bool reset_on_entry = dependencies.size() != effects.reads.size();
+  if (reset_on_entry)
+    dependencies.clear();
 
   CostEstimate estimate;
   estimate_region(function.body, function.name, estimate);
@@ -472,19 +486,118 @@ auto is_memoizable(const Function &function, const OpEffects &effects)
   const auto generated_ops = lookup_ops + estimate.return_paths * store_ops;
   const auto recursive_work = estimate.body_cost * estimate.recursive_calls;
 
-  // Require enough recursive work to amortize both the lookup and the stores,
-  // and keep generated cache IR below one third of the estimated body. This
-  // rejects cheap recursive wrappers while allowing expensive computations.
-  if (
-    estimate.body_cost <= lookup_ops ||
-    generated_ops * 3 > estimate.body_cost || recursive_work < generated_ops * 3
-  )
-    return std::nullopt;
+  if (reset_on_entry) {
+    // Invocation scoping is intended for branching recurrences where reuse
+    // can occur across sibling recursive subtrees.  Exact key comparisons
+    // preserve semantics even when no reuse occurs; this cost gate avoids
+    // adding the lookup to linear recursion or bodies cheaper than the lookup.
+    if (
+      estimate.recursive_calls < 2 || estimate.body_cost <= lookup_ops ||
+      recursive_work < generated_ops
+    )
+      return std::nullopt;
+  } else {
+    // Require enough recursive work to amortize both the lookup and the stores,
+    // and keep generated cache IR below one third of the estimated body. This
+    // rejects cheap recursive wrappers while allowing expensive computations.
+    if (
+      estimate.body_cost <= lookup_ops ||
+      generated_ops * 3 > estimate.body_cost ||
+      recursive_work < generated_ops * 3
+    )
+      return std::nullopt;
+  }
 
   return MemoizationPlan{
     std::move(dependencies),
-    choose_cache_size(estimate.body_cost, estimate.recursive_calls, key_count)
+    reset_on_entry ? choose_scoped_cache_size(function.args.size())
+                   : choose_cache_size(
+                       estimate.body_cost, estimate.recursive_calls, key_count
+                     ),
+    reset_on_entry
   };
+}
+
+auto rewrite_self_calls(
+  Region &region, const std::string &old_name, const std::string &helper_name
+) -> void {
+  for (auto *op : region) {
+    if (op->code == OpCode::Call) {
+      auto &payload = std::get<CallPayload>(op->payload);
+      if (payload.func_name == old_name)
+        payload.func_name = helper_name;
+    } else if (op->code == OpCode::If) {
+      auto &payload = std::get<IfPayload>(op->payload);
+      rewrite_self_calls(*payload.then_region, old_name, helper_name);
+      if (payload.else_region)
+        rewrite_self_calls(*payload.else_region, old_name, helper_name);
+    } else if (op->code == OpCode::While) {
+      auto &payload = std::get<WhilePayload>(op->payload);
+      rewrite_self_calls(*payload.cond_region, old_name, helper_name);
+      rewrite_self_calls(*payload.loop_region, old_name, helper_name);
+    }
+  }
+}
+
+auto unique_function_name(const Module &module, const std::string &base)
+  -> std::string {
+  auto exists = [&](const std::string &name) {
+    return std::any_of(
+      module.functions.begin(), module.functions.end(), [&](const auto &func) {
+        return func->name == name;
+      }
+    );
+  };
+  auto name = base;
+  for (size_t suffix = 0; exists(name); ++suffix)
+    name = base + "_" + std::to_string(suffix + 1);
+  return name;
+}
+
+auto wrap_scoped_memoized_function(
+  Module &module,
+  Function &helper,
+  CacheInfo &cache,
+  const std::string &public_name
+) -> void {
+  const auto helper_name =
+    unique_function_name(module, "__exodus_memo_body_" + public_name);
+  helper.name = helper_name;
+  rewrite_self_calls(helper.body, public_name, helper_name);
+
+  auto wrapper = std::make_unique<Function>();
+  wrapper->name = public_name;
+  wrapper->type = helper.type;
+  wrapper->args.reserve(helper.args.size());
+  for (size_t index = 0; index < helper.args.size(); ++index) {
+    wrapper->args.push_back(module.ctx.make_value<Argument>(
+      helper.args[index]->type, static_cast<int>(index)
+    ));
+  }
+
+  auto *zero = module.ctx.make_const(I32::get(), 0);
+  auto *used_begin = make_getptr(module, cache.used, zero);
+  wrapper->body.push_back(used_begin);
+  wrapper->body.push_back(make_op(
+    module,
+    OpCode::Memset,
+    nullptr,
+    {used_begin->result,
+     module.ctx.make_const(I32::get(), static_cast<int>(cache.size)),
+     zero}
+  ));
+  auto *call = make_op(
+    module,
+    OpCode::Call,
+    std::static_pointer_cast<Func>(helper.type)->ret_type,
+    std::vector<Value *>(wrapper->args.begin(), wrapper->args.end()),
+    CallPayload{helper_name}
+  );
+  wrapper->body.push_back(call);
+  wrapper->body.push_back(
+    make_op(module, OpCode::Ret, nullptr, {call->result})
+  );
+  module.functions.push_back(std::move(wrapper));
 }
 
 } // namespace
@@ -496,23 +609,53 @@ auto Memoization::run(
   CallGraph call_graph(m);
   bool changed = false;
 
+  struct Candidate {
+    Function *function = nullptr;
+    MemoizationPlan plan;
+  };
+  std::vector<Candidate> candidates;
+  candidates.reserve(m.functions.size());
+
   for (auto &function_ptr : m.functions) {
     auto &function = *function_ptr;
     auto effect_it = effects.find(&function);
     if (effect_it == effects.end() || !call_graph.isRecursive(&function))
       continue;
 
-    auto context_keys = is_memoizable(function, effect_it->second);
-    if (!context_keys)
+    auto plan = is_memoizable(function, effect_it->second);
+    if (!plan)
       continue;
 
+    if (plan->reset_on_entry) {
+      const bool singleton_scc = std::any_of(
+        call_graph.getSCCs().begin(),
+        call_graph.getSCCs().end(),
+        [&](const auto &scc) {
+          return scc.size() == 1 && scc.front() == &function;
+        }
+      );
+      // A wrapper around one member of a mutually recursive SCC could be
+      // re-entered by another member and clear a still-active invocation's
+      // cache. Keep the original SCC unless one wrapper encloses all recursion.
+      if (!singleton_scc)
+        continue;
+    }
+
+    candidates.push_back({&function, std::move(*plan)});
+  }
+
+  for (auto &candidate : candidates) {
+    auto &function = *candidate.function;
+    const auto public_name = function.name;
     auto cache = create_cache(
-      m, function, context_keys->context_globals, context_keys->cache_size
+      m, function, candidate.plan.context_globals, candidate.plan.cache_size
     );
     auto lookup = build_lookup(m, function, cache);
     instrument_returns(m, function.body, function, cache);
     function.body.splice(function.body.begin(), lookup);
     function.is_memoized = true;
+    if (candidate.plan.reset_on_entry)
+      wrap_scoped_memoized_function(m, function, cache, public_name);
     changed = true;
   }
 

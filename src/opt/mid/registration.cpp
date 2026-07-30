@@ -2,6 +2,7 @@
 #include "cfg_simplify.hpp"
 #include "dce.hpp"
 #include "gvn.hpp"
+#include "immutable_pointer_slot_canonicalize.hpp"
 #include "inliner.hpp"
 #include "inst_combine.hpp"
 #include "licm.hpp"
@@ -10,10 +11,17 @@
 #include "loop_strength_reduce.hpp"
 #include "loop_unroll.hpp"
 #include "mem2reg.hpp"
+#include "monotonic_guard_tighten.hpp"
 #include "polyhedral_opt.hpp"
 #include "tail_recursion_elim.hpp"
 
 namespace exodus::mid_ir::opt {
+
+static exodus::opt::RegisterLinearFunctionPass<ImmutablePointerSlotCanonicalize>
+  reg_immutable_pointer_slot_canonicalize(
+    "immutable_pointer_slot_canonicalize",
+    "canonicalize proven immutable local pointer slots"
+  );
 
 static exodus::opt::RegisterLinearFunctionPass<Mem2Reg>
   reg_mem2reg("mem2reg", "memory to register promotion");
@@ -38,6 +46,11 @@ static exodus::opt::RegisterLinearFunctionPass<GVN>
 
 static exodus::opt::RegisterLinearFunctionPass<DCE>
   reg_early_dce("early_dce", "remove dead SSA before loop scheduling");
+
+static exodus::opt::RegisterLinearFunctionPass<MonotonicGuardTighten>
+  reg_monotonic_guard_tighten(
+    "monotonic_guard_tighten", "tighten proven effect-free loop guard suffixes"
+  );
 
 static exodus::opt::RegisterLinearFunctionPass<PolyhedralOpt>
   reg_polyhedral_opt("polyhedral_opt", "proof-gated affine loop scheduling");

@@ -2,9 +2,11 @@
 
 #include "../../mid/dom.hpp"
 #include "../../mid/ir.hpp"
+#include "../../mid/memory.hpp"
 #include "../../mid/rewriter.hpp"
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace exodus::mid_ir::opt {
@@ -13,10 +15,12 @@ struct Expression {
   OpCode code;
   Type *type = nullptr;
   std::vector<uint32_t> operands;
+  Type *getptr_layout_type = nullptr;
 
   auto operator==(const Expression &other) const -> bool {
     return code == other.code && type == other.type &&
-           operands == other.operands;
+           operands == other.operands &&
+           getptr_layout_type == other.getptr_layout_type;
   }
 };
 
@@ -27,6 +31,8 @@ struct ExpressionHash {
     for (auto operand : expression.operands) {
       hash ^= std::hash<uint32_t>{}(operand) + (hash << 6) + (hash >> 2);
     }
+    hash ^= std::hash<Type *>{}(expression.getptr_layout_type) + (hash << 6) +
+            (hash >> 2);
     return hash;
   }
 };
@@ -35,9 +41,22 @@ class GVN {
   using ValueNumber = uint32_t;
 
   struct MemoryState {
-    std::unordered_map<Expression, Value *, ExpressionHash> loads;
-    std::unordered_map<ValueNumber, Value *> stored_values;
-    std::unordered_map<ValueNumber, Op *> pending_stores;
+    struct LoadFact {
+      Value *value = nullptr;
+      MemoryLocation location;
+    };
+    struct StoredValueFact {
+      Value *value = nullptr;
+      MemoryLocation location;
+    };
+    struct StoreFact {
+      Op *operation = nullptr;
+      MemoryLocation location;
+    };
+
+    std::unordered_map<Expression, LoadFact, ExpressionHash> loads;
+    std::unordered_map<ValueNumber, StoredValueFact> stored_values;
+    std::unordered_map<ValueNumber, StoreFact> pending_stores;
 
     auto clear() -> void {
       loads.clear();
@@ -47,9 +66,11 @@ class GVN {
   };
 
   MidModule *module;
+  BasicAliasAnalysis alias_analysis;
   MidIRRewriter rewriter;
   DomTree *dom = nullptr;
   std::unordered_map<Value *, ValueNumber> value_numbers;
+  std::unordered_map<Op *, Block *> op_blocks;
   std::unordered_map<std::string, ValueNumber> constant_numbers;
   std::unordered_map<Expression, Value *, ExpressionHash> available;
   bool changed = false;
@@ -64,8 +85,25 @@ public:
 private:
   auto visit(Block *block, MemoryState state) -> void;
   auto prepare_inherited_state(Block *block, MemoryState &state) -> void;
-  auto process_op(Op *op, MemoryState &state, std::vector<Expression> &inserted)
-    -> void;
+  auto process_op(
+    Block *block, Op *op, MemoryState &state, std::vector<Expression> &inserted
+  ) -> void;
+  auto is_redundant_source_store(Block *block, Op *store) const -> bool;
+  auto accesses_cannot_partially_alias(
+    const MemoryLocation &lhs, const MemoryLocation &rhs
+  ) const -> bool;
+  auto pointer_offset_is_multiple_of(
+    Value *pointer,
+    Value *root,
+    size_t modulus,
+    std::unordered_set<Value *> &active
+  ) const -> bool;
+  auto invalidate_for_write(
+    MemoryState &state, const std::optional<MemoryLocation> &location
+  ) -> void;
+  auto observe_read(
+    MemoryState &state, const std::optional<MemoryLocation> &location
+  ) -> void;
   auto number_value(Value *value) -> ValueNumber;
   auto build_expression(Op *op) -> std::optional<Expression>;
   auto simplify(Op *op, const std::vector<ValueNumber> &operands) -> Value *;

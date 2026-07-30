@@ -19,6 +19,10 @@ private:
   std::unordered_map<Op *, Block *> op_blocks;
 
   auto build_op_block_map(LinearFunction &func) -> void;
+  auto sink_partial_store(LinearFunction &func) -> bool;
+  auto can_move_store_across_branch(Op *store, Op *branch) const -> bool;
+  auto is_side_effect_free(const Op *op) const -> bool;
+  auto same_memory_access(Op *lhs, Op *rhs) const -> bool;
   auto
   match_contiguous_pointer(Value *pointer, const CountedLoopInfo &loop) const
     -> bool;
@@ -34,6 +38,7 @@ private:
   static auto integer_constant(Value *value) -> std::optional<int>;
   static auto is_byte_splat_constant(Value *value) -> bool;
   static auto reset_operands(Op *op, std::vector<Value *> operands) -> void;
+  static auto rebuild_cfg(LinearFunction &func) -> void;
   static auto renumber_blocks(LinearFunction &func) -> void;
 };
 

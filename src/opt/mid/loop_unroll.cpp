@@ -132,7 +132,11 @@ auto LoopUnroll::validate_shape(
     default:
       break;
     }
-    if (!std::holds_alternative<EmptyPayload>(op->payload))
+    if (
+      !std::holds_alternative<EmptyPayload>(op->payload) &&
+      !(op->code == OpCode::GetPtr &&
+        std::holds_alternative<GetPtrPayload>(op->payload))
+    )
       return false;
     body.push_back(op);
   }

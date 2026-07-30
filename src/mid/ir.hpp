@@ -20,6 +20,13 @@ struct PhiPayload {
   std::vector<std::pair<Block *, Value *>> incoming;
 };
 
+struct GetPtrPayload {
+  // Type cursor used immediately before the first index.  It is independent
+  // from the physical base so an immutable T** slot can become its stored T*
+  // without changing any byte stride.
+  std::shared_ptr<Type> layout_type;
+};
+
 enum class OpCode : uint8_t {
   // clang-format off
   Add, Sub, Mul, Div, Mod, FAdd, FSub, FMul, FDiv, // arithmetic
@@ -41,7 +48,8 @@ struct Op : OpBase {
   std::vector<Block *> successors;
   OpResult *result = nullptr;
 
-  using Payload = std::variant<EmptyPayload, CallPayload, PhiPayload>;
+  using Payload =
+    std::variant<EmptyPayload, CallPayload, PhiPayload, GetPtrPayload>;
 
   Payload payload;
 
