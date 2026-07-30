@@ -2,8 +2,6 @@
 
 namespace exodus::high_ir::opt {
 
-SimpleDCE::SimpleDCE(Module * /* m */) {}
-
 namespace {
 
 auto get_alloca_root(Value *value) -> Value * {
@@ -19,12 +17,124 @@ auto get_alloca_root(Value *value) -> Value * {
 
 } // namespace
 
+auto SimpleDCE::global_root(Value *value) const -> Value * {
+  auto *root = get_addr_root(value);
+  return root && root->kind == ValueKind::GlobalVar ? root : nullptr;
+}
+
+auto SimpleDCE::mark_global_read(Value *address) -> void {
+  if (auto *root = global_root(address))
+    global_uses[root].reads = true;
+}
+
+auto SimpleDCE::mark_global_write(Value *address) -> void {
+  if (auto *root = global_root(address))
+    global_uses[root].writes = true;
+}
+
+auto SimpleDCE::mark_global_escape(Value *value) -> void {
+  if (auto *root = global_root(value))
+    global_uses[root].escapes = true;
+}
+
+auto SimpleDCE::mark_global_unknown(Value *value) -> void {
+  if (auto *root = global_root(value))
+    global_uses[root].unknown = true;
+}
+
+auto SimpleDCE::scan_global_uses(const Region &region) -> void {
+  for (auto *op : region) {
+    switch (op->code) {
+    case OpCode::Load:
+      if (!op->operands.empty())
+        mark_global_read(op->operands[0]);
+      break;
+    case OpCode::Store:
+      if (op->operands.size() >= 2) {
+        mark_global_write(op->operands[1]);
+        if (op->operands[0] && op->operands[0]->type->is_ptr())
+          mark_global_escape(op->operands[0]);
+      }
+      break;
+    case OpCode::GetPtr: {
+      auto effects = get_op_effects(*op);
+      for (auto *address : effects.reads)
+        mark_global_read(address);
+      break;
+    }
+    case OpCode::Memset:
+      if (!op->operands.empty())
+        mark_global_write(op->operands[0]);
+      break;
+    case OpCode::Call:
+      for (auto *operand : op->operands) {
+        if (operand && operand->type->is_ptr())
+          mark_global_escape(operand);
+      }
+      break;
+    case OpCode::Ret:
+      for (auto *operand : op->operands) {
+        if (operand && operand->type->is_ptr())
+          mark_global_escape(operand);
+      }
+      break;
+    default:
+      for (auto *operand : op->operands) {
+        if (operand && operand->type->is_ptr())
+          mark_global_unknown(operand);
+      }
+      break;
+    }
+
+    if (op->code == OpCode::If) {
+      const auto &payload = std::get<IfPayload>(op->payload);
+      scan_global_uses(*payload.then_region);
+      if (payload.else_region)
+        scan_global_uses(*payload.else_region);
+    } else if (op->code == OpCode::While) {
+      const auto &payload = std::get<WhilePayload>(op->payload);
+      scan_global_uses(*payload.cond_region);
+      scan_global_uses(*payload.loop_region);
+    }
+  }
+}
+
+auto SimpleDCE::collect_global_uses() -> void {
+  global_uses.clear();
+  dead_global_roots.clear();
+  if (!module)
+    return;
+
+  for (const auto &function : module->functions) {
+    if (!function->is_decl)
+      scan_global_uses(function->body);
+  }
+
+  for (const auto &[root, use] : global_uses) {
+    if (use.writes && !use.reads && !use.escapes && !use.unknown)
+      dead_global_roots.insert(root);
+  }
+}
+
+auto SimpleDCE::dead_global_write(Op *op) const -> bool {
+  Value *address = nullptr;
+  if (op->code == OpCode::Store && op->operands.size() >= 2)
+    address = op->operands[1];
+  else if (op->code == OpCode::Memset && !op->operands.empty())
+    address = op->operands[0];
+  auto *root = global_root(address);
+  return root && dead_global_roots.count(root) != 0;
+}
+
 auto SimpleDCE::mark_stores_to(Value *ptr) -> void {
   Value *root = get_addr_root(ptr);
   for (auto &[user, _] : parents) {
-    if (
-      user->code == OpCode::Store && get_addr_root(user->operands[1]) == root
-    ) {
+    Value *address = nullptr;
+    if (user->code == OpCode::Store && user->operands.size() >= 2)
+      address = user->operands[1];
+    else if (user->code == OpCode::Memset && !user->operands.empty())
+      address = user->operands[0];
+    if (address && get_addr_root(address) == root) {
       mark(user);
     }
   }
@@ -58,8 +168,11 @@ auto SimpleDCE::mark_memory_dependencies(Op *op) -> void {
   }
 }
 
-auto SimpleDCE::is_intrinsically_live(Op *op) -> bool {
+auto SimpleDCE::is_intrinsically_live(Op *op) const -> bool {
   if (op->code == OpCode::If || op->code == OpCode::While)
+    return false;
+
+  if (dead_global_write(op))
     return false;
 
   auto effects = get_op_effects(*op);
@@ -158,6 +271,7 @@ auto SimpleDCE::run(Function &f, FunctionAnalysisManager & /* FAM */)
   escaped_allocas.clear();
   worklist.clear();
 
+  collect_global_uses();
   build_parent_map(f.body);
   collect_escaped_allocas();
   initial_mark(f.body);

@@ -16,15 +16,35 @@ using namespace exodus::high_ir;
 using namespace exodus::opt;
 
 struct SimpleDCE {
+  struct GlobalUse {
+    bool reads = false;
+    bool writes = false;
+    bool escapes = false;
+    bool unknown = false;
+  };
+
   IRRewriter rewriter;
   std::unordered_map<Op *, Op *> parents;
   std::unordered_set<Op *> liveset;
   std::unordered_set<Value *> escaped_allocas;
+  std::unordered_map<Value *, GlobalUse> global_uses;
+  std::unordered_set<Value *> dead_global_roots;
   std::deque<Op *> worklist;
 
-  SimpleDCE(Module * /* m */);
+  Module *module;
 
-  static auto is_intrinsically_live(Op *op) -> bool;
+  explicit SimpleDCE(Module *m) : module(m) {}
+
+  auto collect_global_uses() -> void;
+  auto scan_global_uses(const Region &region) -> void;
+  auto mark_global_read(Value *address) -> void;
+  auto mark_global_write(Value *address) -> void;
+  auto mark_global_escape(Value *value) -> void;
+  auto mark_global_unknown(Value *value) -> void;
+  auto global_root(Value *value) const -> Value *;
+  auto dead_global_write(Op *op) const -> bool;
+
+  auto is_intrinsically_live(Op *op) const -> bool;
 
   auto mark_stores_to(Value *ptr) -> void;
   auto collect_escaped_allocas() -> void;
