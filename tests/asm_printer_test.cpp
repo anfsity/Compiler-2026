@@ -21,6 +21,7 @@ auto test_stack_frame_is_aligned_and_indexed_from_sp() -> void {
       .get();
   auto local = mf.add_stack_slot(4);
 
+  entry->insts.emplace_back(PROLOGUE);
   entry->insts.emplace_back(ADDI)
     .add_reg(T0, true, false)
     .add_reg(SP)
@@ -44,6 +45,7 @@ auto test_outgoing_and_incoming_arg_offsets() -> void {
   auto outgoing = mf.add_outgoing_arg_slot(8, 8, 8);
   auto incoming = mf.add_incoming_arg_slot(9, 8, 8);
 
+  entry->insts.emplace_back(PROLOGUE);
   entry->insts.emplace_back(SW).add_reg(A0).add_fi(outgoing).add_imm(0);
   entry->insts.emplace_back(LW)
     .add_reg(A1, true, false)
@@ -67,6 +69,7 @@ auto test_outgoing_arg_offsets_reuse_call_slot() -> void {
   auto first_call_arg9 = mf.add_outgoing_arg_slot(9, 8, 8);
   auto second_call_arg8 = mf.add_outgoing_arg_slot(8, 8, 8);
 
+  entry->insts.emplace_back(PROLOGUE);
   entry->insts.emplace_back(SD).add_reg(A0).add_fi(first_call_arg8).add_imm(0);
   entry->insts.emplace_back(SD).add_reg(A1).add_fi(first_call_arg9).add_imm(0);
   entry->insts.emplace_back(SD).add_reg(A2).add_fi(second_call_arg8).add_imm(0);
@@ -89,7 +92,7 @@ auto test_float_copy_prints_float_move() -> void {
     mf.blocks.emplace_back(std::make_unique<MachineBasicBlock>(0, "entry"))
       .get();
   entry->insts.emplace_back(COPY).add_reg(FT0, true, false).add_reg(FA0);
-  entry->insts.emplace_back(RET);
+  entry->insts.emplace_back(RET_NOFRAME);
 
   auto text = AsmPrinter::to_string(mf);
   require(text.find("fmv.s ft0, fa0") != std::string::npos);
@@ -102,7 +105,7 @@ auto test_float_to_int_conversion_uses_truncation() -> void {
     mf.blocks.emplace_back(std::make_unique<MachineBasicBlock>(0, "entry"))
       .get();
   entry->insts.emplace_back(FCVT_W_S).add_reg(A0, true, false).add_reg(FA0);
-  entry->insts.emplace_back(RET);
+  entry->insts.emplace_back(RET_NOFRAME);
 
   auto text = AsmPrinter::to_string(mf);
   require(text.find("fcvt.w.s a0, fa0, rtz") != std::string::npos);
@@ -115,6 +118,7 @@ auto test_callee_saved_registers_are_saved() -> void {
     mf.blocks.emplace_back(std::make_unique<MachineBasicBlock>(0, "entry"))
       .get();
 
+  entry->insts.emplace_back(PROLOGUE);
   entry->insts.emplace_back(COPY).add_reg(S1, true, false).add_reg(A0);
   entry->insts.emplace_back(RET);
 
@@ -150,12 +154,13 @@ auto test_large_offset_does_not_clobber_memory_reg() -> void {
 
   mf.add_stack_slot(4096, 8);
   auto large = mf.add_stack_slot(8, 8);
+  entry->insts.emplace_back(PROLOGUE);
   entry->insts.emplace_back(SD).add_reg(T6).add_fi(large).add_imm(0);
   entry->insts.emplace_back(RET);
 
   auto text = AsmPrinter::to_string(mf);
   require(text.find("sd t6, 0(t6)") == std::string::npos);
-  require(text.find("sd t6, 0(t4)") != std::string::npos);
+  require(text.find("sd t6, 0(t5)") != std::string::npos);
 }
 
 auto test_large_offset_keeps_non_stack_base() -> void {
@@ -169,11 +174,11 @@ auto test_large_offset_keeps_non_stack_base() -> void {
     .add_reg(A0, true, false)
     .add_reg(S1)
     .add_imm(4096);
-  entry->insts.emplace_back(RET);
+  entry->insts.emplace_back(RET_NOFRAME);
 
   auto text = AsmPrinter::to_string(mf);
-  require(text.find("add t4, s1, t4") != std::string::npos);
-  require(text.find("add t4, sp, t4") == std::string::npos);
+  require(text.find("add t6, s1, t6") != std::string::npos);
+  require(text.find("add t6, sp, t6") == std::string::npos);
 }
 
 int main() {
