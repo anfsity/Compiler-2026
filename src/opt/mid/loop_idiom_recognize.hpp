@@ -28,6 +28,13 @@ private:
     -> bool;
   auto has_escaping_result(const Loop &loop) const -> bool;
   auto replace_single_store_loop(const Loop &loop) -> bool;
+  auto forward_loop_carried_store(LinearFunction &func, const Loop &loop)
+    -> bool;
+  auto loop_executes_at_least_once(
+    const Loop &loop, const CountedLoopInfo &counted
+  ) const -> bool;
+  auto match_relative_pointer(Value *pointer, Value *base, int offset) const
+    -> bool;
   auto hoist_independent_store(LinearFunction &func, const Loop &loop) -> bool;
   auto get_initial_pointer(Value *pointer, const CountedLoopInfo &loop) const
     -> Value *;

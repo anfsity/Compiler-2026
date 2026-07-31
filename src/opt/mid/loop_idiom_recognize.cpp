@@ -31,6 +31,11 @@ auto LoopIdiomRecognize::run(
 
   bool changed = false;
   for (auto *loop : loop_info.get_loops_innermost_first()) {
+    if (forward_loop_carried_store(func, *loop)) {
+      op_blocks.clear();
+      affine_loops = nullptr;
+      return exodus::opt::PreservedAnalysis::none();
+    }
     if (replace_single_store_loop(*loop)) {
       changed = true;
       continue;
@@ -434,6 +439,193 @@ auto LoopIdiomRecognize::has_escaping_result(const Loop &loop) const -> bool {
     }
   }
   return false;
+}
+
+auto LoopIdiomRecognize::loop_executes_at_least_once(
+  const Loop &loop, const CountedLoopInfo &counted
+) const -> bool {
+  if (!affine_loops)
+    return false;
+  if (auto trips = affine_loops->exact_trip_count(counted))
+    return *trips > 0;
+
+  // Reaching a block inside a canonical increasing parent loop proves the
+  // parent's current induction is below its bound.  If the inner loop starts
+  // at the same value and uses the same strict bound, it therefore has a first
+  // iteration.  This avoids speculating the seed load for zero-trip loops.
+  auto *parent = loop.get_parent();
+  if (!parent || !parent->contains(counted.preheader))
+    return false;
+  auto parent_counted = affine_loops->match_counted_loop(*parent);
+  if (
+    !parent_counted || counted.induction.predicate != OpCode::Lt ||
+    counted.induction.step <= 0 ||
+    parent_counted->induction.predicate != OpCode::Lt ||
+    parent_counted->induction.step <= 0 ||
+    counted.induction.bound != parent_counted->induction.bound
+  ) {
+    return false;
+  }
+
+  auto same_initial =
+    counted.induction.initial == parent_counted->induction.initial;
+  if (!same_initial) {
+    auto inner_initial = integer_constant(counted.induction.initial);
+    auto parent_initial = integer_constant(parent_counted->induction.initial);
+    same_initial =
+      inner_initial && parent_initial && *inner_initial == *parent_initial;
+  }
+  return same_initial &&
+         affine_loops->is_no_wrap(
+           parent_counted->induction.phi->result, *parent_counted, *parent
+         );
+}
+
+auto LoopIdiomRecognize::match_relative_pointer(
+  Value *pointer, Value *base, int offset
+) const -> bool {
+  if (
+    !pointer || !base || pointer->kind != ValueKind::OpResult ||
+    !pointer->type->is_ptr() || pointer->type != base->type
+  ) {
+    return false;
+  }
+  auto *getptr = static_cast<Op *>(static_cast<OpResult *>(pointer)->creator);
+  auto block = op_blocks.find(getptr);
+  if (
+    !getptr || block == op_blocks.end() || getptr->code != OpCode::GetPtr ||
+    getptr->result != pointer || getptr->operands.size() != 2 ||
+    getptr->operands[0] != base ||
+    integer_constant(getptr->operands[1]) != offset
+  ) {
+    return false;
+  }
+  auto plan = mid_ir::analyze_getptr(*getptr);
+  auto element_type = std::static_pointer_cast<Ptr>(base->type)->target;
+  return plan.valid && !plan.reads_memory && plan.steps.size() == 1 &&
+         element_type &&
+         plan.steps.front().kind == ir::GetPtrStep::Kind::Index &&
+         plan.steps.front().scale == element_type->byte_size();
+}
+
+auto LoopIdiomRecognize::forward_loop_carried_store(
+  LinearFunction &func, const Loop &loop
+) -> bool {
+  auto counted =
+    affine_loops ? affine_loops->match_counted_loop(loop) : std::nullopt;
+  if (
+    !counted || !module || !module->ctx || loop.get_blocks().size() != 2 ||
+    counted->continuation != counted->latch ||
+    !loop_executes_at_least_once(loop, *counted) ||
+    counted->preheader->insts.empty() || counted->latch->insts.empty() ||
+    counted->preheader->insts.back()->code != OpCode::Jump ||
+    counted->latch->insts.back()->code != OpCode::Jump
+  ) {
+    return false;
+  }
+
+  Op *store = nullptr;
+  for (auto *block : loop.get_blocks()) {
+    for (auto *op : block->insts) {
+      if (op->code == OpCode::Store) {
+        if (store)
+          return false;
+        store = op;
+        continue;
+      }
+      if (
+        op->code == OpCode::Call || op->code == OpCode::Memset ||
+        op->code == OpCode::Alloca || op->code == OpCode::Ret
+      ) {
+        return false;
+      }
+      if (op->code == OpCode::GetPtr) {
+        auto plan = mid_ir::analyze_getptr(*op);
+        if (!plan.valid || plan.reads_memory)
+          return false;
+      }
+    }
+  }
+  if (
+    !store || op_blocks.at(store) != counted->latch ||
+    store->operands.size() != 2 || !store->operands[1] ||
+    !store->operands[1]->type->is_ptr() ||
+    !match_contiguous_pointer(store->operands[1], *counted)
+  ) {
+    return false;
+  }
+
+  auto *center = store->operands[1];
+  auto *initial_center = get_initial_pointer(center, *counted);
+  if (!initial_center)
+    return false;
+
+  Op *left_load = nullptr;
+  auto store_position = std::find(
+    counted->latch->insts.begin(), counted->latch->insts.end(), store
+  );
+  for (auto it = counted->latch->insts.begin(); it != store_position; ++it) {
+    auto *op = *it;
+    if (
+      op->code != OpCode::Load || !op->result || op->operands.size() != 1 ||
+      !match_relative_pointer(op->operands[0], center, -1)
+    ) {
+      continue;
+    }
+    if (left_load)
+      return false;
+    left_load = op;
+  }
+  if (
+    !left_load || !store->operands[0] ||
+    store->operands[0]->type != left_load->result->type
+  ) {
+    return false;
+  }
+
+  auto *offset = module->ctx->make_const(I32::get(), -1);
+  auto *initial_left_pointer = module->make_op(OpCode::GetPtr);
+  initial_left_pointer->operands = {initial_center, offset};
+  initial_left_pointer->payload = default_getptr_payload(initial_center);
+  initial_left_pointer->result =
+    module->ctx->make_value<OpResult>(center->type, initial_left_pointer);
+  initial_center->addUse(initial_left_pointer);
+  offset->addUse(initial_left_pointer);
+
+  auto *initial_load = module->make_op(OpCode::Load);
+  initial_load->operands = {initial_left_pointer->result};
+  initial_load->result =
+    module->ctx->make_value<OpResult>(left_load->result->type, initial_load);
+  initial_left_pointer->result->addUse(initial_load);
+
+  auto preheader_position = std::prev(counted->preheader->insts.end());
+  counted->preheader->insts.insert(preheader_position, initial_left_pointer);
+  counted->preheader->insts.insert(preheader_position, initial_load);
+
+  auto *value_phi = module->make_op(OpCode::Phi, PhiPayload{});
+  value_phi->result =
+    module->ctx->make_value<OpResult>(left_load->result->type, value_phi);
+  auto &incoming = std::get<PhiPayload>(value_phi->payload).incoming;
+  incoming = {
+    {counted->preheader, initial_load->result},
+    {counted->latch, store->operands[0]},
+  };
+  initial_load->result->addUse(value_phi);
+  store->operands[0]->addUse(value_phi);
+
+  auto header_position = counted->header->insts.begin();
+  while (header_position != counted->header->insts.end() &&
+         (*header_position)->code == OpCode::Phi) {
+    ++header_position;
+  }
+  counted->header->insts.insert(header_position, value_phi);
+
+  MidIRRewriter rewriter;
+  rewriter.set_scope(func);
+  rewriter.replace_all_uses_with(left_load->result, value_phi->result);
+  rewriter.eraseOp(left_load);
+  rewriter.finalize(func);
+  return true;
 }
 
 auto LoopIdiomRecognize::reset_operands(Op *op, std::vector<Value *> operands)
