@@ -3,7 +3,9 @@
 #include "../../mid/getptr.hpp"
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <limits>
+#include <unordered_set>
 
 namespace exodus::mid_ir::opt {
 
@@ -241,6 +243,67 @@ auto LoopStrengthReduce::can_clone_initial_expression(
   );
 }
 
+auto LoopStrengthReduce::dynamic_guard_proves_no_wrap(
+  Value *value, const CountedLoopInfo &counted, const Loop &loop
+) const -> bool {
+  // A strict signed unit-step guard itself supplies one useful endpoint even
+  // when the initial value and bound are dynamic:
+  //
+  //   iv < bound  => iv <= INT_MAX - 1 => iv + 1 does not wrap
+  //   iv > bound  => iv >= INT_MIN + 1 => iv - 1 does not wrap
+  //
+  // Check every source Add/Sub in the migrated expression, not just its final
+  // affine form.  This prevents an expression such as (iv + C) - C from being
+  // accepted when the intermediate iv + C can overflow.
+  const bool increasing =
+    counted.induction.step == 1 && counted.induction.predicate == OpCode::Lt;
+  const bool decreasing =
+    counted.induction.step == -1 && counted.induction.predicate == OpCode::Gt;
+  if (!increasing && !decreasing)
+    return false;
+
+  std::unordered_set<Value *> active;
+  std::function<bool(Value *)> prove = [&](Value *current) -> bool {
+    if (!current)
+      return false;
+    if (
+      current == counted.induction.phi->result ||
+      AffineLoopInfo::integer_constant(current)
+    ) {
+      return true;
+    }
+    if (!active.insert(current).second || current->kind != ValueKind::OpResult)
+      return false;
+
+    auto *creator =
+      static_cast<Op *>(static_cast<OpResult *>(current)->creator);
+    auto block = op_blocks.find(creator);
+    if (
+      !creator || block == op_blocks.end() || !loop.contains(block->second) ||
+      creator->operands.size() != 2 ||
+      (creator->code != OpCode::Add && creator->code != OpCode::Sub)
+    ) {
+      active.erase(current);
+      return false;
+    }
+    const bool operands_safe =
+      prove(creator->operands[0]) && prove(creator->operands[1]);
+    auto form = affine_loops->affine_form(current, counted, loop);
+    active.erase(current);
+    if (!operands_safe || !form)
+      return false;
+    if (form->coefficient == 0) {
+      return form->offset >= std::numeric_limits<int32_t>::min() &&
+             form->offset <= std::numeric_limits<int32_t>::max();
+    }
+    if (form->coefficient != 1)
+      return false;
+    return increasing ? (form->offset >= 0 && form->offset <= 1)
+                      : (form->offset >= -1 && form->offset <= 0);
+  };
+  return prove(value);
+}
+
 auto LoopStrengthReduce::constant_affine_difference(
   Value *value, Value *anchor, const Loop &loop
 ) const -> std::optional<int64_t> {
@@ -285,7 +348,7 @@ auto LoopStrengthReduce::constant_affine_difference(
 
 auto LoopStrengthReduce::reduce_getptrs(LinearFunction &func, const Loop &loop)
   -> bool {
-  auto counted = affine_loops->match_counted_loop(loop);
+  auto counted = affine_loops->match_counted_loop(loop, true);
   if (!counted)
     return false;
 
@@ -685,19 +748,26 @@ auto LoopStrengthReduce::reduce_getptr(
   auto form = affine_loops->affine_form(varying_value, counted, loop);
   if (!form || (form->coefficient != 1 && form->coefficient != -1))
     return false;
-  // Keep the migration candidate-neutral.  The former LSR proved dynamic
-  // bounds only for the direct unit induction; checked offset ranges are a
-  // new capability and need a separate profitability/validation patch.
-  if (
-    !AffineLoopInfo::integer_constant(counted.induction.bound) &&
-    (form->coefficient != 1 || form->offset != 0)
-  ) {
+  const bool regular_no_wrap =
+    affine_loops->is_no_wrap(varying_value, counted, loop);
+  const bool guard_no_wrap =
+    !regular_no_wrap &&
+    dynamic_guard_proves_no_wrap(varying_value, counted, loop);
+  if (!regular_no_wrap && !guard_no_wrap)
     return false;
-  }
-  if (!affine_loops->is_no_wrap(varying_value, counted, loop))
-    return false;
+  // For a dynamic guarded IV + offset, do not speculate the source i32
+  // arithmetic in the preheader: a zero-trip loop need not evaluate it.  Seed
+  // the address with the raw IV and apply the proven constant displacement in
+  // pointer width instead.
+  const bool seed_with_raw_induction = guard_no_wrap && form->offset != 0;
+  auto *initial_expression =
+    seed_with_raw_induction ? induction.phi->result : varying_value;
   if (!can_clone_initial_expression(
-        varying_value, induction.phi->result, induction.initial, loop, preheader
+        initial_expression,
+        induction.phi->result,
+        induction.initial,
+        loop,
+        preheader
       ))
     return false;
 
@@ -724,6 +794,27 @@ auto LoopStrengthReduce::reduce_getptr(
     return false;
   }
 
+  std::optional<int> seed_pointer_offset;
+  if (seed_with_raw_induction) {
+    auto initial_byte_offset =
+      static_cast<__int128>(form->offset) * varying_scale;
+    if (
+      initial_byte_offset < std::numeric_limits<int64_t>::min() ||
+      initial_byte_offset > std::numeric_limits<int64_t>::max() ||
+      initial_byte_offset % update_scale != 0
+    ) {
+      return false;
+    }
+    auto initial_offset = initial_byte_offset / update_scale;
+    if (
+      initial_offset < std::numeric_limits<int>::min() ||
+      initial_offset > std::numeric_limits<int>::max()
+    ) {
+      return false;
+    }
+    seed_pointer_offset = static_cast<int>(initial_offset);
+  }
+
   unsigned update_cost = 0;
   if (byte_step >= -2048 && byte_step <= 2047) {
     update_cost = 1;
@@ -742,7 +833,7 @@ auto LoopStrengthReduce::reduce_getptr(
     return false;
 
   auto *initial_index = clone_initial_expression(
-    varying_value,
+    initial_expression,
     induction.phi->result,
     induction.initial,
     loop,
@@ -762,6 +853,21 @@ auto LoopStrengthReduce::reduce_getptr(
     operand->addUse(initial_pointer);
   preheader->insts.insert(std::prev(preheader->insts.end()), initial_pointer);
   op_blocks[initial_pointer] = preheader;
+
+  Value *recurrence_initial = initial_pointer->result;
+  if (seed_pointer_offset) {
+    auto *adjusted = module->make_op(OpCode::GetPtr);
+    auto *offset = module->ctx->make_const(I32::get(), *seed_pointer_offset);
+    adjusted->operands = {initial_pointer->result, offset};
+    adjusted->payload = default_getptr_payload(initial_pointer->result);
+    adjusted->result =
+      module->ctx->make_value<OpResult>(getptr->result->type, adjusted);
+    initial_pointer->result->addUse(adjusted);
+    offset->addUse(adjusted);
+    preheader->insts.insert(std::prev(preheader->insts.end()), adjusted);
+    op_blocks[adjusted] = preheader;
+    recurrence_initial = adjusted->result;
+  }
 
   auto *pointer_phi = module->make_op(OpCode::Phi, PhiPayload{});
   pointer_phi->result =
@@ -783,10 +889,10 @@ auto LoopStrengthReduce::reduce_getptr(
 
   auto &incoming = std::get<PhiPayload>(pointer_phi->payload).incoming;
   incoming = {
-    {preheader, initial_pointer->result},
+    {preheader, recurrence_initial},
     {induction.latch, next_pointer->result},
   };
-  initial_pointer->result->addUse(pointer_phi);
+  recurrence_initial->addUse(pointer_phi);
   next_pointer->result->addUse(pointer_phi);
 
   auto insert_pos = loop.get_header()->insts.begin();
