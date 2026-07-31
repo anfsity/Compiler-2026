@@ -241,6 +241,48 @@ auto LoopStrengthReduce::can_clone_initial_expression(
   );
 }
 
+auto LoopStrengthReduce::constant_affine_difference(
+  Value *value, Value *anchor, const Loop &loop
+) const -> std::optional<int64_t> {
+  if (value == anchor)
+    return 0;
+
+  auto value_constant = AffineLoopInfo::integer_constant(value);
+  auto anchor_constant = AffineLoopInfo::integer_constant(anchor);
+  if (value_constant && anchor_constant)
+    return static_cast<int64_t>(*value_constant) - *anchor_constant;
+
+  for (auto *scope = &loop; scope; scope = scope->get_parent()) {
+    auto counted = affine_loops->match_counted_loop(*scope);
+    if (!counted)
+      continue;
+    auto value_form = affine_loops->affine_form(value, *counted, *scope);
+    auto anchor_form = affine_loops->affine_form(anchor, *counted, *scope);
+    if (
+      !value_form || !anchor_form ||
+      value_form->coefficient != anchor_form->coefficient
+    ) {
+      continue;
+    }
+    if (
+      !affine_loops->is_no_wrap(value, *counted, *scope) ||
+      !affine_loops->is_no_wrap(anchor, *counted, *scope)
+    ) {
+      return std::nullopt;
+    }
+    auto difference = static_cast<__int128>(value_form->offset) -
+                      static_cast<__int128>(anchor_form->offset);
+    if (
+      difference < std::numeric_limits<int64_t>::min() ||
+      difference > std::numeric_limits<int64_t>::max()
+    ) {
+      return std::nullopt;
+    }
+    return static_cast<int64_t>(difference);
+  }
+  return std::nullopt;
+}
+
 auto LoopStrengthReduce::reduce_getptrs(LinearFunction &func, const Loop &loop)
   -> bool {
   auto counted = affine_loops->match_counted_loop(loop);
@@ -270,6 +312,7 @@ auto LoopStrengthReduce::reduce_getptrs(LinearFunction &func, const Loop &loop)
     Value *value = nullptr;
   };
   std::vector<FormedRecurrence> formed;
+  std::unordered_set<Op *> reduced;
   bool formed_implicit_slot_recurrence = false;
   for (auto *getptr : candidates) {
     auto duplicate = std::find_if(
@@ -315,7 +358,125 @@ auto LoopStrengthReduce::reduce_getptrs(LinearFunction &func, const Loop &loop)
        getptr_layout_type(*getptr),
        replacement}
     );
+    reduced.insert(getptr);
     formed_implicit_slot_recurrence |= reads_immutable_slot;
+    changed = true;
+  }
+
+  // Rebase nearby addresses on an already-formed recurrence.  This shares one
+  // loop-carried pointer across accesses such as a[i][j +/- 1][k] while
+  // preserving the source's i32 index semantics: every non-identical index
+  // must have a checked, no-wrap affine difference in this loop nest.
+  for (auto *getptr : candidates) {
+    if (reduced.count(getptr) || !getptr->result || !op_blocks.count(getptr))
+      continue;
+    auto plan = mid_ir::analyze_getptr(*getptr);
+    if (!plan.valid || plan.reads_memory)
+      continue;
+
+    FormedRecurrence *best_anchor = nullptr;
+    int64_t best_byte_offset = 0;
+    for (auto &anchor : formed) {
+      if (
+        anchor.operands.size() != getptr->operands.size() ||
+        anchor.operands.empty() || anchor.operands[0] != getptr->operands[0] ||
+        anchor.result_type != getptr->result->type ||
+        anchor.layout_type != getptr_layout_type(*getptr)
+      ) {
+        continue;
+      }
+
+      __int128 byte_offset = 0;
+      bool compatible = true;
+      for (const auto &step : plan.steps) {
+        if (
+          step.kind != ir::GetPtrStep::Kind::Index ||
+          step.index_pos + 1 >= getptr->operands.size()
+        ) {
+          compatible = false;
+          break;
+        }
+        auto difference = constant_affine_difference(
+          getptr->operands[step.index_pos + 1],
+          anchor.operands[step.index_pos + 1],
+          loop
+        );
+        if (!difference) {
+          compatible = false;
+          break;
+        }
+        byte_offset += static_cast<__int128>(*difference) * step.scale;
+      }
+      if (
+        !compatible || byte_offset < std::numeric_limits<int64_t>::min() ||
+        byte_offset > std::numeric_limits<int64_t>::max()
+      ) {
+        continue;
+      }
+
+      auto candidate_offset = static_cast<int64_t>(byte_offset);
+      // Only create a rebase that the target can absorb directly in a memory
+      // operand.  Larger offsets need their own LI/ADD pair, so retaining a
+      // separate short-lived recurrence is both cheaper and more stable under
+      // the fixed-point pipeline.
+      if (candidate_offset < -2048 || candidate_offset > 2047)
+        continue;
+      auto magnitude = [](int64_t value) -> uint64_t {
+        return value < 0 ? uint64_t{0} - static_cast<uint64_t>(value)
+                         : static_cast<uint64_t>(value);
+      };
+      if (
+        !best_anchor ||
+        magnitude(candidate_offset) < magnitude(best_byte_offset)
+      ) {
+        best_anchor = &anchor;
+        best_byte_offset = candidate_offset;
+      }
+    }
+    if (!best_anchor)
+      continue;
+
+    auto update_plan =
+      ir::analyze_getptr(best_anchor->value->type, getptr->result->type, 1);
+    if (
+      update_plan.reads_memory || update_plan.steps.size() != 1 ||
+      update_plan.steps.front().kind != ir::GetPtrStep::Kind::Index ||
+      update_plan.steps.front().scale <= 0 ||
+      best_byte_offset % update_plan.steps.front().scale != 0
+    ) {
+      continue;
+    }
+    auto pointer_offset = best_byte_offset / update_plan.steps.front().scale;
+    if (
+      pointer_offset < std::numeric_limits<int>::min() ||
+      pointer_offset > std::numeric_limits<int>::max()
+    ) {
+      continue;
+    }
+
+    auto *rebased = module->make_op(OpCode::GetPtr);
+    auto *offset =
+      module->ctx->make_const(I32::get(), static_cast<int>(pointer_offset));
+    rebased->operands = {best_anchor->value, offset};
+    rebased->payload = default_getptr_payload(best_anchor->value);
+    rebased->result =
+      module->ctx->make_value<OpResult>(getptr->result->type, rebased);
+    best_anchor->value->addUse(rebased);
+    offset->addUse(rebased);
+
+    auto block = op_blocks.find(getptr);
+    if (block == op_blocks.end())
+      continue;
+    auto position = std::find(
+      block->second->insts.begin(), block->second->insts.end(), getptr
+    );
+    if (position == block->second->insts.end())
+      continue;
+    block->second->insts.insert(position, rebased);
+    op_blocks[rebased] = block->second;
+    rewriter.replace_all_uses_with(getptr->result, rebased->result);
+    rewriter.eraseOp(getptr);
+    op_blocks.erase(getptr);
     changed = true;
   }
   rewriter.finalize(func);
