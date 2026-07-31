@@ -310,6 +310,47 @@ auto select_alloca(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   return seq.take();
 }
 
+struct FoldedMemoryAddress {
+  Value *base = nullptr;
+  int offset = 0;
+};
+
+auto fold_memory_address(Value *address) -> std::optional<FoldedMemoryAddress> {
+  if (!address || address->kind != ValueKind::OpResult)
+    return std::nullopt;
+  auto *getptr =
+    static_cast<mid_ir::Op *>(static_cast<OpResult *>(address)->creator);
+  if (
+    !getptr || getptr->code != mid_ir::OpCode::GetPtr ||
+    getptr->result != address || getptr->operands.size() != 2
+  ) {
+    return std::nullopt;
+  }
+
+  auto plan = mid_ir::analyze_getptr(*getptr);
+  if (
+    !plan.valid || plan.reads_memory || plan.steps.size() != 1 ||
+    plan.steps.front().kind != ir::GetPtrStep::Kind::Index ||
+    plan.steps.front().index_pos != 0
+  ) {
+    return std::nullopt;
+  }
+  auto *index = getptr->operands[1];
+  if (!index || index->kind != ValueKind::Constant)
+    return std::nullopt;
+  const auto &constant = static_cast<Constant *>(index)->val;
+  if (!std::holds_alternative<int>(constant))
+    return std::nullopt;
+
+  auto byte_offset =
+    static_cast<int64_t>(std::get<int>(constant)) * plan.steps.front().scale;
+  if (byte_offset < -2048 || byte_offset > 2047)
+    return std::nullopt;
+  return FoldedMemoryAddress{
+    getptr->operands[0], static_cast<int>(byte_offset)
+  };
+}
+
 auto select_load(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   Seq seq;
   if (
@@ -321,22 +362,29 @@ auto select_load(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   }
 
   auto dst = def_reg(ctx, op.result);
-  auto addr = use_reg(ctx, op.operands[0], seq);
+  auto folded = fold_memory_address(op.operands[0]);
+  auto addr = use_reg(ctx, folded ? folded->base : op.operands[0], seq);
   auto opcode = op.result->type->is_f32()   ? FLW
                 : op.result->type->is_ptr() ? LD
                                             : LW;
-  seq.emit(opcode).add_reg(dst, true, false).add_reg(addr).add_imm(0);
+  seq.emit(opcode)
+    .add_reg(dst, true, false)
+    .add_reg(addr)
+    .add_imm(folded ? folded->offset : 0);
   return seq.take();
 }
 
 auto select_store(LoweringContext &ctx, const mid_ir::Op &op) -> InstSeq {
   Seq seq;
   auto value = use_reg(ctx, op.operands[0], seq);
-  auto addr = use_reg(ctx, op.operands[1], seq);
+  auto folded = fold_memory_address(op.operands[1]);
+  auto addr = use_reg(ctx, folded ? folded->base : op.operands[1], seq);
   auto opcode = op.operands[0]->type->is_f32()   ? FSW
                 : op.operands[0]->type->is_ptr() ? SD
                                                  : SW;
-  seq.emit(opcode).add_reg(value).add_reg(addr).add_imm(0);
+  seq.emit(opcode).add_reg(value).add_reg(addr).add_imm(
+    folded ? folded->offset : 0
+  );
   return seq.take();
 }
 
