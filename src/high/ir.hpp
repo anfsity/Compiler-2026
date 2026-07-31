@@ -72,6 +72,7 @@ struct Function {
   Region body;
   bool is_decl = false;
   bool is_memoized = false;
+  bool no_inline = false;
 };
 
 struct IRContext : exodus::ir::IRContext {

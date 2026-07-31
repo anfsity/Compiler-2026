@@ -107,6 +107,7 @@ auto Flattener::visit(high_ir::Function *f) -> std::unique_ptr<LinearFunction> {
   cur_func->type = f->type;
   cur_func->args = f->args;
   cur_func->is_decl = f->is_decl;
+  cur_func->no_inline = f->no_inline;
 
   if (!f->is_decl) {
     cur_block = create_block("entry");

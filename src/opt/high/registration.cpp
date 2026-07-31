@@ -2,6 +2,7 @@
 #include "constant_propagation.hpp"
 #include "dead_function_elimination.hpp"
 #include "global_init_promotion.hpp"
+#include "guarded_bitwise_idiom.hpp"
 #include "idempotent_loop_simplify.hpp"
 #include "inliner.hpp"
 #include "inst_simplify.hpp"
@@ -16,6 +17,12 @@
 #include "sdce.hpp"
 
 namespace exodus::high_ir::opt {
+
+static exodus::opt::RegisterModulePass<GuardedBitwiseIdiom>
+  reg_guarded_bitwise_idiom(
+    "guarded_bitwise_idiom",
+    "specialize proven bit-accumulation loops for non-negative operands"
+  );
 
 static exodus::opt::RegisterModulePass<IPCP>
   reg_ipcp("ipcp", "interprocedural constant propagation");
