@@ -23,9 +23,10 @@ private:
   };
 
   Module *module;
-  std::unordered_set<Op *> guarded_fallbacks;
 
-  auto simplify_region(Region &region) -> bool;
+  auto
+  simplify_region(Region &region, std::unordered_set<Op *> &guarded_fallbacks)
+    -> bool;
   auto match_modular_recurrence(
     Region &parent, Region::iterator position, Op *loop
   ) const -> std::optional<ModularRecurrence>;
@@ -33,7 +34,8 @@ private:
     Region &parent,
     Region::iterator position,
     Op *loop,
-    const ModularRecurrence &match
+    const ModularRecurrence &match,
+    std::unordered_set<Op *> &guarded_fallbacks
   ) -> void;
 };
 

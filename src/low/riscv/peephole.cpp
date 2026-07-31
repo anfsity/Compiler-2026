@@ -56,6 +56,21 @@ struct SignedDivisionMagic {
   int shift = 0;
 };
 
+constexpr int kI12Min = -2048;
+constexpr int kI12Max = 2047;
+constexpr int kI32SignBit = 31;
+constexpr int kI32Width = 32;
+constexpr int kXlenWidth = 64;
+
+struct ConstantOperationMatch {
+  int constant_reg = 0;
+  int value = 0;
+  int dst = 0;
+  int lhs = 0;
+  int rhs = 0;
+  int source = 0;
+};
+
 // Hacker's Delight, signed 32-bit invariant division.  The returned
 // multiplier/shift pair is valid over the complete i32 domain; callers still
 // handle 0, +/-1, powers of two, and INT_MIN separately.
@@ -258,9 +273,326 @@ auto replace_constant_op(
     block.insts.insert(next, std::move(inst));
 }
 
+auto match_constant_operation(
+  const MachineInst &li,
+  const MachineInst &op,
+  const std::unordered_map<int, int> &uses
+) -> std::optional<ConstantOperationMatch> {
+  if (li.opcode != LI || li.operands.size() != 2)
+    return std::nullopt;
+  auto constant_reg = reg_at(li, 0);
+  auto value = imm_at(li, 1);
+  if (!constant_reg || !value || !is_virtual(*constant_reg))
+    return std::nullopt;
+  auto use_count = uses.find(*constant_reg);
+  if (use_count == uses.end() || use_count->second != 1)
+    return std::nullopt;
+  if (op.operands.size() != 3)
+    return std::nullopt;
+  auto dst = reg_at(op, 0);
+  auto lhs = reg_at(op, 1);
+  auto rhs = reg_at(op, 2);
+  if (!dst || !lhs || !rhs)
+    return std::nullopt;
+  if (*lhs != *constant_reg && *rhs != *constant_reg)
+    return std::nullopt;
+  auto source = *lhs == *constant_reg ? *rhs : *lhs;
+  return ConstantOperationMatch{
+    *constant_reg, *value, *dst, *lhs, *rhs, source
+  };
+}
+
+auto lower_add_sub_constant(
+  const MachineInst &op, const ConstantOperationMatch &match
+) -> std::vector<MachineInst> {
+  std::vector<MachineInst> replacement;
+  if (op.opcode == ADD || op.opcode == ADDW) {
+    if (match.value == 0) {
+      replacement.push_back(make_copy(match.dst, match.source));
+    } else if (match.value >= kI12Min && match.value <= kI12Max) {
+      replacement.push_back(make_unary_imm(
+        op.opcode == ADDW ? ADDIW : ADDI, match.dst, match.source, match.value
+      ));
+    }
+  } else if (match.rhs == match.constant_reg && match.value == 0) {
+    replacement.push_back(make_copy(match.dst, match.lhs));
+  } else if (match.lhs == match.constant_reg && match.value == 0) {
+    replacement.push_back(make_binary(op.opcode, match.dst, ZERO, match.rhs));
+  }
+  return replacement;
+}
+
+auto lower_bitwise_constant(
+  const MachineInst &op, const ConstantOperationMatch &match
+) -> std::vector<MachineInst> {
+  std::vector<MachineInst> replacement;
+  if (op.opcode == AND && match.value == 0) {
+    replacement.push_back(make_copy(match.dst, ZERO));
+  } else if (match.value == 0) {
+    replacement.push_back(make_copy(match.dst, match.source));
+  } else if (match.value >= kI12Min && match.value <= kI12Max) {
+    auto immediate_opcode = op.opcode == AND  ? ANDI
+                            : op.opcode == OR ? ORI
+                                              : XORI;
+    replacement.push_back(
+      make_unary_imm(immediate_opcode, match.dst, match.source, match.value)
+    );
+  }
+  return replacement;
+}
+
+auto lower_shift_constant(
+  const MachineInst &op, const ConstantOperationMatch &match
+) -> std::vector<MachineInst> {
+  std::vector<MachineInst> replacement;
+  if (
+    match.value < 0 || match.value >= kXlenWidth ||
+    match.rhs != match.constant_reg
+  ) {
+    return replacement;
+  }
+  auto immediate_opcode = op.opcode == SLL   ? SLLI
+                          : op.opcode == SRL ? SRLI
+                                             : SRAI;
+  replacement.push_back(
+    make_unary_imm(immediate_opcode, match.dst, match.lhs, match.value)
+  );
+  return replacement;
+}
+
+auto lower_mul_constant(
+  const MachineInst &op, const ConstantOperationMatch &match
+) -> std::vector<MachineInst> {
+  std::vector<MachineInst> replacement;
+  if (match.value == 0) {
+    replacement.push_back(make_li(match.dst, 0));
+  } else if (match.value == 1) {
+    replacement.push_back(make_copy(match.dst, match.source));
+  } else if (match.value == -1) {
+    replacement.push_back(
+      make_binary(op.opcode == MULW ? SUBW : SUB, match.dst, ZERO, match.source)
+    );
+  } else if (match.value == 2) {
+    replacement.push_back(make_binary(
+      op.opcode == MULW ? ADDW : ADD, match.dst, match.source, match.source
+    ));
+  } else if (op.opcode == MUL && is_power_of_two(match.value)) {
+    replacement.push_back(make_unary_imm(
+      SLLI, match.dst, match.source, log2_power_of_two(match.value)
+    ));
+  } else if (match.dst != match.source && match.value > 2) {
+    auto lower = static_cast<int64_t>(match.value) - 1;
+    auto upper = static_cast<int64_t>(match.value) + 1;
+    auto is_power_of_two_i64 = [](int64_t candidate) {
+      return candidate > 0 && (candidate & (candidate - 1)) == 0;
+    };
+    auto log2_i64 = [](int64_t candidate) {
+      int shift = 0;
+      while (candidate > 1) {
+        candidate >>= 1;
+        ++shift;
+      }
+      return shift;
+    };
+    if (is_power_of_two_i64(lower)) {
+      replacement.push_back(
+        make_unary_imm(SLLI, match.dst, match.source, log2_i64(lower))
+      );
+      replacement.push_back(make_binary(
+        op.opcode == MULW ? ADDW : ADD, match.dst, match.dst, match.source
+      ));
+    } else if (is_power_of_two_i64(upper)) {
+      replacement.push_back(
+        make_unary_imm(SLLI, match.dst, match.source, log2_i64(upper))
+      );
+      replacement.push_back(make_binary(
+        op.opcode == MULW ? SUBW : SUB, match.dst, match.dst, match.source
+      ));
+    }
+  }
+  return replacement;
+}
+
+auto lower_div_constant(
+  MachineFunction &function,
+  const ConstantOperationMatch &match,
+  const std::unordered_set<int> &sign_extended_i32_regs,
+  bool in_hot_loop
+) -> std::vector<MachineInst> {
+  std::vector<MachineInst> replacement;
+  if (match.rhs != match.constant_reg)
+    return replacement;
+  if (match.value == 1) {
+    replacement.push_back(make_copy(match.dst, match.source));
+  } else if (match.value == -1) {
+    replacement.push_back(make_binary(SUBW, match.dst, ZERO, match.source));
+  } else if (
+    is_power_of_two(match.value) && match.value <= (1 << 30) &&
+    match.dst != match.source
+  ) {
+    // Signed division truncates toward zero.  Add the sign-dependent bias
+    // before the arithmetic shift to avoid rounding negative values down.
+    auto shift = log2_power_of_two(match.value);
+    if (sign_extended_i32_regs.count(match.source) == 0) {
+      replacement.push_back(make_unary_imm(ADDIW, match.dst, match.source, 0));
+      replacement.push_back(
+        make_unary_imm(SRAI, match.dst, match.dst, kI32SignBit)
+      );
+    } else {
+      replacement.push_back(
+        make_unary_imm(SRAI, match.dst, match.source, kI32SignBit)
+      );
+    }
+    if (match.value - 1 <= kI12Max) {
+      replacement.push_back(
+        make_unary_imm(ANDI, match.dst, match.dst, match.value - 1)
+      );
+    } else {
+      auto mask = function.new_vreg();
+      replacement.push_back(make_li(mask, match.value - 1));
+      replacement.push_back(make_binary(AND, match.dst, match.dst, mask));
+    }
+    replacement.push_back(
+      make_binary(ADDW, match.dst, match.source, match.dst)
+    );
+    replacement.push_back(make_unary_imm(SRAI, match.dst, match.dst, shift));
+  } else if (in_hot_loop && match.dst != match.source) {
+    auto magic = signed_division_magic(match.value);
+    if (!magic)
+      return replacement;
+    auto multiplier = function.new_vreg();
+    auto correction = function.new_vreg();
+    auto normalized = match.source;
+    replacement.push_back(make_li(multiplier, magic->multiplier));
+    if (sign_extended_i32_regs.count(match.source) == 0) {
+      replacement.push_back(make_unary_imm(ADDIW, correction, match.source, 0));
+      normalized = correction;
+    }
+    replacement.push_back(make_binary(MUL, match.dst, normalized, multiplier));
+    replacement.push_back(
+      make_unary_imm(SRAI, match.dst, match.dst, kI32Width)
+    );
+    if (match.value > 0 && magic->multiplier < 0) {
+      replacement.push_back(
+        make_binary(ADDW, match.dst, match.dst, normalized)
+      );
+    } else if (match.value < 0 && magic->multiplier > 0) {
+      replacement.push_back(
+        make_binary(SUBW, match.dst, match.dst, normalized)
+      );
+    }
+    if (magic->shift > 0)
+      replacement.push_back(
+        make_unary_imm(SRAI, match.dst, match.dst, magic->shift)
+      );
+    replacement.push_back(
+      make_unary_imm(SRLI, correction, match.dst, kXlenWidth - 1)
+    );
+    replacement.push_back(make_binary(ADDW, match.dst, match.dst, correction));
+  }
+  return replacement;
+}
+
+auto lower_rem_constant(
+  MachineFunction &function,
+  const ConstantOperationMatch &match,
+  const std::unordered_set<int> &sign_extended_i32_regs,
+  bool in_loop
+) -> std::vector<MachineInst> {
+  std::vector<MachineInst> replacement;
+  if (match.rhs != match.constant_reg)
+    return replacement;
+  if (match.value == 1 || match.value == -1) {
+    replacement.push_back(make_li(match.dst, 0));
+    return replacement;
+  }
+
+  auto scratch = match.constant_reg;
+  if (scratch == match.dst || scratch == match.source)
+    scratch = function.new_vreg();
+  auto result = match.dst;
+  if (result == match.source || result == scratch)
+    result = function.new_vreg();
+  auto finish_result = [&] {
+    if (result != match.dst)
+      replacement.push_back(make_copy(match.dst, result));
+  };
+
+  auto absolute_divisor = match.value < 0 ? -static_cast<int64_t>(match.value)
+                                          : static_cast<int64_t>(match.value);
+  if (
+    absolute_divisor <= std::numeric_limits<int>::max() &&
+    is_power_of_two(static_cast<int>(absolute_divisor))
+  ) {
+    // For d = 2^k, signed remainder can be computed over the full i32
+    // domain as ((x + bias) & (d - 1)) - bias, where bias is d - 1 for
+    // negative x and zero otherwise.
+    auto divisor = static_cast<int>(absolute_divisor);
+    auto shift = log2_power_of_two(divisor);
+    if (sign_extended_i32_regs.count(match.source) == 0) {
+      replacement.push_back(make_unary_imm(ADDIW, scratch, match.source, 0));
+      replacement.push_back(
+        make_unary_imm(SRAI, scratch, scratch, kI32SignBit)
+      );
+    } else {
+      replacement.push_back(
+        make_unary_imm(SRAI, scratch, match.source, kI32SignBit)
+      );
+    }
+    replacement.push_back(
+      make_unary_imm(SRLI, scratch, scratch, kXlenWidth - shift)
+    );
+    replacement.push_back(make_binary(ADDW, result, match.source, scratch));
+    if (divisor - 1 <= kI12Max) {
+      replacement.push_back(make_unary_imm(ANDI, result, result, divisor - 1));
+    } else {
+      replacement.push_back(
+        make_unary_imm(SLLI, result, result, kXlenWidth - shift)
+      );
+      replacement.push_back(
+        make_unary_imm(SRLI, result, result, kXlenWidth - shift)
+      );
+    }
+    replacement.push_back(make_binary(SUBW, result, result, scratch));
+    finish_result();
+    return replacement;
+  }
+
+  if (!in_loop)
+    return replacement;
+  auto magic = signed_division_magic(match.value);
+  if (!magic)
+    return replacement;
+
+  auto normalized = match.source;
+  if (sign_extended_i32_regs.count(match.source) == 0) {
+    normalized = function.new_vreg();
+    replacement.push_back(make_unary_imm(ADDIW, normalized, match.source, 0));
+  }
+  replacement.push_back(make_li(scratch, magic->multiplier));
+  replacement.push_back(make_binary(MUL, result, normalized, scratch));
+  replacement.push_back(make_unary_imm(SRAI, result, result, kI32Width));
+  if (match.value > 0 && magic->multiplier < 0) {
+    replacement.push_back(make_binary(ADDW, result, result, normalized));
+  } else if (match.value < 0 && magic->multiplier > 0) {
+    replacement.push_back(make_binary(SUBW, result, result, normalized));
+  }
+  if (magic->shift > 0)
+    replacement.push_back(make_unary_imm(SRAI, result, result, magic->shift));
+  replacement.push_back(make_unary_imm(SRLI, scratch, result, kXlenWidth - 1));
+  replacement.push_back(make_binary(ADDW, result, result, scratch));
+  replacement.push_back(make_li(scratch, match.value));
+  replacement.push_back(make_binary(MULW, result, result, scratch));
+  replacement.push_back(make_binary(SUBW, result, normalized, result));
+  finish_result();
+  return replacement;
+}
+
 // Match operations with a one-use LI immediately before the operation.
 // Materializing an arbitrary constant is more expensive than an immediate
-// form, and this pattern is the canonical output of isel.
+// form, and this pattern is the canonical output of isel.  Rule families are
+// delegated to small lowerers so target-specific arithmetic does not share one
+// growing switch body.
 auto simplify_constant_operation(
   MachineFunction &function,
   MachineBasicBlock &block,
@@ -271,277 +603,40 @@ auto simplify_constant_operation(
   bool in_hot_loop,
   bool in_loop
 ) -> bool {
-  if (li->opcode != LI || li->operands.size() != 2)
-    return false;
-  auto constant_reg = reg_at(*li, 0);
-  auto value = imm_at(*li, 1);
-  if (!constant_reg || !value || !is_virtual(*constant_reg))
-    return false;
-  auto use_count = uses.find(*constant_reg);
-  if (use_count == uses.end() || use_count->second != 1)
-    return false;
-
-  if (op->operands.size() != 3)
-    return false;
-  auto dst = reg_at(*op, 0);
-  auto lhs = reg_at(*op, 1);
-  auto rhs = reg_at(*op, 2);
-  if (!dst || !lhs || !rhs)
-    return false;
-
-  auto source = *lhs == *constant_reg ? rhs : lhs;
-  if (*lhs != *constant_reg && *rhs != *constant_reg)
+  auto match = match_constant_operation(*li, *op, uses);
+  if (!match)
     return false;
 
   std::vector<MachineInst> replacement;
   switch (op->opcode) {
   case ADD:
   case ADDW:
-    if (*value == 0) {
-      replacement.push_back(make_copy(*dst, *source));
-    } else if (*value >= -2048 && *value <= 2047) {
-      replacement.push_back(
-        make_unary_imm(op->opcode == ADDW ? ADDIW : ADDI, *dst, *source, *value)
-      );
-    }
-    break;
   case SUB:
   case SUBW:
-    if (*rhs == *constant_reg && *value == 0) {
-      replacement.push_back(make_copy(*dst, *lhs));
-    } else if (*lhs == *constant_reg && *value == 0) {
-      replacement.push_back(make_binary(op->opcode, *dst, ZERO, *rhs));
-    }
+    replacement = lower_add_sub_constant(*op, *match);
     break;
   case OR:
   case XOR:
-    if (*value == 0) {
-      replacement.push_back(make_copy(*dst, *source));
-    } else if (*value >= -2048 && *value <= 2047) {
-      replacement.push_back(
-        make_unary_imm(op->opcode == OR ? ORI : XORI, *dst, *source, *value)
-      );
-    }
-    break;
   case AND:
-    if (*value == 0) {
-      replacement.push_back(make_copy(*dst, ZERO));
-    } else if (*value >= -2048 && *value <= 2047) {
-      replacement.push_back(make_unary_imm(ANDI, *dst, *source, *value));
-    }
+    replacement = lower_bitwise_constant(*op, *match);
     break;
   case SLL:
   case SRL:
   case SRA:
-    if (*value >= 0 && *value < 64) {
-      auto immediate_opcode = *rhs == *constant_reg
-                                ? (op->opcode == SLL   ? SLLI
-                                   : op->opcode == SRL ? SRLI
-                                                       : SRAI)
-                                : 0;
-      if (immediate_opcode != 0)
-        replacement.push_back(
-          make_unary_imm(immediate_opcode, *dst, *lhs, *value)
-        );
-    }
+    replacement = lower_shift_constant(*op, *match);
     break;
-  case MULW:
   case MUL:
-    if (*value == 0) {
-      replacement.push_back(make_li(*dst, 0));
-    } else if (*value == 1) {
-      replacement.push_back(make_copy(*dst, *source));
-    } else if (*value == -1) {
-      replacement.push_back(
-        make_binary(op->opcode == MULW ? SUBW : SUB, *dst, ZERO, *source)
-      );
-    } else if (*value == 2) {
-      replacement.push_back(
-        make_binary(op->opcode == MULW ? ADDW : ADD, *dst, *source, *source)
-      );
-    } else if (op->opcode == MUL && is_power_of_two(*value)) {
-      replacement.push_back(
-        make_unary_imm(SLLI, *dst, *source, log2_power_of_two(*value))
-      );
-    } else if (*dst != *source && *value > 2) {
-      auto lower = static_cast<int64_t>(*value) - 1;
-      auto upper = static_cast<int64_t>(*value) + 1;
-      auto is_power_of_two_i64 = [](int64_t candidate) {
-        return candidate > 0 && (candidate & (candidate - 1)) == 0;
-      };
-      auto log2_i64 = [](int64_t candidate) {
-        int shift = 0;
-        while (candidate > 1) {
-          candidate >>= 1;
-          ++shift;
-        }
-        return shift;
-      };
-      if (is_power_of_two_i64(lower)) {
-        replacement.push_back(
-          make_unary_imm(SLLI, *dst, *source, log2_i64(lower))
-        );
-        replacement.push_back(
-          make_binary(op->opcode == MULW ? ADDW : ADD, *dst, *dst, *source)
-        );
-      } else if (is_power_of_two_i64(upper)) {
-        replacement.push_back(
-          make_unary_imm(SLLI, *dst, *source, log2_i64(upper))
-        );
-        replacement.push_back(
-          make_binary(op->opcode == MULW ? SUBW : SUB, *dst, *dst, *source)
-        );
-      }
-    }
+  case MULW:
+    replacement = lower_mul_constant(*op, *match);
     break;
   case DIVW:
-    if (*rhs != *constant_reg)
-      break;
-    if (*value == 1) {
-      replacement.push_back(make_copy(*dst, *source));
-    } else if (*value == -1) {
-      replacement.push_back(make_binary(SUBW, *dst, ZERO, *source));
-    } else if (is_power_of_two(*value) && *value <= (1 << 30)) {
-      // Signed division truncates toward zero.  Add the sign-dependent bias
-      // before the arithmetic shift to avoid rounding negative values down.
-      // ADDIW first establishes the sign-extension that DIVW would apply to
-      // an arbitrary i32 producer.  Plain RV64 bitwise operations do not
-      // preserve that property, so using SRAI directly on source is unsound.
-      // Reuse the result register for the normalized value, sign, bias, and
-      // adjusted values to avoid raising spill pressure.
-      if (*dst == *source)
-        break;
-      auto shift = log2_power_of_two(*value);
-      if (sign_extended_i32_regs.count(*source) == 0) {
-        replacement.push_back(make_unary_imm(ADDIW, *dst, *source, 0));
-        replacement.push_back(make_unary_imm(SRAI, *dst, *dst, 31));
-      } else {
-        replacement.push_back(make_unary_imm(SRAI, *dst, *source, 31));
-      }
-      if (*value - 1 <= 2047) {
-        replacement.push_back(make_unary_imm(ANDI, *dst, *dst, *value - 1));
-      } else {
-        auto mask = function.new_vreg();
-        replacement.push_back(make_li(mask, *value - 1));
-        replacement.push_back(make_binary(AND, *dst, *dst, mask));
-      }
-      replacement.push_back(make_binary(ADDW, *dst, *source, *dst));
-      replacement.push_back(make_unary_imm(SRAI, *dst, *dst, shift));
-    } else if (in_hot_loop && *dst != *source) {
-      auto magic = signed_division_magic(*value);
-      if (!magic)
-        break;
-      auto multiplier = function.new_vreg();
-      auto correction = function.new_vreg();
-      auto normalized = *source;
-      replacement.push_back(make_li(multiplier, magic->multiplier));
-      // DIVW interprets only the low i32 and sign-extends it.  Normalize the
-      // dividend explicitly before the 64-bit multiply so this expansion is
-      // valid for every machine producer, including AND/OR/XOR/SLL.
-      if (sign_extended_i32_regs.count(*source) == 0) {
-        replacement.push_back(make_unary_imm(ADDIW, correction, *source, 0));
-        normalized = correction;
-      }
-      replacement.push_back(make_binary(MUL, *dst, normalized, multiplier));
-      replacement.push_back(make_unary_imm(SRAI, *dst, *dst, 32));
-      if (*value > 0 && magic->multiplier < 0) {
-        replacement.push_back(make_binary(ADDW, *dst, *dst, normalized));
-      } else if (*value < 0 && magic->multiplier > 0) {
-        replacement.push_back(make_binary(SUBW, *dst, *dst, normalized));
-      }
-      if (magic->shift > 0)
-        replacement.push_back(make_unary_imm(SRAI, *dst, *dst, magic->shift));
-      replacement.push_back(make_unary_imm(SRLI, correction, *dst, 63));
-      replacement.push_back(make_binary(ADDW, *dst, *dst, correction));
-    }
+    replacement =
+      lower_div_constant(function, *match, sign_extended_i32_regs, in_hot_loop);
     break;
-  case REMW: {
-    if (*rhs != *constant_reg)
-      break;
-    if (*value == 1 || *value == -1) {
-      replacement.push_back(make_li(*dst, 0));
-      break;
-    }
-    auto scratch = *constant_reg;
-    if (scratch == *dst || scratch == *source)
-      scratch = function.new_vreg();
-    auto result = *dst;
-    if (result == *source || result == scratch)
-      result = function.new_vreg();
-    auto finish_result = [&] {
-      if (result != *dst)
-        replacement.push_back(make_copy(*dst, result));
-    };
-
-    auto absolute_divisor =
-      *value < 0 ? -static_cast<int64_t>(*value) : static_cast<int64_t>(*value);
-    if (
-      absolute_divisor <= std::numeric_limits<int>::max() &&
-      is_power_of_two(static_cast<int>(absolute_divisor))
-    ) {
-      // For d = 2^k, signed remainder can be computed over the full i32
-      // domain as ((x + bias) & (d - 1)) - bias, where bias is d - 1 for
-      // negative x and zero otherwise.  Reuse the removed one-use constant
-      // register for bias when it does not conflict with the dividend or
-      // result.  An in-place REMW uses a temporary result so the original
-      // dividend remains available through the final subtraction.
-      auto divisor = static_cast<int>(absolute_divisor);
-      auto shift = log2_power_of_two(divisor);
-      if (sign_extended_i32_regs.count(*source) == 0) {
-        replacement.push_back(make_unary_imm(ADDIW, scratch, *source, 0));
-        replacement.push_back(make_unary_imm(SRAI, scratch, scratch, 31));
-      } else {
-        replacement.push_back(make_unary_imm(SRAI, scratch, *source, 31));
-      }
-      replacement.push_back(make_unary_imm(SRLI, scratch, scratch, 64 - shift));
-      replacement.push_back(make_binary(ADDW, result, *source, scratch));
-      if (divisor - 1 <= 2047) {
-        replacement.push_back(
-          make_unary_imm(ANDI, result, result, divisor - 1)
-        );
-      } else {
-        replacement.push_back(make_unary_imm(SLLI, result, result, 64 - shift));
-        replacement.push_back(make_unary_imm(SRLI, result, result, 64 - shift));
-      }
-      replacement.push_back(make_binary(SUBW, result, result, scratch));
-      finish_result();
-      break;
-    }
-
-    if (!in_loop)
-      break;
-    auto magic = signed_division_magic(*value);
-    if (!magic)
-      break;
-
-    // First compute q = trunc(x / d) using the same full-domain magic-number
-    // proof as DIVW, then form x - q*d.  The old constant register is safe to
-    // reuse after each use; only a non-sign-extended dividend needs one new
-    // register so its normalized i32 value remains available for the final
-    // subtraction.
-    auto normalized = *source;
-    if (sign_extended_i32_regs.count(*source) == 0) {
-      normalized = function.new_vreg();
-      replacement.push_back(make_unary_imm(ADDIW, normalized, *source, 0));
-    }
-    replacement.push_back(make_li(scratch, magic->multiplier));
-    replacement.push_back(make_binary(MUL, result, normalized, scratch));
-    replacement.push_back(make_unary_imm(SRAI, result, result, 32));
-    if (*value > 0 && magic->multiplier < 0) {
-      replacement.push_back(make_binary(ADDW, result, result, normalized));
-    } else if (*value < 0 && magic->multiplier > 0) {
-      replacement.push_back(make_binary(SUBW, result, result, normalized));
-    }
-    if (magic->shift > 0)
-      replacement.push_back(make_unary_imm(SRAI, result, result, magic->shift));
-    replacement.push_back(make_unary_imm(SRLI, scratch, result, 63));
-    replacement.push_back(make_binary(ADDW, result, result, scratch));
-    replacement.push_back(make_li(scratch, *value));
-    replacement.push_back(make_binary(MULW, result, result, scratch));
-    replacement.push_back(make_binary(SUBW, result, normalized, result));
-    finish_result();
+  case REMW:
+    replacement =
+      lower_rem_constant(function, *match, sign_extended_i32_regs, in_loop);
     break;
-  }
   default:
     break;
   }

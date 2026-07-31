@@ -46,45 +46,9 @@ auto is_compare(OpCode code) -> bool {
          code == OpCode::Le || code == OpCode::Gt || code == OpCode::Ge;
 }
 
-auto checked_i64(__int128 value) -> std::optional<int64_t> {
-  if (
-    value < std::numeric_limits<int64_t>::min() ||
-    value > std::numeric_limits<int64_t>::max()
-  ) {
-    return std::nullopt;
-  }
-  return static_cast<int64_t>(value);
-}
-
-auto range_of_form(const AffineForm &form, const IntegerRange &range)
-  -> std::optional<IntegerRange> {
-  if (range.empty())
-    return IntegerRange{0, -1, range.exact};
-
-  auto first = checked_i64(
-    static_cast<__int128>(form.coefficient) * range.minimum + form.offset
-  );
-  auto last = checked_i64(
-    static_cast<__int128>(form.coefficient) * range.maximum + form.offset
-  );
-  if (!first || !last)
-    return std::nullopt;
-  return IntegerRange{
-    std::min(*first, *last), std::max(*first, *last), range.exact
-  };
-}
-
-auto fits_i32(const IntegerRange &range) -> bool {
-  return range.empty() ||
-         (range.minimum >= std::numeric_limits<int32_t>::min() &&
-          range.maximum <= std::numeric_limits<int32_t>::max());
-}
-
 } // namespace
 
-auto AffineLoopInfo::compute(
-  LinearFunction &func, LoopInfo &, DomTree &dom_tree
-) -> void {
+auto AffineLoopInfo::compute(LinearFunction &func, DomTree &dom_tree) -> void {
   op_blocks.clear();
   dom = &dom_tree;
   for (auto &block : func.blocks) {
@@ -93,15 +57,15 @@ auto AffineLoopInfo::compute(
   }
 }
 
-auto AffineLoopInfo::affine_form(
+auto AffineLoopInfo::affine_expression(
   Value *value, const CountedLoopInfo &counted, const Loop &loop
-) const -> std::optional<AffineForm> {
+) const -> std::optional<AffineExpression> {
   if (!value)
     return std::nullopt;
   if (value == counted.induction.phi->result)
-    return AffineForm{1, 0};
+    return AffineExpression{0, {{value, 1}}, false};
   if (auto constant = integer_constant(value))
-    return AffineForm{0, *constant};
+    return AffineExpression{*constant, {}, false};
   if (value->kind != ValueKind::OpResult)
     return std::nullopt;
 
@@ -116,36 +80,32 @@ auto AffineLoopInfo::affine_form(
     return std::nullopt;
   }
 
-  auto lhs = affine_form(creator->operands[0], counted, loop);
-  auto rhs = affine_form(creator->operands[1], counted, loop);
+  auto lhs = affine_expression(creator->operands[0], counted, loop);
+  auto rhs = affine_expression(creator->operands[1], counted, loop);
   if (!lhs || !rhs)
     return std::nullopt;
 
-  std::optional<int64_t> coefficient;
-  std::optional<int64_t> offset;
   if (creator->code == OpCode::Mul) {
-    if (lhs->coefficient != 0 && rhs->coefficient != 0)
+    if (!lhs->is_constant() && !rhs->is_constant())
       return std::nullopt;
-    coefficient = checked_i64(
-      static_cast<__int128>(lhs->coefficient) * rhs->offset +
-      static_cast<__int128>(rhs->coefficient) * lhs->offset
-    );
-    offset = checked_i64(static_cast<__int128>(lhs->offset) * rhs->offset);
-  } else {
-    coefficient = checked_i64(
-      creator->code == OpCode::Add
-        ? static_cast<__int128>(lhs->coefficient) + rhs->coefficient
-        : static_cast<__int128>(lhs->coefficient) - rhs->coefficient
-    );
-    offset = checked_i64(
-      creator->code == OpCode::Add
-        ? static_cast<__int128>(lhs->offset) + rhs->offset
-        : static_cast<__int128>(lhs->offset) - rhs->offset
-    );
+    return lhs->is_constant() ? scale_affine_expression(*rhs, lhs->constant)
+                              : scale_affine_expression(*lhs, rhs->constant);
   }
-  if (!coefficient || !offset)
+  return combine_affine_expressions(
+    *lhs, *rhs, creator->code == OpCode::Add ? 1 : -1
+  );
+}
+
+auto AffineLoopInfo::affine_form(
+  Value *value, const CountedLoopInfo &counted, const Loop &loop
+) const -> std::optional<AffineForm> {
+  auto expression = affine_expression(value, counted, loop);
+  if (!expression)
     return std::nullopt;
-  return AffineForm{*coefficient, *offset};
+  return AffineForm{
+    expression->coefficient(counted.induction.phi->result),
+    expression->constant,
+  };
 }
 
 auto AffineLoopInfo::induction_range(const CountedLoopInfo &loop) const
@@ -241,8 +201,10 @@ auto AffineLoopInfo::expression_is_no_wrap(
   }
 
   auto form = affine_form(value, counted, loop);
-  auto value_range = form ? range_of_form(*form, range) : std::nullopt;
-  return value_range && fits_i32(*value_range);
+  auto value_range =
+    form ? affine_form_range(form->coefficient, form->offset, range)
+         : std::nullopt;
+  return value_range && affine_range_fits_i32(*value_range);
 }
 
 auto AffineLoopInfo::is_no_wrap(
@@ -273,7 +235,8 @@ auto AffineLoopInfo::is_non_negative(
     return false;
   auto evaluation_range =
     range->empty() ? IntegerRange{*initial, *initial, true} : *range;
-  auto value_range = range_of_form(*form, evaluation_range);
+  auto value_range =
+    affine_form_range(form->coefficient, form->offset, evaluation_range);
   return value_range && !value_range->empty() && value_range->minimum >= 0;
 }
 

@@ -393,7 +393,7 @@ auto PolyhedralOpt::run(
     LoopInfo loops;
     loops.compute(func, dom);
     AffineLoopInfo affine;
-    affine.compute(func, loops, dom);
+    affine.compute(func, dom);
     ScalarEvolution scev;
     scev.compute(func, loops, affine, dom);
     PolyhedralInfo polyhedral;

@@ -17,47 +17,45 @@ auto LoopIdiomRecognize::run(
     return exodus::opt::PreservedAnalysis::all();
 
   auto &loop_info = am.get_result<LoopAnalysis>(func);
-  affine_loops = &am.get_result<AffineLoopAnalysis>(func);
-  build_op_block_map(func);
+  Context context{module, &am.get_result<AffineLoopAnalysis>(func), {}};
+  build_op_block_map(context, func);
 
   // Store sinking changes the CFG.  Apply one proven rewrite and let the
   // fixed-point pipeline rebuild loop and dominance analyses before looking
   // for another opportunity.
-  if (sink_partial_store(func)) {
-    op_blocks.clear();
-    affine_loops = nullptr;
+  if (sink_partial_store(func, context)) {
     return exodus::opt::PreservedAnalysis::none();
   }
 
   bool changed = false;
   for (auto *loop : loop_info.get_loops_innermost_first()) {
-    if (forward_loop_carried_store(func, *loop)) {
-      op_blocks.clear();
-      affine_loops = nullptr;
+    if (forward_loop_carried_store(func, *loop, context)) {
       return exodus::opt::PreservedAnalysis::none();
     }
-    if (replace_single_store_loop(*loop)) {
+    if (replace_single_store_loop(*loop, context)) {
       changed = true;
       continue;
     }
-    changed |= hoist_independent_store(func, *loop);
+    changed |= hoist_independent_store(func, *loop, context);
   }
 
-  op_blocks.clear();
-  affine_loops = nullptr;
   return changed ? exodus::opt::PreservedAnalysis::none()
                  : exodus::opt::PreservedAnalysis::all();
 }
 
-auto LoopIdiomRecognize::build_op_block_map(LinearFunction &func) -> void {
-  op_blocks.clear();
+auto LoopIdiomRecognize::build_op_block_map(
+  Context &context, LinearFunction &func
+) -> void {
+  context.op_blocks.clear();
   for (auto &block : func.blocks) {
     for (auto *op : block->insts)
-      op_blocks[op] = block.get();
+      context.op_blocks[op] = block.get();
   }
 }
 
-auto LoopIdiomRecognize::sink_partial_store(LinearFunction &func) -> bool {
+auto LoopIdiomRecognize::sink_partial_store(
+  LinearFunction &func, Context &context
+) -> bool {
   for (auto &block_ptr : func.blocks) {
     auto *block = block_ptr.get();
     if (block->insts.empty())
@@ -81,7 +79,10 @@ auto LoopIdiomRecognize::sink_partial_store(LinearFunction &func) -> bool {
         break;
       }
     }
-    if (!found_store || !can_move_store_across_branch(*store_it, terminator))
+    if (
+      !found_store ||
+      !can_move_store_across_branch(*store_it, terminator, context)
+    )
       continue;
 
     auto *source_store = *store_it;
@@ -139,7 +140,7 @@ auto LoopIdiomRecognize::sink_partial_store(LinearFunction &func) -> bool {
     auto *bypass = bypass_ptr.get();
     bypass->insts.splice(bypass->insts.end(), block->insts, store_it);
 
-    auto *jump = module->make_op(OpCode::Jump);
+    auto *jump = context.module->make_op(OpCode::Jump);
     jump->successors.push_back(merge);
     bypass->insts.push_back(jump);
     terminator->successors[overwrite_index == 0 ? 1 : 0] = bypass;
@@ -153,16 +154,16 @@ auto LoopIdiomRecognize::sink_partial_store(LinearFunction &func) -> bool {
 }
 
 auto LoopIdiomRecognize::can_move_store_across_branch(
-  Op *store, Op *branch
-) const -> bool {
+  Op *store, Op *branch, const Context &context
+) -> bool {
   if (
     !store || !branch || store->code != OpCode::Store ||
     store->operands.size() != 2
   ) {
     return false;
   }
-  auto block_it = op_blocks.find(branch);
-  if (block_it == op_blocks.end())
+  auto block_it = context.op_blocks.find(branch);
+  if (block_it == context.op_blocks.end())
     return false;
   auto &insts = block_it->second->insts;
   auto store_it = std::find(insts.begin(), insts.end(), store);
@@ -180,7 +181,7 @@ auto LoopIdiomRecognize::can_move_store_across_branch(
   return true;
 }
 
-auto LoopIdiomRecognize::is_side_effect_free(const Op *op) const -> bool {
+auto LoopIdiomRecognize::is_side_effect_free(const Op *op) -> bool {
   if (!op)
     return false;
   switch (op->code) {
@@ -217,7 +218,7 @@ auto LoopIdiomRecognize::is_side_effect_free(const Op *op) const -> bool {
   }
 }
 
-auto LoopIdiomRecognize::same_memory_access(Op *lhs, Op *rhs) const -> bool {
+auto LoopIdiomRecognize::same_memory_access(Op *lhs, Op *rhs) -> bool {
   if (
     !lhs || !rhs || lhs->code != OpCode::Store || rhs->code != OpCode::Store ||
     lhs->operands.size() != 2 || rhs->operands.size() != 2 ||
@@ -285,8 +286,8 @@ auto LoopIdiomRecognize::is_byte_splat_constant(Value *value) -> bool {
 }
 
 auto LoopIdiomRecognize::match_contiguous_pointer(
-  Value *pointer, const CountedLoopInfo &loop
-) const -> bool {
+  Value *pointer, const CountedLoopInfo &loop, const Context &context
+) -> bool {
   if (
     !pointer || pointer->kind != ValueKind::OpResult || !pointer->type->is_ptr()
   ) {
@@ -295,8 +296,8 @@ auto LoopIdiomRecognize::match_contiguous_pointer(
 
   auto *definition =
     static_cast<Op *>(static_cast<OpResult *>(pointer)->creator);
-  auto definition_block = op_blocks.find(definition);
-  if (!definition || definition_block == op_blocks.end())
+  auto definition_block = context.op_blocks.find(definition);
+  if (!definition || definition_block == context.op_blocks.end())
     return false;
 
   if (
@@ -312,10 +313,10 @@ auto LoopIdiomRecognize::match_contiguous_pointer(
     if (base->kind == ValueKind::OpResult) {
       auto *base_definition =
         static_cast<Op *>(static_cast<OpResult *>(base)->creator);
-      auto base_block = op_blocks.find(base_definition);
+      auto base_block = context.op_blocks.find(base_definition);
       if (
-        base_block == op_blocks.end() || loop.header == base_block->second ||
-        loop.latch == base_block->second
+        base_block == context.op_blocks.end() ||
+        loop.header == base_block->second || loop.latch == base_block->second
       ) {
         return false;
       }
@@ -347,9 +348,9 @@ auto LoopIdiomRecognize::match_contiguous_pointer(
         if (index && index->kind == ValueKind::OpResult) {
           auto *index_definition =
             static_cast<Op *>(static_cast<OpResult *>(index)->creator);
-          auto index_block = op_blocks.find(index_definition);
+          auto index_block = context.op_blocks.find(index_definition);
           if (
-            index_block == op_blocks.end() ||
+            index_block == context.op_blocks.end() ||
             loop.header == index_block->second ||
             loop.latch == index_block->second
           ) {
@@ -389,9 +390,9 @@ auto LoopIdiomRecognize::match_contiguous_pointer(
 
   auto *update =
     static_cast<Op *>(static_cast<OpResult *>(next_pointer)->creator);
-  auto update_block = op_blocks.find(update);
+  auto update_block = context.op_blocks.find(update);
   if (
-    !update || update_block == op_blocks.end() ||
+    !update || update_block == context.op_blocks.end() ||
     update_block->second != loop.latch || update->code != OpCode::GetPtr ||
     update->operands.size() != 2 || update->operands[0] != pointer ||
     integer_constant(update->operands[1]) != 1 || !update->result ||
@@ -408,7 +409,9 @@ auto LoopIdiomRecognize::match_contiguous_pointer(
          plan.steps.front().scale == element_type->byte_size();
 }
 
-auto LoopIdiomRecognize::has_escaping_result(const Loop &loop) const -> bool {
+auto LoopIdiomRecognize::has_escaping_result(
+  const Loop &loop, const Context &context
+) -> bool {
   std::unordered_set<Value *> loop_results;
   for (auto *block : loop.get_blocks()) {
     for (auto *op : block->insts) {
@@ -417,7 +420,7 @@ auto LoopIdiomRecognize::has_escaping_result(const Loop &loop) const -> bool {
     }
   }
 
-  for (const auto &[user, block] : op_blocks) {
+  for (const auto &[user, block] : context.op_blocks) {
     if (loop.contains(block))
       continue;
     if (
@@ -442,11 +445,11 @@ auto LoopIdiomRecognize::has_escaping_result(const Loop &loop) const -> bool {
 }
 
 auto LoopIdiomRecognize::loop_executes_at_least_once(
-  const Loop &loop, const CountedLoopInfo &counted
-) const -> bool {
-  if (!affine_loops)
+  const Loop &loop, const CountedLoopInfo &counted, const Context &context
+) -> bool {
+  if (!context.affine_loops)
     return false;
-  if (auto trips = affine_loops->exact_trip_count(counted))
+  if (auto trips = context.affine_loops->exact_trip_count(counted))
     return *trips > 0;
 
   // Reaching a block inside a canonical increasing parent loop proves the
@@ -456,7 +459,7 @@ auto LoopIdiomRecognize::loop_executes_at_least_once(
   auto *parent = loop.get_parent();
   if (!parent || !parent->contains(counted.preheader))
     return false;
-  auto parent_counted = affine_loops->match_counted_loop(*parent);
+  auto parent_counted = context.affine_loops->match_counted_loop(*parent);
   if (
     !parent_counted || counted.induction.predicate != OpCode::Lt ||
     counted.induction.step <= 0 ||
@@ -476,14 +479,14 @@ auto LoopIdiomRecognize::loop_executes_at_least_once(
       inner_initial && parent_initial && *inner_initial == *parent_initial;
   }
   return same_initial &&
-         affine_loops->is_no_wrap(
+         context.affine_loops->is_no_wrap(
            parent_counted->induction.phi->result, *parent_counted, *parent
          );
 }
 
 auto LoopIdiomRecognize::match_relative_pointer(
-  Value *pointer, Value *base, int offset
-) const -> bool {
+  Value *pointer, Value *base, int offset, const Context &context
+) -> bool {
   if (
     !pointer || !base || pointer->kind != ValueKind::OpResult ||
     !pointer->type->is_ptr() || pointer->type != base->type
@@ -491,11 +494,11 @@ auto LoopIdiomRecognize::match_relative_pointer(
     return false;
   }
   auto *getptr = static_cast<Op *>(static_cast<OpResult *>(pointer)->creator);
-  auto block = op_blocks.find(getptr);
+  auto block = context.op_blocks.find(getptr);
   if (
-    !getptr || block == op_blocks.end() || getptr->code != OpCode::GetPtr ||
-    getptr->result != pointer || getptr->operands.size() != 2 ||
-    getptr->operands[0] != base ||
+    !getptr || block == context.op_blocks.end() ||
+    getptr->code != OpCode::GetPtr || getptr->result != pointer ||
+    getptr->operands.size() != 2 || getptr->operands[0] != base ||
     integer_constant(getptr->operands[1]) != offset
   ) {
     return false;
@@ -509,14 +512,15 @@ auto LoopIdiomRecognize::match_relative_pointer(
 }
 
 auto LoopIdiomRecognize::forward_loop_carried_store(
-  LinearFunction &func, const Loop &loop
+  LinearFunction &func, const Loop &loop, const Context &context
 ) -> bool {
-  auto counted =
-    affine_loops ? affine_loops->match_counted_loop(loop) : std::nullopt;
+  auto counted = context.affine_loops
+                   ? context.affine_loops->match_counted_loop(loop)
+                   : std::nullopt;
   if (
-    !counted || !module || !module->ctx || loop.get_blocks().size() != 2 ||
-    counted->continuation != counted->latch ||
-    !loop_executes_at_least_once(loop, *counted) ||
+    !counted || !context.module || !context.module->ctx ||
+    loop.get_blocks().size() != 2 || counted->continuation != counted->latch ||
+    !loop_executes_at_least_once(loop, *counted, context) ||
     counted->preheader->insts.empty() || counted->latch->insts.empty() ||
     counted->preheader->insts.back()->code != OpCode::Jump ||
     counted->latch->insts.back()->code != OpCode::Jump
@@ -547,16 +551,16 @@ auto LoopIdiomRecognize::forward_loop_carried_store(
     }
   }
   if (
-    !store || op_blocks.at(store) != counted->latch ||
+    !store || context.op_blocks.at(store) != counted->latch ||
     store->operands.size() != 2 || !store->operands[1] ||
     !store->operands[1]->type->is_ptr() ||
-    !match_contiguous_pointer(store->operands[1], *counted)
+    !match_contiguous_pointer(store->operands[1], *counted, context)
   ) {
     return false;
   }
 
   auto *center = store->operands[1];
-  auto *initial_center = get_initial_pointer(center, *counted);
+  auto *initial_center = get_initial_pointer(center, *counted, context);
   if (!initial_center)
     return false;
 
@@ -568,7 +572,7 @@ auto LoopIdiomRecognize::forward_loop_carried_store(
     auto *op = *it;
     if (
       op->code != OpCode::Load || !op->result || op->operands.size() != 1 ||
-      !match_relative_pointer(op->operands[0], center, -1)
+      !match_relative_pointer(op->operands[0], center, -1, context)
     ) {
       continue;
     }
@@ -583,28 +587,31 @@ auto LoopIdiomRecognize::forward_loop_carried_store(
     return false;
   }
 
-  auto *offset = module->ctx->make_const(I32::get(), -1);
-  auto *initial_left_pointer = module->make_op(OpCode::GetPtr);
+  auto *offset = context.module->ctx->make_const(I32::get(), -1);
+  auto *initial_left_pointer = context.module->make_op(OpCode::GetPtr);
   initial_left_pointer->operands = {initial_center, offset};
   initial_left_pointer->payload = default_getptr_payload(initial_center);
-  initial_left_pointer->result =
-    module->ctx->make_value<OpResult>(center->type, initial_left_pointer);
+  initial_left_pointer->result = context.module->ctx->make_value<OpResult>(
+    center->type, initial_left_pointer
+  );
   initial_center->addUse(initial_left_pointer);
   offset->addUse(initial_left_pointer);
 
-  auto *initial_load = module->make_op(OpCode::Load);
+  auto *initial_load = context.module->make_op(OpCode::Load);
   initial_load->operands = {initial_left_pointer->result};
-  initial_load->result =
-    module->ctx->make_value<OpResult>(left_load->result->type, initial_load);
+  initial_load->result = context.module->ctx->make_value<OpResult>(
+    left_load->result->type, initial_load
+  );
   initial_left_pointer->result->addUse(initial_load);
 
   auto preheader_position = std::prev(counted->preheader->insts.end());
   counted->preheader->insts.insert(preheader_position, initial_left_pointer);
   counted->preheader->insts.insert(preheader_position, initial_load);
 
-  auto *value_phi = module->make_op(OpCode::Phi, PhiPayload{});
-  value_phi->result =
-    module->ctx->make_value<OpResult>(left_load->result->type, value_phi);
+  auto *value_phi = context.module->make_op(OpCode::Phi, PhiPayload{});
+  value_phi->result = context.module->ctx->make_value<OpResult>(
+    left_load->result->type, value_phi
+  );
   auto &incoming = std::get<PhiPayload>(value_phi->payload).incoming;
   incoming = {
     {counted->preheader, initial_load->result},
@@ -641,9 +648,12 @@ auto LoopIdiomRecognize::reset_operands(Op *op, std::vector<Value *> operands)
   }
 }
 
-auto LoopIdiomRecognize::replace_single_store_loop(const Loop &loop) -> bool {
-  auto counted =
-    affine_loops ? affine_loops->match_counted_loop(loop) : std::nullopt;
+auto LoopIdiomRecognize::replace_single_store_loop(
+  const Loop &loop, const Context &context
+) -> bool {
+  auto counted = context.affine_loops
+                   ? context.affine_loops->match_counted_loop(loop)
+                   : std::nullopt;
   if (
     !counted || loop.get_blocks().size() != 2 ||
     counted->continuation != counted->latch || !counted->continue_on_true ||
@@ -662,7 +672,7 @@ auto LoopIdiomRecognize::replace_single_store_loop(const Loop &loop) -> bool {
   ) {
     return false;
   }
-  if (!counted || has_escaping_result(loop))
+  if (!counted || has_escaping_result(loop, context))
     return false;
 
   Op *store = nullptr;
@@ -687,10 +697,10 @@ auto LoopIdiomRecognize::replace_single_store_loop(const Loop &loop) -> bool {
   }
 
   if (
-    !store || op_blocks.at(store) != counted->latch ||
+    !store || context.op_blocks.at(store) != counted->latch ||
     store->operands.size() != 2 ||
     !is_byte_splat_constant(store->operands[0]) ||
-    !match_contiguous_pointer(store->operands[1], *counted)
+    !match_contiguous_pointer(store->operands[1], *counted, context)
   ) {
     return false;
   }
@@ -727,18 +737,19 @@ auto LoopIdiomRecognize::replace_single_store_loop(const Loop &loop) -> bool {
 }
 
 auto LoopIdiomRecognize::get_initial_pointer(
-  Value *pointer, const CountedLoopInfo &loop
-) const -> Value * {
+  Value *pointer, const CountedLoopInfo &loop, const Context &context
+) -> Value * {
   if (
     !pointer || pointer->kind != ValueKind::OpResult || !pointer->type->is_ptr()
   ) {
     return nullptr;
   }
   auto *phi = static_cast<Op *>(static_cast<OpResult *>(pointer)->creator);
-  auto phi_block = op_blocks.find(phi);
+  auto phi_block = context.op_blocks.find(phi);
   if (
-    !phi || phi_block == op_blocks.end() || phi_block->second != loop.header ||
-    phi->code != OpCode::Phi || phi->result != pointer
+    !phi || phi_block == context.op_blocks.end() ||
+    phi_block->second != loop.header || phi->code != OpCode::Phi ||
+    phi->result != pointer
   ) {
     return nullptr;
   }
@@ -762,7 +773,7 @@ auto LoopIdiomRecognize::get_initial_pointer(
 
 auto LoopIdiomRecognize::memory_accesses_are_independent(
   Op *store, const Loop &loop, const CountedLoopInfo &counted
-) const -> bool {
+) -> bool {
   BasicAliasAnalysis alias_analysis;
   auto store_location = alias_analysis.get_location(*store);
   if (!store_location)
@@ -807,10 +818,11 @@ auto LoopIdiomRecognize::memory_accesses_are_independent(
 }
 
 auto LoopIdiomRecognize::hoist_independent_store(
-  LinearFunction &func, const Loop &loop
+  LinearFunction &func, const Loop &loop, const Context &context
 ) -> bool {
-  auto counted =
-    affine_loops ? affine_loops->match_counted_loop(loop) : std::nullopt;
+  auto counted = context.affine_loops
+                   ? context.affine_loops->match_counted_loop(loop)
+                   : std::nullopt;
   if (
     !counted || loop.get_blocks().size() != 2 ||
     counted->continuation != counted->latch || !counted->continue_on_true ||
@@ -826,7 +838,8 @@ auto LoopIdiomRecognize::hoist_independent_store(
     counted->latch->insts.back()->code != OpCode::Jump ||
     counted->latch->insts.back()->successors.size() != 1 ||
     counted->latch->insts.back()->successors.front() != counted->header ||
-    !module || !module->ctx || has_escaping_result(loop)
+    !context.module || !context.module->ctx ||
+    has_escaping_result(loop, context)
   ) {
     return false;
   }
@@ -839,10 +852,10 @@ auto LoopIdiomRecognize::hoist_independent_store(
         continue;
       ++store_count;
       if (
-        op_blocks.at(op) != counted->latch || op->operands.size() != 2 ||
-        !is_byte_splat_constant(op->operands[0]) ||
-        !match_contiguous_pointer(op->operands[1], *counted) ||
-        !get_initial_pointer(op->operands[1], *counted)
+        context.op_blocks.at(op) != counted->latch ||
+        op->operands.size() != 2 || !is_byte_splat_constant(op->operands[0]) ||
+        !match_contiguous_pointer(op->operands[1], *counted, context) ||
+        !get_initial_pointer(op->operands[1], *counted, context)
       ) {
         continue;
       }
@@ -908,24 +921,26 @@ auto LoopIdiomRecognize::hoist_independent_store(
   auto *guard = guard_ptr.get();
   auto *init = init_ptr.get();
 
-  auto *condition = module->make_op(OpCode::Lt);
+  auto *condition = context.module->make_op(OpCode::Lt);
   condition->operands = {
     counted->induction.initial,
     counted->induction.bound,
   };
-  condition->result = module->ctx->make_value<OpResult>(Bool::get(), condition);
+  condition->result =
+    context.module->ctx->make_value<OpResult>(Bool::get(), condition);
   for (auto *operand : condition->operands)
     operand->addUse(condition);
   guard->insts.push_back(condition);
 
-  auto *branch = module->make_op(OpCode::Branch);
+  auto *branch = context.module->make_op(OpCode::Branch);
   branch->operands = {condition->result};
   condition->result->addUse(branch);
   branch->successors = {init, counted->exit};
   guard->insts.push_back(branch);
 
-  auto *initial_pointer = get_initial_pointer(candidate->operands[1], *counted);
-  auto *memset = module->make_op(OpCode::Memset);
+  auto *initial_pointer =
+    get_initial_pointer(candidate->operands[1], *counted, context);
+  auto *memset = context.module->make_op(OpCode::Memset);
   memset->operands = {
     initial_pointer,
     counted->induction.bound,
@@ -935,7 +950,7 @@ auto LoopIdiomRecognize::hoist_independent_store(
     operand->addUse(memset);
   init->insts.push_back(memset);
 
-  auto *jump = module->make_op(OpCode::Jump);
+  auto *jump = context.module->make_op(OpCode::Jump);
   jump->successors = {counted->header};
   init->insts.push_back(jump);
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "affine_expr.hpp"
 #include "loop.hpp"
 #include <cstdint>
 #include <optional>
@@ -13,16 +14,6 @@ struct AffineForm {
   // call is_no_wrap() to prove every source operation over the loop range.
   int64_t coefficient = 0;
   int64_t offset = 0;
-};
-
-struct IntegerRange {
-  // Inclusive enclosure. minimum > maximum denotes an empty iteration set;
-  // exact is false when the interval includes unreachable values or holes.
-  int64_t minimum = 0;
-  int64_t maximum = -1;
-  bool exact = false;
-
-  auto empty() const -> bool { return minimum > maximum; }
 };
 
 struct InductionInfo {
@@ -49,7 +40,7 @@ struct CountedLoopInfo {
 
 class AffineLoopInfo {
 public:
-  auto compute(LinearFunction &func, LoopInfo &loops, DomTree &dom) -> void;
+  auto compute(LinearFunction &func, DomTree &dom) -> void;
 
   auto
   get_inductions(const Loop &loop, bool allow_dominating_update = false) const
@@ -79,6 +70,9 @@ private:
   DomTree *dom = nullptr;
 
   auto definition_block(Value *value) const -> Block *;
+  auto affine_expression(
+    Value *value, const CountedLoopInfo &counted, const Loop &loop
+  ) const -> std::optional<AffineExpression>;
   auto loop_invariant(Value *value, const Loop &loop) const -> bool;
   auto normalized_condition(
     Op *compare, Value *induction, bool true_is_continue
@@ -99,10 +93,9 @@ struct AffineLoopAnalysis {
 
   auto run(LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager &am)
     -> Result {
-    auto &loops = am.get_result<LoopAnalysis>(func);
     auto &dom = am.get_result<DominanceAnalysis>(func);
     AffineLoopInfo info;
-    info.compute(func, loops, dom);
+    info.compute(func, dom);
     return info;
   }
 };

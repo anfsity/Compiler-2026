@@ -1,75 +1,8 @@
 #include "scalar_evolution.hpp"
 
 #include <algorithm>
-#include <limits>
 
 namespace exodus::mid_ir {
-namespace {
-
-auto checked_i64(__int128 value) -> std::optional<int64_t> {
-  if (
-    value < std::numeric_limits<int64_t>::min() ||
-    value > std::numeric_limits<int64_t>::max()
-  ) {
-    return std::nullopt;
-  }
-  return static_cast<int64_t>(value);
-}
-
-auto combine(
-  const SCEVAffineExpr &lhs, const SCEVAffineExpr &rhs, int64_t rhs_sign
-) -> std::optional<SCEVAffineExpr> {
-  auto constant = checked_i64(
-    static_cast<__int128>(lhs.constant) +
-    static_cast<__int128>(rhs_sign) * rhs.constant
-  );
-  if (!constant)
-    return std::nullopt;
-
-  SCEVAffineExpr result;
-  result.constant = *constant;
-  result.coefficients = lhs.coefficients;
-  for (const auto &[symbol, coefficient] : rhs.coefficients) {
-    auto current = result.coefficient(symbol);
-    auto next = checked_i64(
-      static_cast<__int128>(current) +
-      static_cast<__int128>(rhs_sign) * coefficient
-    );
-    if (!next)
-      return std::nullopt;
-    if (*next == 0)
-      result.coefficients.erase(symbol);
-    else
-      result.coefficients[symbol] = *next;
-  }
-  return result;
-}
-
-auto scale(const SCEVAffineExpr &expr, int64_t factor)
-  -> std::optional<SCEVAffineExpr> {
-  auto constant = checked_i64(static_cast<__int128>(expr.constant) * factor);
-  if (!constant)
-    return std::nullopt;
-
-  SCEVAffineExpr result;
-  result.constant = *constant;
-  for (const auto &[symbol, coefficient] : expr.coefficients) {
-    auto scaled = checked_i64(static_cast<__int128>(coefficient) * factor);
-    if (!scaled)
-      return std::nullopt;
-    if (*scaled != 0)
-      result.coefficients[symbol] = *scaled;
-  }
-  return result;
-}
-
-auto fits_i32(const IntegerRange &range) -> bool {
-  return range.empty() ||
-         (range.minimum >= std::numeric_limits<int32_t>::min() &&
-          range.maximum <= std::numeric_limits<int32_t>::max());
-}
-
-} // namespace
 
 auto ScalarEvolution::compute(
   LinearFunction &func,
@@ -183,19 +116,20 @@ auto ScalarEvolution::get_affine_impl(
 
   std::optional<SCEVAffineExpr> result;
   if (creator->code == OpCode::Add) {
-    result = combine(*lhs, *rhs, 1);
+    result = combine_affine_expressions(*lhs, *rhs, 1);
   } else if (creator->code == OpCode::Sub) {
-    result = combine(*lhs, *rhs, -1);
+    result = combine_affine_expressions(*lhs, *rhs, -1);
   } else if (lhs->is_constant()) {
-    result = scale(*rhs, lhs->constant);
+    result = scale_affine_expression(*rhs, lhs->constant);
   } else if (rhs->is_constant()) {
-    result = scale(*lhs, rhs->constant);
+    result = scale_affine_expression(*lhs, rhs->constant);
   }
   if (!result)
     return finish(std::nullopt);
 
   auto range = expression_range(*result, iteration_space);
-  result->no_wrap = lhs->no_wrap && rhs->no_wrap && range && fits_i32(*range);
+  result->no_wrap =
+    lhs->no_wrap && rhs->no_wrap && range && affine_range_fits_i32(*range);
   return finish(result);
 }
 
@@ -203,11 +137,9 @@ auto ScalarEvolution::expression_range(
   const SCEVAffineExpr &expr,
   const std::vector<CountedLoopInfo> &iteration_space
 ) const -> std::optional<IntegerRange> {
-  __int128 minimum = expr.constant;
-  __int128 maximum = expr.constant;
-  bool exact = true;
-
+  std::unordered_map<Value *, IntegerRange> symbol_ranges;
   for (const auto &[symbol, coefficient] : expr.coefficients) {
+    (void)coefficient;
     auto it = std::find_if(
       iteration_space.begin(),
       iteration_space.end(),
@@ -220,18 +152,9 @@ auto ScalarEvolution::expression_range(
     auto range = affine->induction_range(*it);
     if (!range)
       return std::nullopt;
-    exact &= range->exact;
-    auto first = static_cast<__int128>(coefficient) * range->minimum;
-    auto last = static_cast<__int128>(coefficient) * range->maximum;
-    minimum += std::min(first, last);
-    maximum += std::max(first, last);
+    symbol_ranges.emplace(symbol, *range);
   }
-
-  auto checked_minimum = checked_i64(minimum);
-  auto checked_maximum = checked_i64(maximum);
-  if (!checked_minimum || !checked_maximum)
-    return std::nullopt;
-  return IntegerRange{*checked_minimum, *checked_maximum, exact};
+  return affine_expression_range(expr, symbol_ranges);
 }
 
 } // namespace exodus::mid_ir

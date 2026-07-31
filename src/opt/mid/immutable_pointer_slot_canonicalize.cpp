@@ -11,21 +11,20 @@ auto ImmutablePointerSlotCanonicalize::run(
     return exodus::opt::PreservedAnalysis::all();
 
   auto &dom = am.get_result<DominanceAnalysis>(func);
-  build_scope(func);
+  Context context;
+  build_scope(context, func);
 
   std::vector<Candidate> candidates;
   for (auto &block : func.blocks) {
     for (auto *op : block->insts) {
       if (op->code != OpCode::Alloca)
         continue;
-      if (auto candidate = collect_candidate(op, dom))
+      if (auto candidate = collect_candidate(op, dom, context))
         candidates.push_back(std::move(*candidate));
     }
   }
 
   if (candidates.empty()) {
-    op_blocks.clear();
-    scope.clear();
     return exodus::opt::PreservedAnalysis::all();
   }
 
@@ -43,31 +42,30 @@ auto ImmutablePointerSlotCanonicalize::run(
   }
   rewriter.finalize(func);
 
-  op_blocks.clear();
-  scope.clear();
   return exodus::opt::PreservedAnalysis::none();
 }
 
-auto ImmutablePointerSlotCanonicalize::build_scope(LinearFunction &func)
-  -> void {
-  op_blocks.clear();
-  scope.clear();
+auto ImmutablePointerSlotCanonicalize::build_scope(
+  Context &context, LinearFunction &func
+) -> void {
+  context.op_blocks.clear();
+  context.scope.clear();
   for (auto &block : func.blocks) {
     for (auto *op : block->insts) {
-      op_blocks[op] = block.get();
-      scope.insert(op);
+      context.op_blocks[op] = block.get();
+      context.scope.insert(op);
     }
   }
 }
 
 auto ImmutablePointerSlotCanonicalize::dominates(
-  Op *definition, Op *use, DomTree &dom
-) const -> bool {
-  auto definition_block = op_blocks.find(definition);
-  auto use_block = op_blocks.find(use);
+  Op *definition, Op *use, DomTree &dom, const Context &context
+) -> bool {
+  auto definition_block = context.op_blocks.find(definition);
+  auto use_block = context.op_blocks.find(use);
   if (
-    !definition || !use || definition_block == op_blocks.end() ||
-    use_block == op_blocks.end()
+    !definition || !use || definition_block == context.op_blocks.end() ||
+    use_block == context.op_blocks.end()
   ) {
     return false;
   }
@@ -84,8 +82,8 @@ auto ImmutablePointerSlotCanonicalize::dominates(
 }
 
 auto ImmutablePointerSlotCanonicalize::collect_candidate(
-  Op *alloca, DomTree &dom
-) const -> std::optional<Candidate> {
+  Op *alloca, DomTree &dom, const Context &context
+) -> std::optional<Candidate> {
   if (
     !alloca || !alloca->result || !alloca->result->type ||
     !alloca->result->type->is_ptr()
@@ -106,7 +104,7 @@ auto ImmutablePointerSlotCanonicalize::collect_candidate(
     // High and Mid IR share Value objects during flattening, so the use list
     // also contains upstream High IR operations.  Only Mid operations in this
     // function are part of the escape proof.
-    if (!user || !scope.count(user))
+    if (!user || !context.scope.count(user))
       continue;
     if (!seen_users.insert(user).second)
       continue;
@@ -140,7 +138,8 @@ auto ImmutablePointerSlotCanonicalize::collect_candidate(
 
   if (
     !candidate.store || !candidate.stored_pointer ||
-    candidate.getptrs.empty() || !dominates(alloca, candidate.store, dom)
+    candidate.getptrs.empty() ||
+    !dominates(alloca, candidate.store, dom, context)
   ) {
     return std::nullopt;
   }
@@ -149,8 +148,8 @@ auto ImmutablePointerSlotCanonicalize::collect_candidate(
       static_cast<OpResult *>(candidate.stored_pointer)->creator
     );
     if (
-      !definition || !scope.count(definition) ||
-      !dominates(definition, candidate.store, dom)
+      !definition || !context.scope.count(definition) ||
+      !dominates(definition, candidate.store, dom, context)
     ) {
       return std::nullopt;
     }
@@ -158,8 +157,8 @@ auto ImmutablePointerSlotCanonicalize::collect_candidate(
 
   for (auto *getptr : candidate.getptrs) {
     if (
-      !dominates(alloca, getptr, dom) ||
-      !dominates(candidate.store, getptr, dom) ||
+      !dominates(alloca, getptr, dom, context) ||
+      !dominates(candidate.store, getptr, dom, context) ||
       !preserves_getptr_plan(getptr, candidate.stored_pointer)
     ) {
       return std::nullopt;
