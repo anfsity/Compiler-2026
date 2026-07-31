@@ -151,8 +151,20 @@ auto PureCallLoopSink::collect_dependency(
   if (!visiting.insert(definition).second)
     return false;
   if (definition->code == OpCode::Load) {
-    if (definition != candidate.iteration_counter_load)
-      return false;
+    if (definition != candidate.iteration_counter_load) {
+      if (
+        definition->operands.size() != 1 ||
+        root_of(definition->operands[0]) != definition->operands[0] ||
+        !is_local_root(definition->operands[0]) ||
+        root_of(definition->operands[0]) ==
+          root_of(candidate.counter_address) ||
+        root_of(definition->operands[0]) == root_of(candidate.answer_address)
+      ) {
+        visiting.erase(definition);
+        return false;
+      }
+      candidate.invariant_loads.insert(definition);
+    }
     candidate.moved_ops.insert(definition);
     visiting.erase(definition);
     return true;
@@ -438,6 +450,19 @@ auto PureCallLoopSink::clone_invariant_value(
   auto *definition = defining_op(value);
   if (!definition || !is_in_region(body, definition))
     return value;
+  if (
+    definition->code == OpCode::Load &&
+    candidate.invariant_loads.count(definition)
+  ) {
+    if (definition->operands.size() != 1 || !definition->result)
+      return nullptr;
+    auto *clone = module->ctx.make_op(OpCode::Load);
+    add_operands(clone, {definition->operands[0]});
+    make_result(module, clone, definition->result->type);
+    destination.push_back(clone);
+    cache[value] = clone->result;
+    return clone->result;
+  }
   if (!candidate.moved_ops.count(definition) || !is_pure_scalar_op(*definition))
     return nullptr;
   if (definition->code == OpCode::Load)
