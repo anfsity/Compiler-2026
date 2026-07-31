@@ -44,6 +44,12 @@ private:
     const Loop &loop,
     Block *preheader
   ) const -> bool;
+  auto dynamic_guard_proves_no_wrap(
+    Value *value, const CountedLoopInfo &counted, const Loop &loop
+  ) const -> bool;
+  auto constant_affine_difference(
+    Value *value, Value *anchor, const Loop &loop
+  ) const -> std::optional<int64_t>;
   auto reduce_getptrs(LinearFunction &func, const Loop &loop) -> bool;
   auto reduce_getptr(
     Op *getptr,

@@ -28,6 +28,7 @@ private:
     Value *answer_address = nullptr;
     Value *modulus = nullptr;
     std::unordered_set<Op *> moved_ops;
+    std::unordered_set<Op *> invariant_loads;
   };
 
   Module *module;

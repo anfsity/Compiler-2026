@@ -51,9 +51,12 @@ class AffineLoopInfo {
 public:
   auto compute(LinearFunction &func, LoopInfo &loops, DomTree &dom) -> void;
 
-  auto get_inductions(const Loop &loop) const -> std::vector<InductionInfo>;
-  auto match_counted_loop(const Loop &loop) const
-    -> std::optional<CountedLoopInfo>;
+  auto
+  get_inductions(const Loop &loop, bool allow_dominating_update = false) const
+    -> std::vector<InductionInfo>;
+  auto match_counted_loop(
+    const Loop &loop, bool allow_dominating_update = false
+  ) const -> std::optional<CountedLoopInfo>;
   auto exact_trip_count(const CountedLoopInfo &loop) const
     -> std::optional<uint64_t>;
   auto affine_form(

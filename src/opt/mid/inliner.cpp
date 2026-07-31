@@ -164,7 +164,8 @@ auto Inliner::should_inline(
   unsigned loop_depth
 ) const -> bool {
   if (
-    &caller == &callee || callee.is_decl || callee.blocks.empty() ||
+    &caller == &callee || callee.is_decl || callee.no_inline ||
+    callee.blocks.empty() ||
     recursive_functions.count(const_cast<LinearFunction *>(&callee)) != 0 ||
     callee_cost.blocks > 20 || callee_cost.ops > 120 ||
     callee_cost.returns == 0 || callee_cost.returns > 8 ||

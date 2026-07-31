@@ -22,6 +22,9 @@ private:
   auto try_tighten(LinearFunction &func, const Loop &loop) -> bool;
   auto is_loop_invariant(Value *value, const Loop &loop) const -> bool;
   auto is_increment_by_one(Op *op, Value *induction) const -> bool;
+  auto has_live_out_use(
+    const LinearFunction &func, Value *value, const Loop &loop
+  ) const -> bool;
   auto has_only_current_user(
     const LinearFunction &func, Value *value, Op *expected
   ) const -> bool;

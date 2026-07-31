@@ -111,7 +111,7 @@ auto Inliner::tryInlineInRegion(Region &r, Function &caller, int depth)
 auto Inliner::shouldInline(
   Op &call_op, Function &callee, Function &caller, int depth
 ) -> bool {
-  if (callee.is_decl)
+  if (callee.is_decl || callee.no_inline)
     return false;
   if (
     &callee == &caller || call_graph.isRecursive(&callee) ||

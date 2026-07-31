@@ -25,6 +25,7 @@ import re
 import json
 import math
 import argparse
+import shlex
 import subprocess
 import shutil
 import time
@@ -177,6 +178,12 @@ _LOAD_INSNS = {
     "flw",
     "fld",
     "flq",
+    "c.lw",
+    "c.ld",
+    "c.lwsp",
+    "c.ldsp",
+    "c.flw",
+    "c.fld",
 }
 _STORE_INSNS = {
     "sb",
@@ -186,6 +193,12 @@ _STORE_INSNS = {
     "fsw",
     "fsd",
     "fsq",
+    "c.sw",
+    "c.sd",
+    "c.swsp",
+    "c.sdsp",
+    "c.fsw",
+    "c.fsd",
 }
 _LOADSTORE_INSNS = _LOAD_INSNS | _STORE_INSNS
 
@@ -208,6 +221,8 @@ _BRANCH_INSNS = {
     "ble",
     "bgtu",
     "bleu",
+    "c.beqz",
+    "c.bnez",
 }
 
 # Jump / Call
@@ -219,6 +234,24 @@ _JUMP_INSNS = {
     "call",
     "tail",
     "ret",
+    "c.j",
+    "c.jr",
+    "c.jal",
+    "c.jalr",
+}
+
+# Calls, returns, and unconditional jumps are control-flow instructions, but
+# they do not have a conditional branch direction or prediction outcome.
+_CONDITIONAL_BRANCH_INSNS = _BRANCH_INSNS
+_UNCONDITIONAL_JUMP_INSNS = {
+    "j",
+    "jr",
+    "ret",
+    "tail",
+    "c.j",
+    "c.jr",
+    "c.jal",
+    "c.jalr",
 }
 
 # Floating-point
@@ -462,6 +495,9 @@ _CALLEE_SAVED_FLOAT = {
     "f27",
 }
 _CALLEE_SAVED = _CALLEE_SAVED_INT | _CALLEE_SAVED_FLOAT
+_CALLEE_SAVED_CANONICAL = {
+    _ALL_REGS.get(register, register) for register in _CALLEE_SAVED
+}
 
 # Pipeline cycle cost model (simple 5-stage in-order)
 _CYCLE_COST = {
@@ -489,24 +525,34 @@ _CYCLE_COST = {
 @dataclass
 class RuntimeMetrics:
     runs: list = field(default_factory=list)
+    guest_total_us: list = field(default_factory=list)
     avg: float = 0.0
     weighted_avg: float = 0.0
     median: float = 0.0
     min_time: float = 0.0
     max_time: float = 0.0
     stddev: float = 0.0
+    valid_runs: int = 0
+    invalid_runs: int = 0
+    timeout_runs: int = 0
+    warmup_runs: int = 0
+    measurement: str = "host_wall_time"
 
 
 @dataclass
 class CodeDensityMetrics:
     total_instructions: int = 0
+    source_instructions: int = 0
+    machine_instructions: int = 0
     text_size_bytes: int = 0
+    elf_text_size_bytes: int = 0
     data_size_bytes: int = 0
     bss_size_bytes: int = 0
     total_elf_size: int = 0
     bytes_per_instruction: float = 0.0
     functions_count: int = 0
     instructions_per_function: float = 0.0
+    analysis_basis: str = "unknown"
 
 
 @dataclass
@@ -538,13 +584,16 @@ class RegisterPressureMetrics:
     int_pressure_pct: float = 0.0
     float_pressure_pct: float = 0.0
     callee_saved_used: int = 0
-    stack_spills: int = 0
+    stack_spills: Optional[int] = None
+    stack_accesses: int = 0
+    spill_analysis: str = "not_inferred_from_assembly"
     reg_usage_top: dict = field(default_factory=dict)
 
 
 @dataclass
 class BranchAnalysisMetrics:
     total_branches: int = 0
+    total_jumps: int = 0
     forward_branches: int = 0
     backward_branches: int = 0
     unknown_branches: int = 0
@@ -580,6 +629,7 @@ class MemoryAccessMetrics:
     stack_access_pct: float = 0.0
     spatial_locality_score: str = "unknown"  # good / moderate / poor
     avg_offset_magnitude: float = 0.0
+    locality_basis: str = "not_inferred_from_static_offsets"
 
 
 @dataclass
@@ -587,11 +637,13 @@ class CacheEstimateMetrics:
     icache_size: int = 32768  # 32KB L1 I-cache
     dcache_size: int = 32768  # 32KB L1 D-cache
     code_fits_icache: bool = True
-    data_fits_dcache: bool = True
+    data_fits_dcache: Optional[bool] = None
     icache_usage_pct: float = 0.0
     dcache_usage_pct: float = 0.0
     icache_verdict: str = "fits"
-    dcache_verdict: str = "fits"
+    dcache_verdict: str = "unknown"
+    icache_basis: str = "unknown"
+    dcache_basis: str = "unknown"
 
 
 @dataclass
@@ -658,8 +710,10 @@ class RISCVAsmParser:
         self.asm_path = asm_path
         self.lines: list[str] = []
         self.instructions: list[dict] = []  # {line_no, mnemonic, operands, raw}
+        self.machine_instructions: list[dict] = []
         self.functions: dict[str, list[dict]] = {}  # func_name -> [instructions]
         self.labels: dict[str, int] = {}  # label_name -> line_no
+        self.text_label_lines: set[int] = set()
         self.function_names: set[str] = set()
 
         self._parse()
@@ -670,6 +724,7 @@ class RISCVAsmParser:
             self.lines = f.readlines()
 
         current_func = None
+        section = None
         declared_functions = set()
         globl_symbols = set()
 
@@ -687,19 +742,42 @@ class RISCVAsmParser:
             if not stripped or stripped.startswith("#") or stripped.startswith("//"):
                 continue
 
+            if stripped == ".text" or stripped.startswith(".text."):
+                section = "text"
+                current_func = None
+                continue
+            if stripped == ".data" or stripped.startswith(".data."):
+                section = "data"
+                current_func = None
+                continue
+            if stripped == ".bss" or stripped.startswith(".bss."):
+                section = "bss"
+                current_func = None
+                continue
+            if stripped.startswith(".section"):
+                section = "text" if ".text" in stripped else "data"
+                current_func = None
+                continue
+
             label_m = self._LABEL_RE.match(stripped)
             if label_m:
                 label_name = label_m.group(1)
                 self.labels[label_name] = line_no
 
+                if section == "text":
+                    self.text_label_lines.add(line_no)
+
                 is_func = (
-                    label_name in declared_functions
-                    or label_name in globl_symbols
-                    or (
+                    section == "text"
+                    and (
+                        label_name in declared_functions
+                        or label_name in globl_symbols
+                        or (
                         not label_name.startswith(".")
                         and not label_name.startswith("L")
                         and not label_name.startswith("_L")
                         and label_name != "zero"
+                        )
                     )
                 )
 
@@ -710,7 +788,7 @@ class RISCVAsmParser:
                         self.functions[current_func] = []
                 continue
 
-            if self._DIRECTIVE_RE.match(stripped):
+            if section != "text" or self._DIRECTIVE_RE.match(stripped):
                 continue
 
             insn_m = self._INSN_RE.match(stripped)
@@ -729,6 +807,32 @@ class RISCVAsmParser:
 
     def classify_instruction(self, mnemonic: str) -> str:
         """Classify a RISC-V instruction into a category."""
+        if mnemonic.startswith("c."):
+            compressed_base = mnemonic[2:]
+            if mnemonic in _LOADSTORE_INSNS:
+                return "load_store"
+            if mnemonic in _CONDITIONAL_BRANCH_INSNS:
+                return "branch"
+            if mnemonic in _JUMP_INSNS:
+                return "jump"
+            if compressed_base in {
+                "addi",
+                "addiw",
+                "add",
+                "sub",
+                "xor",
+                "or",
+                "and",
+                "slli",
+                "srli",
+                "srai",
+                "li",
+                "lui",
+                "mv",
+                "nop",
+            }:
+                return "arith"
+            return "other"
         if mnemonic in _ARITH_INSNS:
             return "arith"
         elif mnemonic in _LOADSTORE_INSNS:
@@ -762,10 +866,10 @@ class RISCVAsmParser:
                 regs.append(tok)
         return regs
 
-    def get_memory_accesses(self) -> list[dict]:
+    def get_memory_accesses(self, instructions: Optional[list[dict]] = None) -> list[dict]:
         """Extract all memory access instructions with offset/base info."""
         accesses = []
-        for insn in self.instructions:
+        for insn in instructions if instructions is not None else self.instructions:
             if insn["mnemonic"] in _LOADSTORE_INSNS:
                 m = self._MEM_OFFSET_RE.search(insn["operands"])
                 if m:
@@ -801,7 +905,7 @@ class RISCVAsmParser:
         """Analyze branches and jumps: determine forward vs backward."""
         branches = []
         for insn in self.instructions:
-            if insn["mnemonic"] in _BRANCH_INSNS or insn["mnemonic"] in _JUMP_INSNS:
+            if insn["mnemonic"] in _CONDITIONAL_BRANCH_INSNS:
                 target_m = self._BRANCH_TARGET_RE.search(insn["operands"])
                 direction = "unknown"
                 if target_m:
@@ -838,33 +942,40 @@ class RISCVAsmParser:
         return frames
 
     def get_basic_blocks(self) -> list[dict]:
-        """Identify basic blocks (sequences of instructions between branches/labels)."""
-        blocks = []
-        current_block = []
-        current_start = 0
+        """Identify basic blocks using labels and control-flow terminators."""
+        if not self.instructions:
+            return []
 
-        for insn in self.instructions:
-            if not current_block:
-                current_start = insn["line_no"]
-            current_block.append(insn)
-
-            if insn["mnemonic"] in _BRANCH_INSNS or insn["mnemonic"] in _JUMP_INSNS:
-                blocks.append(
-                    {
-                        "start_line": current_start,
-                        "size": len(current_block),
-                        "instructions": current_block,
-                    }
+        leaders = {0}
+        for index, insn in enumerate(self.instructions):
+            if index > 0:
+                previous = self.instructions[index - 1]
+                has_label = any(
+                    previous["line_no"] < line_no <= insn["line_no"]
+                    for line_no in self.text_label_lines
                 )
-                current_block = []
+                if has_label:
+                    leaders.add(index)
 
-        # Last block
-        if current_block:
+                if previous["mnemonic"] in _CONDITIONAL_BRANCH_INSNS:
+                    leaders.add(index)
+                elif previous["mnemonic"] in _UNCONDITIONAL_JUMP_INSNS:
+                    leaders.add(index)
+
+        leader_list = sorted(leaders)
+        blocks = []
+        for block_index, start in enumerate(leader_list):
+            end = (
+                leader_list[block_index + 1]
+                if block_index + 1 < len(leader_list)
+                else len(self.instructions)
+            )
+            block_instructions = self.instructions[start:end]
             blocks.append(
                 {
-                    "start_line": current_start,
-                    "size": len(current_block),
-                    "instructions": current_block,
+                    "start_line": block_instructions[0]["line_no"],
+                    "size": len(block_instructions),
+                    "instructions": block_instructions,
                 }
             )
 
@@ -876,20 +987,45 @@ class RISCVAsmParser:
 # ============================================================================
 
 
-def analyze_runtime(qemu_cmd: str, temp_dir: str, in_file: Optional[str],
-                    timeout: float, num_runs: int) -> RuntimeMetrics:
-    """Run the binary multiple times and collect timing statistics."""
-    metrics = RuntimeMetrics()
-    runs = []
+_TOTAL_RE = re.compile(
+    r"TOTAL:\s*(\d+)H-(\d+)M-(\d+)S-(\d+)us", re.IGNORECASE
+)
 
-    for i in range(num_runs):
+
+def _parse_guest_total_us(stderr: str) -> Optional[int]:
+    """Read the last libsysy TOTAL value from stderr, if present."""
+    matches = list(_TOTAL_RE.finditer(stderr))
+    if not matches:
+        return None
+    match = matches[-1]
+    hours, minutes, seconds, micros = (int(value) for value in match.groups())
+    return ((hours * 60 + minutes) * 60 + seconds) * 1_000_000 + micros
+
+
+def analyze_runtime(
+    qemu_cmd: str,
+    temp_dir: str,
+    in_file: Optional[str],
+    expected_content: Optional[str],
+    timeout: float,
+    num_runs: int,
+    warmup_runs: int = 1,
+) -> RuntimeMetrics:
+    """Run validated samples and collect host and optional guest timings."""
+    metrics = RuntimeMetrics(warmup_runs=max(0, warmup_runs))
+    runs = []
+    guest_total_us = []
+    command = shlex.split(qemu_cmd) if isinstance(qemu_cmd, str) else qemu_cmd
+
+    for iteration in range(max(0, warmup_runs) + max(0, num_runs)):
+        is_warmup = iteration < max(0, warmup_runs)
         stdin_f = None
         if in_file and os.path.exists(in_file):
             stdin_f = open(in_file, "rb")
         try:
             start = time.perf_counter()
             res = subprocess.run(
-                qemu_cmd.split() if isinstance(qemu_cmd, str) else qemu_cmd,
+                command,
                 cwd=temp_dir,
                 stdin=stdin_f,
                 stdout=subprocess.PIPE,
@@ -897,48 +1033,165 @@ def analyze_runtime(qemu_cmd: str, temp_dir: str, in_file: Optional[str],
                 timeout=timeout,
             )
             elapsed = time.perf_counter() - start
-            
-            if res.returncode == 0:
-                runs.append(elapsed)
+
+            if res.returncode < 0:
+                valid = False
+            elif expected_content is None:
+                valid = False
+            else:
+                actual_stdout = res.stdout.decode("utf-8", errors="ignore")
+                valid, _, _ = normalize_and_compare(
+                    actual_stdout, res.returncode, expected_content
+                )
+
+            if is_warmup:
+                continue
+            if not valid:
+                metrics.invalid_runs += 1
+                continue
+
+            runs.append(elapsed)
+            guest_us = _parse_guest_total_us(
+                res.stderr.decode("utf-8", errors="ignore")
+            )
+            if guest_us is not None:
+                guest_total_us.append(guest_us)
         except subprocess.TimeoutExpired:
-            runs.append(timeout)
+            if not is_warmup:
+                metrics.timeout_runs += 1
         finally:
             if stdin_f:
                 stdin_f.close()
 
     if not runs:
+        metrics.guest_total_us = guest_total_us
+        metrics.valid_runs = 0
         return metrics
 
     metrics.runs = runs
+    metrics.guest_total_us = guest_total_us
+    metrics.valid_runs = len(runs)
     metrics.avg = statistics.mean(runs)
     metrics.median = statistics.median(runs)
     metrics.min_time = min(runs)
     metrics.max_time = max(runs)
     metrics.stddev = statistics.stdev(runs) if len(runs) > 1 else 0.0
 
-    weights = []
-    for i in range(len(runs)):
-        if i == 0:
-            weights.append(0.5)
-        elif i == 1:
-            weights.append(0.75)
-        else:
-            weights.append(1.0)
-    
-    actual_weights = weights[:len(runs)]
-    weighted_sum = sum(r * w for r, w in zip(runs, actual_weights))
-    weight_total = sum(actual_weights)
-    metrics.weighted_avg = weighted_sum / weight_total if weight_total > 0 else 0.0
+    # Retain the legacy field, but do not give early samples arbitrary weights.
+    metrics.weighted_avg = metrics.avg
+    if guest_total_us:
+        metrics.measurement = "host_wall_time_with_libsysy_total"
 
     return metrics
 
 
-def analyze_code_density(parser: RISCVAsmParser, temp_dir: str,
-                         gcc_path: str) -> CodeDensityMetrics:
-    """Analyze code density from assembly and ELF."""
+def _sibling_tool(gcc_path: str, suffix: str) -> Optional[str]:
+    """Resolve a binutils tool next to the selected GCC executable."""
+    basename = os.path.basename(gcc_path)
+    if "gcc" in basename:
+        candidate = basename.replace("gcc", suffix, 1)
+    else:
+        candidate = suffix
+
+    if os.path.isabs(gcc_path):
+        sibling = os.path.join(os.path.dirname(gcc_path), candidate)
+        if os.path.exists(sibling):
+            return sibling
+    return shutil.which(candidate)
+
+
+def _decode_user_text(
+    parser: RISCVAsmParser, temp_dir: str, gcc_path: str
+) -> tuple[int, list[dict]]:
+    """Decode only compiler-generated functions from the linked ELF.
+
+    The assembly emitted by Exodus contains pseudo-instructions.  Disassembly
+    with ``no-aliases`` gives a real instruction count and actual instruction
+    widths, while the parser's function set keeps libsysy out of the result.
+    """
+    elf_path = os.path.join(temp_dir, "test.elf")
+    objdump_path = _sibling_tool(gcc_path, "objdump")
+    if not os.path.exists(elf_path) or not objdump_path:
+        return 0, []
+
+    try:
+        result = subprocess.run(
+            [objdump_path, "-M", "no-aliases", "-d", "--section=.text", elf_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return 0, []
+    if result.returncode != 0:
+        return 0, []
+
+    symbol_re = re.compile(r"^\s*[0-9a-fA-F]+\s+<([^>]+)>:")
+    instruction_re = re.compile(r"^\s*[0-9a-fA-F]+:\s+(.+)$")
+    current_function = None
+    user_instructions = []
+    text_bytes = 0
+
+    for raw_line in result.stdout.decode("utf-8", errors="ignore").splitlines():
+        symbol_match = symbol_re.match(raw_line)
+        if symbol_match:
+            symbol = symbol_match.group(1).split("+", 1)[0]
+            if symbol in parser.function_names:
+                current_function = symbol
+            elif not symbol.startswith(".") and not symbol.startswith("L"):
+                current_function = None
+            continue
+
+        if current_function is None:
+            continue
+        instruction_match = instruction_re.match(raw_line)
+        if not instruction_match:
+            continue
+
+        tokens = instruction_match.group(1).split()
+        byte_count = 0
+        mnemonic_index = 0
+        for index, token in enumerate(tokens):
+            if (
+                len(token) % 2 == 0
+                and len(token) <= 8
+                and re.fullmatch(r"[0-9a-fA-F]+", token)
+            ):
+                byte_count += len(token) // 2
+                mnemonic_index = index + 1
+            else:
+                break
+        if byte_count == 0 or mnemonic_index >= len(tokens):
+            continue
+
+        user_instructions.append(
+            {
+                "line_no": 0,
+                "mnemonic": tokens[mnemonic_index].lower(),
+                "operands": " ".join(tokens[mnemonic_index + 1 :]),
+                "raw": instruction_match.group(1),
+            }
+        )
+        text_bytes += byte_count
+
+    return text_bytes, user_instructions
+
+
+def analyze_code_density(
+    parser: RISCVAsmParser, temp_dir: str, gcc_path: str
+) -> CodeDensityMetrics:
+    """Analyze user code density from decoded ELF instructions."""
     metrics = CodeDensityMetrics()
-    metrics.total_instructions = len(parser.instructions)
+    metrics.source_instructions = len(parser.instructions)
     metrics.functions_count = len(parser.functions)
+
+    machine_bytes, machine_instructions = _decode_user_text(
+        parser, temp_dir, gcc_path
+    )
+    parser.machine_instructions = machine_instructions
+    metrics.machine_instructions = len(machine_instructions)
+    metrics.total_instructions = metrics.machine_instructions or metrics.source_instructions
 
     if metrics.functions_count > 0:
         metrics.instructions_per_function = (
@@ -946,38 +1199,50 @@ def analyze_code_density(parser: RISCVAsmParser, temp_dir: str,
         )
 
     elf_path = os.path.join(temp_dir, "test.elf")
-    if os.path.exists(elf_path):
-        size_cmd = gcc_path.replace("gcc", "size")
+    size_cmd = _sibling_tool(gcc_path, "size")
+    if os.path.exists(elf_path) and size_cmd:
         try:
-            res = subprocess.run(
+            result = subprocess.run(
                 [size_cmd, elf_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                timeout=5
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+                check=False,
             )
-            if res.returncode == 0:
-                output = res.stdout.decode('utf-8', errors='ignore')
-                lines = output.strip().split('\n')
+            if result.returncode == 0:
+                lines = result.stdout.decode("utf-8", errors="ignore").strip().splitlines()
                 if len(lines) >= 2:
                     parts = lines[1].split()
                     if len(parts) >= 4:
-                        metrics.text_size_bytes = int(parts[0])
+                        metrics.elf_text_size_bytes = int(parts[0])
                         metrics.data_size_bytes = int(parts[1])
                         metrics.bss_size_bytes = int(parts[2])
                         metrics.total_elf_size = int(parts[3])
-        except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        except (subprocess.TimeoutExpired, OSError, ValueError):
             pass
 
-    metrics.bytes_per_instruction = 4.0
+    if machine_bytes and machine_instructions:
+        metrics.text_size_bytes = machine_bytes
+        metrics.bytes_per_instruction = machine_bytes / len(machine_instructions)
+        metrics.analysis_basis = "user_elf_disassembly"
+    else:
+        # Conservative fallback for environments without matching binutils.
+        metrics.text_size_bytes = metrics.source_instructions * 4
+        metrics.bytes_per_instruction = 4.0 if metrics.source_instructions else 0.0
+        metrics.analysis_basis = "assembly_source_fallback"
 
     return metrics
 
 
-def analyze_instruction_mix(parser: RISCVAsmParser) -> InstructionMixMetrics:
+def analyze_instruction_mix(
+    parser: RISCVAsmParser, instructions: Optional[list[dict]] = None
+) -> InstructionMixMetrics:
     """Analyze instruction type distribution."""
     metrics = InstructionMixMetrics()
     counter = Counter()
+    instructions = instructions or parser.machine_instructions or parser.instructions
 
-    for insn in parser.instructions:
+    for insn in instructions:
         cat = parser.classify_instruction(insn["mnemonic"])
         counter[insn["mnemonic"]] += 1
 
@@ -998,7 +1263,7 @@ def analyze_instruction_mix(parser: RISCVAsmParser) -> InstructionMixMetrics:
         else:
             metrics.other += 1
 
-    metrics.total = len(parser.instructions)
+    metrics.total = len(instructions)
     if metrics.total > 0:
         metrics.arith_pct = (metrics.arith / metrics.total) * 100
         metrics.load_store_pct = (metrics.load_store / metrics.total) * 100
@@ -1012,16 +1277,18 @@ def analyze_instruction_mix(parser: RISCVAsmParser) -> InstructionMixMetrics:
     return metrics
 
 
-def analyze_register_pressure(parser: RISCVAsmParser) -> RegisterPressureMetrics:
+def analyze_register_pressure(
+    parser: RISCVAsmParser, instructions: Optional[list[dict]] = None
+) -> RegisterPressureMetrics:
     """Analyze register usage patterns."""
     metrics = RegisterPressureMetrics()
     int_regs = set()
     float_regs = set()
     reg_counter = Counter()
-    spill_count = 0
     callee_saved_used = set()
+    instructions = instructions or parser.machine_instructions or parser.instructions
 
-    for insn in parser.instructions:
+    for insn in instructions:
         regs = parser.extract_registers(insn["operands"])
         for reg in regs:
             canonical = _ALL_REGS.get(reg, reg)
@@ -1032,13 +1299,8 @@ def analyze_register_pressure(parser: RISCVAsmParser) -> RegisterPressureMetrics
             elif canonical.startswith("f"):
                 float_regs.add(canonical)
 
-            if reg in _CALLEE_SAVED:
-                callee_saved_used.add(reg)
-
-        # Count stack spills: sd/sw reg, offset(sp) or ld/lw reg, offset(sp)
-        if insn["mnemonic"] in ("sd", "sw", "ld", "lw", "fsd", "fsw", "fld", "flw"):
-            if "sp" in insn["operands"] or "x2" in insn["operands"]:
-                spill_count += 1
+            if canonical in _CALLEE_SAVED_CANONICAL:
+                callee_saved_used.add(canonical)
 
     metrics.int_regs_used = len(int_regs)
     metrics.float_regs_used = len(float_regs)
@@ -1049,7 +1311,11 @@ def analyze_register_pressure(parser: RISCVAsmParser) -> RegisterPressureMetrics
         else 0.0
     )
     metrics.callee_saved_used = len(callee_saved_used)
-    metrics.stack_spills = spill_count
+    metrics.stack_accesses = sum(
+        1
+        for access in parser.get_memory_accesses(instructions)
+        if access["base_reg"] in ("sp", "x2", "s0", "fp", "x8")
+    )
     metrics.reg_usage_top = dict(reg_counter.most_common(10))
 
     return metrics
@@ -1061,6 +1327,12 @@ def analyze_branches(parser: RISCVAsmParser) -> BranchAnalysisMetrics:
     branch_info = parser.get_branch_info()
 
     metrics.total_branches = len(branch_info)
+    control_instructions = parser.machine_instructions or parser.instructions
+    metrics.total_jumps = sum(
+        1
+        for insn in control_instructions
+        if parser.classify_instruction(insn["mnemonic"]) == "jump"
+    )
 
     for b in branch_info:
         if b["direction"] == "forward":
@@ -1084,7 +1356,7 @@ def analyze_branches(parser: RISCVAsmParser) -> BranchAnalysisMetrics:
         metrics.predicted_hit_rate = (total_hits / metrics.total_branches) * 100
 
     # Branch density
-    total_insns = len(parser.instructions)
+    total_insns = len(parser.machine_instructions or parser.instructions)
     if total_insns > 0:
         metrics.branch_density = (metrics.total_branches / total_insns) * 100
 
@@ -1099,7 +1371,8 @@ def analyze_pipeline(
     total_cycles = 0
     cycle_breakdown = defaultdict(int)
 
-    for insn in parser.instructions:
+    instructions = parser.machine_instructions or parser.instructions
+    for insn in instructions:
         mnemonic = insn["mnemonic"]
         cat = parser.classify_instruction(mnemonic)
         cost = 1
@@ -1175,7 +1448,7 @@ def analyze_pipeline(
         total_cycles += cost
 
     metrics.estimated_cycles = int(total_cycles)
-    total_insns = len(parser.instructions)
+    total_insns = len(instructions)
     if total_insns > 0:
         metrics.cpi = total_cycles / total_insns
         metrics.ipc = total_insns / total_cycles if total_cycles > 0 else 0.0
@@ -1252,7 +1525,9 @@ def analyze_stack(parser: RISCVAsmParser) -> StackAnalysisMetrics:
 def analyze_memory_access(parser: RISCVAsmParser) -> MemoryAccessMetrics:
     """Analyze memory access patterns for locality estimation."""
     metrics = MemoryAccessMetrics()
-    accesses = parser.get_memory_accesses()
+    accesses = parser.get_memory_accesses(
+        parser.machine_instructions or parser.instructions
+    )
 
     for acc in accesses:
         if acc["type"] == "load":
@@ -1278,28 +1553,21 @@ def analyze_memory_access(parser: RISCVAsmParser) -> MemoryAccessMetrics:
     offsets = [abs(acc["offset"]) for acc in accesses if acc["offset"] != 0]
     if offsets:
         metrics.avg_offset_magnitude = statistics.mean(offsets)
-        # Good locality: most offsets are small (< 256 bytes)
-        small_offsets = sum(1 for o in offsets if o < 256)
-        ratio = small_offsets / len(offsets)
-        if ratio > 0.8:
-            metrics.spatial_locality_score = "good"
-        elif ratio > 0.5:
-            metrics.spatial_locality_score = "moderate"
-        else:
-            metrics.spatial_locality_score = "poor"
-    elif total > 0:
-        metrics.spatial_locality_score = "good"  # All zero-offset = good
+        # Immediate offsets do not identify dynamic addresses or reuse.  Keep
+        # the descriptive offset metric, but do not turn it into a locality
+        # verdict without execution traces.
 
     return metrics
 
 
 def analyze_cache(code_density: CodeDensityMetrics,
                   stack: StackAnalysisMetrics) -> CacheEstimateMetrics:
-    """Estimate cache pressure from code and data sizes."""
+    """Report code-cache fit and leave data-cache fit unknown statically."""
     metrics = CacheEstimateMetrics()
 
-    code_size = code_density.total_instructions * 4
+    code_size = code_density.text_size_bytes
     metrics.icache_usage_pct = (code_size / metrics.icache_size) * 100
+    metrics.icache_basis = code_density.analysis_basis
     if code_size <= metrics.icache_size:
         metrics.code_fits_icache = True
         metrics.icache_verdict = "fits"
@@ -1310,17 +1578,10 @@ def analyze_cache(code_density: CodeDensityMetrics,
         metrics.code_fits_icache = False
         metrics.icache_verdict = "high_pressure"
 
-    data_working_set = stack.total_frame_size
-    metrics.dcache_usage_pct = (data_working_set / metrics.dcache_size) * 100
-    if data_working_set <= metrics.dcache_size:
-        metrics.data_fits_dcache = True
-        metrics.dcache_verdict = "fits"
-    elif data_working_set <= metrics.dcache_size * 2:
-        metrics.data_fits_dcache = False
-        metrics.dcache_verdict = "moderate_pressure"
-    else:
-        metrics.data_fits_dcache = False
-        metrics.dcache_verdict = "high_pressure"
+    metrics.dcache_usage_pct = 0.0
+    metrics.data_fits_dcache = None
+    metrics.dcache_verdict = "unknown"
+    metrics.dcache_basis = "requires_dynamic_addresses_and_cache_model"
 
     return metrics
 
@@ -1412,6 +1673,13 @@ def render_perf_card(test_name: str, perf: PerfMetrics):
         print(_box_line(f"  Runs: {runs_str}", w))
         print(
             _box_line(
+                f"  Valid: {rt.valid_runs}  Invalid: {rt.invalid_runs}  "
+                f"Timeouts: {rt.timeout_runs}  Warmup: {rt.warmup_runs}",
+                w,
+            )
+        )
+        print(
+            _box_line(
                 f"  Avg: {_format_time(rt.avg)}  "
                 f"Weighted: {_format_time(rt.weighted_avg)}  "
                 f"σ: {_format_time(rt.stddev)}",
@@ -1426,6 +1694,19 @@ def render_perf_card(test_name: str, perf: PerfMetrics):
                 w,
             )
         )
+        if rt.guest_total_us:
+            guest_str = ", ".join(_format_time(value / 1_000_000) for value in rt.guest_total_us)
+            print(_box_line(f"  libsysy TOTAL: {guest_str}", w))
+        print(_box_line("", w))
+    elif rt.invalid_runs or rt.timeout_runs:
+        print(_box_line(f"{C.BOLD}Runtime{C.RESET}", w))
+        print(
+            _box_line(
+                f"  No valid samples (invalid={rt.invalid_runs}, "
+                f"timeouts={rt.timeout_runs}, warmup={rt.warmup_runs})",
+                w,
+            )
+        )
         print(_box_line("", w))
 
     # Code Density
@@ -1436,6 +1717,13 @@ def render_perf_card(test_name: str, perf: PerfMetrics):
             f"  Instructions: {cd.total_instructions}  "
             f"Code: {cd.text_size_bytes}B  "
             f"Density: {cd.bytes_per_instruction:.2f} B/I",
+            w,
+        )
+    )
+    print(
+        _box_line(
+            f"  Source insns: {cd.source_instructions}  "
+            f"ELF .text (incl. runtime): {cd.elf_text_size_bytes}B",
             w,
         )
     )
@@ -1489,7 +1777,9 @@ def render_perf_card(test_name: str, perf: PerfMetrics):
     )
     print(
         _box_line(
-            f"  Callee-saved: {rp.callee_saved_used}  Stack spills: {rp.stack_spills}",
+            f"  Callee-saved: {rp.callee_saved_used}  "
+            f"Stack accesses: {rp.stack_accesses}  "
+            f"Spills: {rp.stack_spills if rp.stack_spills is not None else 'N/A'}",
             w,
         )
     )
@@ -1501,6 +1791,7 @@ def render_perf_card(test_name: str, perf: PerfMetrics):
     print(
         _box_line(
             f"  Total: {ba.total_branches}  "
+            f"Jumps: {ba.total_jumps}  "
             f"Fwd: {ba.forward_branches}  "
             f"Bwd: {ba.backward_branches}  "
             f"Unk: {ba.unknown_branches}",
@@ -1596,9 +1887,9 @@ def render_perf_card(test_name: str, perf: PerfMetrics):
     ce = perf.cache_estimate
     print(_box_line(f"{C.BOLD}Cache Estimate{C.RESET}", w))
     ic_icon = "✓" if ce.code_fits_icache else "✗"
-    dc_icon = "✓" if ce.data_fits_dcache else "✗"
+    dc_icon = "?" if ce.data_fits_dcache is None else ("✓" if ce.data_fits_dcache else "✗")
     ic_color = C.GREEN if ce.code_fits_icache else C.RED
-    dc_color = C.GREEN if ce.data_fits_dcache else C.RED
+    dc_color = C.DIM if ce.data_fits_dcache is None else (C.GREEN if ce.data_fits_dcache else C.RED)
     print(
         _box_line(
             f"  I-cache: {ic_color}{ic_icon} {ce.icache_verdict}{C.RESET} "
@@ -1608,8 +1899,7 @@ def render_perf_card(test_name: str, perf: PerfMetrics):
     )
     print(
         _box_line(
-            f"  D-cache: {dc_color}{dc_icon} {ce.dcache_verdict}{C.RESET} "
-            f"({ce.dcache_usage_pct:.1f}% of {ce.dcache_size // 1024}KB)",
+            f"  D-cache: {dc_color}{dc_icon} {ce.dcache_verdict}{C.RESET}",
             w,
         )
     )
@@ -1660,7 +1950,7 @@ def render_aggregate_summary(all_perfs: dict[str, PerfMetrics]):
                     isinstance(v, float) and (math.isinf(v) or math.isnan(v))
                 ):
                     vals.append(v)
-            except (AttributeError, ZeroDivisionError):
+            except (AttributeError, TypeError, ValueError, ZeroDivisionError):
                 pass
         return vals
 
@@ -1704,8 +1994,16 @@ def render_aggregate_summary(all_perfs: dict[str, PerfMetrics]):
     print(sep)
 
     metrics_defs = [
-        ("Avg Runtime (s)", lambda p: p.runtime.avg, "{:.4f}"),
-        ("Weighted Runtime (s)", lambda p: p.runtime.weighted_avg, "{:.4f}"),
+        (
+            "Avg Runtime (s)",
+            lambda p: p.runtime.avg if p.runtime.valid_runs else None,
+            "{:.4f}",
+        ),
+        (
+            "Weighted Runtime (s)",
+            lambda p: p.runtime.weighted_avg if p.runtime.valid_runs else None,
+            "{:.4f}",
+        ),
         ("Code Size (B)", lambda p: float(p.code_density.text_size_bytes), "{:.0f}"),
         (
             "Instruction Count",
@@ -1727,7 +2025,20 @@ def render_aggregate_summary(all_perfs: dict[str, PerfMetrics]):
         ),
         ("Branch Predict %", lambda p: p.branch_analysis.predicted_hit_rate, "{:.1f}"),
         ("Branch Density", lambda p: p.branch_analysis.branch_density, "{:.1f}"),
-        ("Stack Spills", lambda p: float(p.register_pressure.stack_spills), "{:.0f}"),
+        (
+            "Stack Accesses",
+            lambda p: float(p.register_pressure.stack_accesses),
+            "{:.0f}",
+        ),
+        (
+            "Stack Spills",
+            lambda p: (
+                float(p.register_pressure.stack_spills)
+                if p.register_pressure.stack_spills is not None
+                else None
+            ),
+            "{:.0f}",
+        ),
         ("L/S Ratio", lambda p: p.memory_access.load_store_ratio, "{:.2f}"),
         ("Stack Access %", lambda p: p.memory_access.stack_access_pct, "{:.1f}"),
         ("Loop Count", lambda p: float(p.hotspots.loop_count), "{:.0f}"),
@@ -1785,11 +2096,17 @@ def render_aggregate_summary(all_perfs: dict[str, PerfMetrics]):
         1 for p in all_perfs.values() if not p.cache_estimate.code_fits_icache
     )
     dcache_miss_count = sum(
-        1 for p in all_perfs.values() if not p.cache_estimate.data_fits_dcache
+        1 for p in all_perfs.values() if p.cache_estimate.data_fits_dcache is False
+    )
+    dcache_unknown_count = sum(
+        1 for p in all_perfs.values() if p.cache_estimate.data_fits_dcache is None
     )
     print(f"\n{C.BOLD}  Cache Pressure:{C.RESET}")
     print(f"    I-cache pressure: {icache_miss_count}/{n} tests exceed 32KB")
-    print(f"    D-cache pressure: {dcache_miss_count}/{n} tests exceed 32KB")
+    print(
+        f"    D-cache pressure: {dcache_miss_count}/{n} tests exceed 32KB "
+        f"({dcache_unknown_count} unknown)"
+    )
 
     # Locality summary
     locality_counts = Counter(
@@ -1850,8 +2167,10 @@ def write_json_report(
     if all_perfs:
         agg = {}
         metric_extractors = {
-            "avg_runtime": lambda p: p.runtime.avg,
-            "weighted_runtime": lambda p: p.runtime.weighted_avg,
+            "avg_runtime": lambda p: p.runtime.avg if p.runtime.valid_runs else None,
+            "weighted_runtime": lambda p: (
+                p.runtime.weighted_avg if p.runtime.valid_runs else None
+            ),
             "code_size": lambda p: p.code_density.text_size_bytes,
             "instruction_count": lambda p: p.code_density.total_instructions,
             "cpi": lambda p: p.pipeline_estimate.cpi,
@@ -1873,7 +2192,7 @@ def write_json_report(
                         isinstance(v, float) and (math.isinf(v) or math.isnan(v))
                     ):
                         vals.append(float(v))
-                except (AttributeError, ZeroDivisionError):
+                except (AttributeError, TypeError, ValueError, ZeroDivisionError):
                     pass
             if vals:
                 agg[metric_name] = {
@@ -1958,7 +2277,7 @@ def run_test(test_file, args):
 
     # 1. Compile .sy to RISC-V assembly using Exodus compiler
     # Split compiler options if provided
-    opt_list = args.opt.split() if args.opt else []
+    opt_list = shlex.split(args.opt) if args.opt else []
     compiler_cmd = [
         os.path.abspath(args.compiler),
         os.path.abspath(test_file),
@@ -2072,9 +2391,15 @@ def run_perf_analysis(test_file, args) -> Optional[PerfMetrics]:
     temp_dir = os.path.abspath(f"build/tmp_validate/{test_name}")
     asm_path = os.path.join(temp_dir, "output", "output.s")
     in_file = os.path.splitext(test_file)[0] + ".in"
+    out_file = os.path.splitext(test_file)[0] + ".out"
 
     if not os.path.exists(asm_path):
         return None
+    if not os.path.exists(out_file):
+        return None
+
+    with open(out_file, "r", encoding="utf-8", errors="ignore") as output_file:
+        expected_content = output_file.read()
 
     perf = PerfMetrics()
 
@@ -2090,8 +2415,10 @@ def run_perf_analysis(test_file, args) -> Optional[PerfMetrics]:
             qemu_cmd,
             temp_dir,
             in_file if os.path.exists(in_file) else None,
+            expected_content,
             args.timeout,
             args.perf_runs,
+            args.perf_warmup,
         )
 
         # 3. Code density
@@ -2209,6 +2536,12 @@ def main():
         help="Number of repeated runs for runtime measurement (default: 3)",
     )
     parser.add_argument(
+        "--perf-warmup",
+        type=int,
+        default=1,
+        help="Number of validated warm-up runs before measurement (default: 1)",
+    )
+    parser.add_argument(
         "--perf-report",
         type=str,
         default=None,
@@ -2217,6 +2550,13 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.perf_runs < 1:
+        print(f"{Colors.RED}Error: --perf-runs must be positive.{Colors.RESET}")
+        return 1
+    if args.perf_warmup < 0:
+        print(f"{Colors.RED}Error: --perf-warmup cannot be negative.{Colors.RESET}")
+        return 1
 
     # Pre-checks
     compiler_abs = os.path.abspath(args.compiler)
@@ -2267,7 +2607,10 @@ def main():
     )
     print(f"Jobs: {args.jobs} | Timeout: {args.timeout}s | Compiler Opts: '{args.opt}'")
     if args.perf:
-        print(f"Perf runs: {args.perf_runs} | Report: {args.perf_report or 'none'}")
+        print(
+            f"Perf runs: {args.perf_runs} | Warmup: {args.perf_warmup} | "
+            f"Report: {args.perf_report or 'none'}"
+        )
     print("=" * 60)
 
     passed_count = 0

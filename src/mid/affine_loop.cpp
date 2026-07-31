@@ -327,8 +327,9 @@ auto AffineLoopInfo::loop_invariant(Value *value, const Loop &loop) const
   return block && !loop.contains(block);
 }
 
-auto AffineLoopInfo::get_inductions(const Loop &loop) const
-  -> std::vector<InductionInfo> {
+auto AffineLoopInfo::get_inductions(
+  const Loop &loop, bool allow_dominating_update
+) const -> std::vector<InductionInfo> {
   std::vector<InductionInfo> result;
   if (!loop.get_preheader() || loop.get_back_edges().size() != 1)
     return result;
@@ -366,9 +367,14 @@ auto AffineLoopInfo::get_inductions(const Loop &loop) const
 
     auto *update =
       static_cast<Op *>(static_cast<OpResult *>(backedge)->creator);
+    auto *update_block = definition_block(backedge);
     if (
-      !update || definition_block(backedge) != latch || !update->result ||
-      update->result != backedge || update->operands.size() != 2
+      !update || !update_block ||
+      (update_block != latch &&
+       (!allow_dominating_update || !loop.contains(update_block) || !dom ||
+        !dom->dominate(update_block, latch))) ||
+      !update->result || update->result != backedge ||
+      update->operands.size() != 2
     ) {
       continue;
     }
@@ -416,8 +422,9 @@ auto AffineLoopInfo::normalized_condition(
   return std::pair{predicate, bound};
 }
 
-auto AffineLoopInfo::match_counted_loop(const Loop &loop) const
-  -> std::optional<CountedLoopInfo> {
+auto AffineLoopInfo::match_counted_loop(
+  const Loop &loop, bool allow_dominating_update
+) const -> std::optional<CountedLoopInfo> {
   if (
     !loop.get_preheader() || loop.get_back_edges().size() != 1 ||
     loop.get_exiting_blocks().size() != 1 ||
@@ -459,7 +466,7 @@ auto AffineLoopInfo::match_counted_loop(const Loop &loop) const
   if (definition_block(condition) != header)
     return std::nullopt;
 
-  for (auto induction : get_inductions(loop)) {
+  for (auto induction : get_inductions(loop, allow_dominating_update)) {
     auto normalized =
       normalized_condition(compare, induction.phi->result, true_is_continue);
     if (!normalized)

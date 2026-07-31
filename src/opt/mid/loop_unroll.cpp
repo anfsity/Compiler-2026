@@ -123,17 +123,26 @@ auto LoopUnroll::validate_shape(
     switch (op->code) {
     case OpCode::Phi:
     case OpCode::Alloca:
-    case OpCode::Call:
     case OpCode::Ret:
     case OpCode::Jump:
     case OpCode::Branch:
     case OpCode::Memset:
       return false;
+    case OpCode::Call:
+      // An exact single iteration moves the call without duplicating or
+      // speculating it: the canonical header is proven true once and false on
+      // the backedge. Multi-iteration unrolling still rejects calls to avoid
+      // code growth and changed call scheduling.
+      if (trip_count != 1)
+        return false;
+      break;
     default:
       break;
     }
     if (
       !std::holds_alternative<EmptyPayload>(op->payload) &&
+      !(trip_count == 1 && op->code == OpCode::Call &&
+        std::holds_alternative<CallPayload>(op->payload)) &&
       !(op->code == OpCode::GetPtr &&
         std::holds_alternative<GetPtrPayload>(op->payload))
     )

@@ -97,6 +97,41 @@ auto MonotonicGuardTighten::is_increment_by_one(Op *op, Value *induction) const
          (op->operands[1] == induction && i32_constant_is(op->operands[0], 1));
 }
 
+auto MonotonicGuardTighten::has_live_out_use(
+  const LinearFunction &func, Value *value, const Loop &loop
+) const -> bool {
+  if (!value)
+    return false;
+
+  for (const auto &block : func.blocks) {
+    if (loop.contains(block.get()))
+      continue;
+
+    for (auto *op : block->insts) {
+      if (
+        std::find(op->operands.begin(), op->operands.end(), value) !=
+        op->operands.end()
+      ) {
+        return true;
+      }
+      if (op->code != OpCode::Phi)
+        continue;
+
+      const auto &incoming = std::get<PhiPayload>(op->payload).incoming;
+      if (
+        std::any_of(
+          incoming.begin(), incoming.end(), [value](const auto &entry) {
+            return entry.second == value;
+          }
+        )
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 auto MonotonicGuardTighten::has_only_current_user(
   const LinearFunction &func, Value *value, Op *expected
 ) const -> bool {
@@ -293,6 +328,8 @@ auto MonotonicGuardTighten::try_tighten(LinearFunction &func, const Loop &loop)
   ) {
     return false;
   }
+  if (has_live_out_use(func, induction_phi->result, loop))
+    return false;
 
   // j < bound implies j <= INT_MAX - 1, so both original j + 1 updates are
   // non-wrapping.  Once invariant threshold < j becomes true, incrementing j
