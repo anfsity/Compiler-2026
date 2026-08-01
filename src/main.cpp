@@ -91,7 +91,12 @@ private:
   auto parse_args(int argc, char **argv) -> bool {
     for (int i = 1; i < argc; ++i) {
       std::string arg = argv[i];
-      if (arg.size() > 2 && arg.substr(0, 2) == "-O") {
+      if (arg == "-S") {
+        continue;
+      } else if (arg == "-o") {
+        options.output_file = argv[++i];
+        continue;
+      } else if (arg.size() > 2 && arg.substr(0, 2) == "-O") {
         auto value = arg.substr(2);
         bool numeric = !value.empty();
         for (auto ch : value)
