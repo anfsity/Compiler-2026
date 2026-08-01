@@ -1,4 +1,4 @@
-#include "loop_recurrence_simplify.hpp"
+#include "recurrence_simplify.hpp"
 
 #include "../../base/integer_range.hpp"
 #include "../../high/effects.hpp"
@@ -70,7 +70,7 @@ auto may_write_memory(const Op &op) -> bool {
 
 } // namespace
 
-auto LoopRecurrenceSimplify::run(
+auto RecurrenceSimplify::run(
   Function &function, exodus::opt::FunctionAnalysisManager &
 ) -> exodus::opt::PreservedAnalysis {
   std::unordered_set<Op *> guarded_fallbacks;
@@ -79,7 +79,7 @@ auto LoopRecurrenceSimplify::run(
            : exodus::opt::PreservedAnalysis::all();
 }
 
-auto LoopRecurrenceSimplify::simplify_region(
+auto RecurrenceSimplify::simplify_region(
   Region &region, std::unordered_set<Op *> &guarded_fallbacks
 ) -> bool {
   bool changed = false;
@@ -112,7 +112,7 @@ auto LoopRecurrenceSimplify::simplify_region(
   return changed;
 }
 
-auto LoopRecurrenceSimplify::match_modular_recurrence(
+auto RecurrenceSimplify::match_modular_recurrence(
   Region &parent, Region::iterator position, Op *loop
 ) const -> std::optional<ModularRecurrence> {
   if (!loop || loop->code != OpCode::While)
@@ -338,7 +338,7 @@ auto LoopRecurrenceSimplify::match_modular_recurrence(
   };
 }
 
-auto LoopRecurrenceSimplify::replace_with_guarded_closed_form(
+auto RecurrenceSimplify::replace_with_guarded_closed_form(
   Region &parent,
   Region::iterator position,
   Op *loop,

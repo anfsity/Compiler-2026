@@ -1,7 +1,7 @@
 #pragma once
 
 #include "../../mid/rewriter.hpp"
-#include "loop_strength_reduce_analysis.hpp"
+#include "lsr_analysis.hpp"
 #include <memory>
 #include <optional>
 #include <unordered_map>

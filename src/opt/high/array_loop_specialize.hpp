@@ -5,9 +5,9 @@
 
 namespace exodus::high_ir::opt {
 
-class LocalArrayLoopSpecialize {
+class ArrayLoopSpecialize {
 public:
-  explicit LocalArrayLoopSpecialize(Module *module) : module(module) {}
+  explicit ArrayLoopSpecialize(Module *module) : module(module) {}
 
   auto run(Function &, exodus::opt::FunctionAnalysisManager &)
     -> exodus::opt::PreservedAnalysis;

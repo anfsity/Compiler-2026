@@ -1,7 +1,7 @@
 #include "loop_strength_reduce.hpp"
 
-#include "loop_strength_reduce_context.hpp"
-#include "loop_strength_reduce_recurrence.hpp"
+#include "lsr_context.hpp"
+#include "lsr_recurrence.hpp"
 
 namespace exodus::mid_ir::opt {
 

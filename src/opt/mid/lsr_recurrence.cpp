@@ -1,4 +1,4 @@
-#include "loop_strength_reduce_recurrence.hpp"
+#include "lsr_recurrence.hpp"
 
 #include "../../mid/getptr.hpp"
 #include <algorithm>

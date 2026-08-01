@@ -1,4 +1,4 @@
-#include "dead_function_elimination.hpp"
+#include "dead_functions.hpp"
 
 #include <algorithm>
 #include <unordered_map>

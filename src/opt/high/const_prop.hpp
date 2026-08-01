@@ -13,7 +13,7 @@ namespace exodus::high_ir::opt {
 using namespace exodus::high_ir;
 using namespace exodus::opt;
 
-struct CP : RecursiveOpVisitor<CP> {
+struct ConstProp : RecursiveOpVisitor<ConstProp> {
   std::unordered_map<Value *, Value *> env;
   std::unordered_set<Value *> safe_allocas;
   std::unordered_set<Value *> safe_globals;
@@ -24,9 +24,9 @@ struct CP : RecursiveOpVisitor<CP> {
   std::unordered_map<Function *, OpEffects> function_effects;
   bool changed = false;
 
-  using RecursiveOpVisitor<CP>::visit;
+  using RecursiveOpVisitor<ConstProp>::visit;
 
-  CP(Module *_m);
+  ConstProp(Module *_m);
 
   auto run(Function &f, FunctionAnalysisManager & /* FAM */)
     -> PreservedAnalysis;
@@ -39,8 +39,9 @@ struct CP : RecursiveOpVisitor<CP> {
   auto visit(Op *op, OpTag<OpCode::Call>) -> void;
 
   // 为了更好的进行优化，在 if 语句内，现对 if 语句里面进行试探
-  // 在 if () { A  } else { B } 中，A 和 B 都是可以基于之前的结果进行 CP 的
-  // 但是如果在 A/B 中进行了 store，由于分支语句的不确定性，我们无法进行良好假设
+  // 在 if () { A  } else { B } 中，A 和 B 都是可以基于之前的结果进行 ConstProp
+  // 的 但是如果在 A/B 中进行了
+  // store，由于分支语句的不确定性，我们无法进行良好假设
   // 所以在后面会从集合中移除他们。
   auto visit(Op *op, OpTag<OpCode::If>) -> void;
   auto visit(Op *op, OpTag<OpCode::While>) -> void;

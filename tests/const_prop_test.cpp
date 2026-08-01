@@ -1,6 +1,6 @@
 #ifdef EXODUS_UNIT_TEST
 #include "../src/opt/AnalysisManager.hpp"
-#include "../src/opt/high/constant_propagation.hpp"
+#include "../src/opt/high/const_prop.hpp"
 #include "../src/type.hpp"
 #include <cassert>
 #include <memory>
@@ -38,7 +38,7 @@ auto test_mutable_global_load_is_not_folded() -> void {
   function.body.push_back(ret);
 
   FunctionAnalysisManager fam;
-  CP cp(&module);
+  ConstProp cp(&module);
   cp.run(function, fam);
 
   assert(function.body.front()->code == OpCode::Load);
@@ -77,7 +77,7 @@ auto test_pointer_call_invalidates_local_value() -> void {
   function.body.push_back(ret);
 
   FunctionAnalysisManager fam;
-  CP cp(&module);
+  ConstProp cp(&module);
   cp.run(function, fam);
 
   assert(ret->operands.front() == load->result);

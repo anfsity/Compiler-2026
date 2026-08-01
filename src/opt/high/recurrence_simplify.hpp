@@ -6,9 +6,9 @@
 
 namespace exodus::high_ir::opt {
 
-class LoopRecurrenceSimplify {
+class RecurrenceSimplify {
 public:
-  explicit LoopRecurrenceSimplify(Module *m) : module(m) {}
+  explicit RecurrenceSimplify(Module *m) : module(m) {}
 
   auto run(Function &function, exodus::opt::FunctionAnalysisManager &)
     -> exodus::opt::PreservedAnalysis;

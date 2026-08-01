@@ -1,4 +1,4 @@
-#include "dead_function_elimination.hpp"
+#include "dead_functions.hpp"
 
 #include "../../high/scc.hpp"
 #include <algorithm>
@@ -7,9 +7,8 @@
 
 namespace exodus::high_ir::opt {
 
-auto DeadFunctionElimination::run(
-  Module &, exodus::opt::ModuleAnalysisManager &
-) -> exodus::opt::PreservedAnalysis {
+auto DeadFunctions::run(Module &, exodus::opt::ModuleAnalysisManager &)
+  -> exodus::opt::PreservedAnalysis {
   Function *entry = nullptr;
   for (const auto &function : module->functions) {
     if (function->name != "main" || function->is_decl)

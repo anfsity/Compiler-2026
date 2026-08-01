@@ -1,4 +1,4 @@
-#include "idempotent_loop_simplify.hpp"
+#include "idempotent_loops.hpp"
 
 #include "../../base/getptr.hpp"
 #include "../../high/effects.hpp"
@@ -677,7 +677,7 @@ private:
 
 } // namespace
 
-auto IdempotentLoopSimplify::run(Module &, exodus::opt::ModuleAnalysisManager &)
+auto IdempotentLoops::run(Module &, exodus::opt::ModuleAnalysisManager &)
   -> exodus::opt::PreservedAnalysis {
   std::unordered_map<std::string, Function *> functions;
   std::unordered_map<Function *, std::unique_ptr<PointerRootAnalysis>>

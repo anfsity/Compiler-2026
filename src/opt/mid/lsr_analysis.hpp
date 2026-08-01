@@ -1,6 +1,6 @@
 #pragma once
 
-#include "loop_strength_reduce_context.hpp"
+#include "lsr_context.hpp"
 #include <cstdint>
 #include <optional>
 #include <unordered_map>

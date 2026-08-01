@@ -1,4 +1,4 @@
-#include "loop_strength_reduce_analysis.hpp"
+#include "lsr_analysis.hpp"
 
 #include <algorithm>
 #include <functional>

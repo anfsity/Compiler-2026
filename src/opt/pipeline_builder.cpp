@@ -99,10 +99,10 @@ auto default_high_module_pipeline() -> const std::vector<std::string> & {
     "guarded_bitwise_idiom",
     "ipcp",
     "global_init_promotion",
-    "idempotent_loop_simplify",
+    "idempotent_loops",
     "pure_call_loop_sink",
     "inliner",
-    "dead_function_elimination",
+    "dead_functions",
     "memoization",
   };
   return pipeline;
@@ -112,10 +112,10 @@ auto default_high_function_pipeline() -> const std::vector<std::string> & {
   static const std::vector<std::string> pipeline{
     "return_insertion",
     "loop_unswitch",
-    "local_array_loop_specialize",
+    "array_loop_specialize",
     "const_prop",
     "inst_simplify",
-    "loop_recurrence_simplify",
+    "recurrence_simplify",
     "region_simplify",
     "simple_dce",
   };
@@ -124,7 +124,7 @@ auto default_high_function_pipeline() -> const std::vector<std::string> & {
 
 auto default_mid_function_pipeline() -> const std::vector<std::string> & {
   static const std::vector<std::string> pipeline{
-    "immutable_pointer_slot_canonicalize",
+    "pointer_slot_canonicalize",
     "mem2reg",
     "tail_recursion_elim",
     "mid_inliner",

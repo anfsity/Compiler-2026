@@ -5,9 +5,9 @@
 
 namespace exodus::high_ir::opt {
 
-class DeadFunctionElimination {
+class DeadFunctions {
 public:
-  explicit DeadFunctionElimination(Module *module) : module(module) {}
+  explicit DeadFunctions(Module *module) : module(module) {}
 
   auto run(Module &, exodus::opt::ModuleAnalysisManager &)
     -> exodus::opt::PreservedAnalysis;

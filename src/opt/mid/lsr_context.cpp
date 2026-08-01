@@ -1,4 +1,4 @@
-#include "loop_strength_reduce_context.hpp"
+#include "lsr_context.hpp"
 
 namespace exodus::mid_ir::opt {
 

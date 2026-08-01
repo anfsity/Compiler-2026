@@ -1,10 +1,10 @@
-#include "immutable_pointer_slot_canonicalize.hpp"
+#include "pointer_slot_canonicalize.hpp"
 
 #include <algorithm>
 
 namespace exodus::mid_ir::opt {
 
-auto ImmutablePointerSlotCanonicalize::run(
+auto PointerSlotCanonicalize::run(
   LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager &am
 ) -> exodus::opt::PreservedAnalysis {
   if (func.blocks.empty())
@@ -45,7 +45,7 @@ auto ImmutablePointerSlotCanonicalize::run(
   return exodus::opt::PreservedAnalysis::none();
 }
 
-auto ImmutablePointerSlotCanonicalize::build_scope(
+auto PointerSlotCanonicalize::build_scope(
   Context &context, LinearFunction &func
 ) -> void {
   context.op_blocks.clear();
@@ -58,7 +58,7 @@ auto ImmutablePointerSlotCanonicalize::build_scope(
   }
 }
 
-auto ImmutablePointerSlotCanonicalize::dominates(
+auto PointerSlotCanonicalize::dominates(
   Op *definition, Op *use, DomTree &dom, const Context &context
 ) -> bool {
   auto definition_block = context.op_blocks.find(definition);
@@ -81,7 +81,7 @@ auto ImmutablePointerSlotCanonicalize::dominates(
   return false;
 }
 
-auto ImmutablePointerSlotCanonicalize::collect_candidate(
+auto PointerSlotCanonicalize::collect_candidate(
   Op *alloca, DomTree &dom, const Context &context
 ) -> std::optional<Candidate> {
   if (
@@ -167,7 +167,7 @@ auto ImmutablePointerSlotCanonicalize::collect_candidate(
   return candidate;
 }
 
-auto ImmutablePointerSlotCanonicalize::preserves_getptr_plan(
+auto PointerSlotCanonicalize::preserves_getptr_plan(
   Op *getptr, Value *replacement
 ) -> bool {
   if (

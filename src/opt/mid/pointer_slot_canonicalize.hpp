@@ -10,7 +10,7 @@
 
 namespace exodus::mid_ir::opt {
 
-class ImmutablePointerSlotCanonicalize {
+class PointerSlotCanonicalize {
   struct Candidate {
     Op *alloca = nullptr;
     Op *store = nullptr;
@@ -24,7 +24,7 @@ class ImmutablePointerSlotCanonicalize {
   };
 
 public:
-  explicit ImmutablePointerSlotCanonicalize([[maybe_unused]] MidModule *m) {}
+  explicit PointerSlotCanonicalize([[maybe_unused]] MidModule *m) {}
 
   auto run(LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager &am)
     -> exodus::opt::PreservedAnalysis;
