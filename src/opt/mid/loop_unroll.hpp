@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../mid/affine_loop.hpp"
+#include "../../mid/cfg_editor.hpp"
 #include "../../mid/rewriter.hpp"
 #include <unordered_map>
 #include <unordered_set>
@@ -24,6 +25,7 @@ private:
 
   auto build_op_block_map(LinearFunction &func) -> void;
   auto try_unroll(
+    CFGEditor &cfg,
     LinearFunction &func,
     const Loop &loop,
     const CountedLoopInfo &counted,
@@ -45,10 +47,8 @@ private:
     uint64_t trip_count,
     std::unordered_map<Value *, Value *> &final_values
   ) -> bool;
-  auto remove_loop_blocks(LinearFunction &func, const CountedLoopInfo &counted)
-    -> void;
-
-  static auto renumber_blocks(LinearFunction &func) -> void;
+  auto remove_loop_blocks(CFGEditor &cfg, const CountedLoopInfo &counted)
+    -> bool;
 };
 
 } // namespace exodus::mid_ir::opt

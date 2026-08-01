@@ -227,10 +227,86 @@ auto test_mem2reg_after_flattened_creator_update() -> void {
   std::cout << "test_mem2reg_after_flattened_creator_update passed!\n";
 }
 
+auto test_mem2reg_with_sparse_block_ids() -> void {
+  IRContext ctx;
+  MidModule module;
+  module.ctx = &ctx;
+
+  auto i32 = exodus::I32::get();
+  auto p_i32 = exodus::Ptr::get(i32);
+
+  LinearFunction func;
+  auto entry = std::make_unique<Block>(100, "entry");
+  auto then_bb = std::make_unique<Block>(250, "then");
+  auto else_bb = std::make_unique<Block>(700, "else");
+  auto merge = std::make_unique<Block>(900, "merge");
+
+  Block *p_entry = entry.get();
+  Block *p_then = then_bb.get();
+  Block *p_else = else_bb.get();
+  Block *p_merge = merge.get();
+
+  p_entry->succs = {p_then, p_else};
+  p_then->preds = {p_entry};
+  p_then->succs = {p_merge};
+  p_else->preds = {p_entry};
+  p_else->succs = {p_merge};
+  p_merge->preds = {p_then, p_else};
+
+  auto *alloca = module.make_op(OpCode::Alloca);
+  alloca->result = ctx.make_value<OpResult>(p_i32, alloca);
+  p_entry->insts.push_back(alloca);
+
+  auto *c1 = ctx.make_const(i32, 1);
+  auto *store1 = module.make_op(OpCode::Store);
+  store1->operands = {c1, alloca->result};
+  c1->addUse(store1);
+  alloca->result->addUse(store1);
+  p_then->insts.push_back(store1);
+
+  auto *c2 = ctx.make_const(i32, 2);
+  auto *store2 = module.make_op(OpCode::Store);
+  store2->operands = {c2, alloca->result};
+  c2->addUse(store2);
+  alloca->result->addUse(store2);
+  p_else->insts.push_back(store2);
+
+  auto *load = module.make_op(OpCode::Load);
+  load->operands.push_back(alloca->result);
+  load->result = ctx.make_value<OpResult>(i32, load);
+  alloca->result->addUse(load);
+  p_merge->insts.push_back(load);
+
+  auto *ret = module.make_op(OpCode::Ret);
+  ret->operands.push_back(load->result);
+  load->result->addUse(ret);
+  p_merge->insts.push_back(ret);
+
+  func.blocks.push_back(std::move(entry));
+  func.blocks.push_back(std::move(then_bb));
+  func.blocks.push_back(std::move(else_bb));
+  func.blocks.push_back(std::move(merge));
+
+  exodus::opt::LinearFunctionAnalysisManager am;
+  am.register_pass<DominanceAnalysis>();
+
+  Mem2Reg m2r(&module);
+  m2r.run(func, am);
+
+  assert(!p_merge->insts.empty());
+  auto *phi = p_merge->insts.front();
+  assert(phi->code == OpCode::Phi);
+  assert(std::get<PhiPayload>(phi->payload).incoming.size() == 2);
+  assert(p_merge->insts.back()->operands[0] == phi->result);
+
+  std::cout << "test_mem2reg_with_sparse_block_ids passed!\n";
+}
+
 int main() {
   test_basic_mem2reg();
   test_diamond_mem2reg();
   test_mem2reg_after_flattened_creator_update();
+  test_mem2reg_with_sparse_block_ids();
   return 0;
 }
 #endif

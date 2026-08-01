@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../mid/cfg_editor.hpp"
 #include "../../mid/loop.hpp"
 #include "../../mid/rewriter.hpp"
 #include <unordered_set>
@@ -17,18 +18,17 @@ public:
 private:
   MidModule *module;
 
-  auto create_preheader(LinearFunction &func, Loop &loop) -> bool;
-  auto create_single_latch(LinearFunction &func, Loop &loop) -> bool;
+  auto create_preheader(CFGEditor &cfg, Loop &loop) -> bool;
+  auto create_single_latch(CFGEditor &cfg, Loop &loop) -> bool;
   auto rewrite_header_phis(
+    CFGEditor &cfg,
     Block *header,
     Block *preheader,
     const std::unordered_set<Block *> &outside_preds
   ) -> void;
-  static auto
-  reset_phi_incoming(Op *phi, std::vector<std::pair<Block *, Value *>> incoming)
-    -> void;
-  static auto rebuild_cfg(LinearFunction &func) -> void;
-  static auto renumber_blocks(LinearFunction &func) -> void;
+  static auto identical_binary_update(
+    const std::vector<std::pair<Block *, Value *>> &incoming
+  ) -> Op *;
 };
 
 } // namespace exodus::mid_ir::opt

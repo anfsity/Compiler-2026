@@ -7,6 +7,14 @@
 
 namespace exodus::mid_ir::opt {
 
+auto DeadFunctions::run(
+  MidModule &module, exodus::opt::AnalysisManager<MidModule> &
+) -> exodus::opt::PreservedAnalysis {
+  return eliminate_dead_functions(module)
+           ? exodus::opt::PreservedAnalysis::none()
+           : exodus::opt::PreservedAnalysis::all();
+}
+
 auto eliminate_dead_functions(MidModule &module) -> bool {
   std::unordered_map<std::string, LinearFunction *> definitions;
   LinearFunction *entry = nullptr;

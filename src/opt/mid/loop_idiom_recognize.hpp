@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../mid/affine_loop.hpp"
+#include "../../mid/cfg_editor.hpp"
 #include <optional>
 #include <unordered_map>
 
@@ -18,6 +19,7 @@ private:
     MidModule *module = nullptr;
     const AffineLoopInfo *affine_loops = nullptr;
     std::unordered_map<Op *, Block *> op_blocks;
+    CFGEditor *cfg = nullptr;
   };
 
   MidModule *module;
@@ -59,8 +61,6 @@ private:
   static auto integer_constant(Value *value) -> std::optional<int>;
   static auto is_byte_splat_constant(Value *value) -> bool;
   static auto reset_operands(Op *op, std::vector<Value *> operands) -> void;
-  static auto rebuild_cfg(LinearFunction &func) -> void;
-  static auto renumber_blocks(LinearFunction &func) -> void;
 };
 
 } // namespace exodus::mid_ir::opt

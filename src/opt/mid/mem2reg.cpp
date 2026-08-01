@@ -7,11 +7,19 @@ namespace exodus::mid_ir::opt {
 auto Mem2Reg::run(
   LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager &am
 ) -> exodus::opt::PreservedAnalysis {
+  phi2alloca.clear();
+  alloca2phis.clear();
+
   auto &dom = am.get_result<DominanceAnalysis>(func);
 
   auto allocas = collect_promotable_allocas(func);
   if (allocas.empty())
     return exodus::opt::PreservedAnalysis::all();
+
+  std::unordered_map<Block *, size_t> block_index;
+  size_t index = 0;
+  for (auto &block : func.blocks)
+    block_index[block.get()] = index++;
 
   // Pre-calculate alloca stores to avoid scanning the function for each
   // alloca
@@ -30,7 +38,7 @@ auto Mem2Reg::run(
   }
 
   for (auto *alloca : allocas) {
-    insert_phi(func, dom, alloca, alloca_stores[alloca]);
+    insert_phi(func, dom, alloca, alloca_stores[alloca], block_index);
   }
 
   std::unordered_map<Op *, std::stack<Value *>> stacks;
@@ -93,15 +101,19 @@ auto Mem2Reg::insert_phi(
   [[maybe_unused]] LinearFunction &func,
   DomTree &dom,
   Op *alloca,
-  const std::vector<Block *> &stores
+  const std::vector<Block *> &stores,
+  const std::unordered_map<Block *, size_t> &block_index
 ) -> void {
-  int num_blocks = static_cast<int>(func.blocks.size());
+  auto num_blocks = func.blocks.size();
   std::vector<bool> has_phi(num_blocks, false);
   std::vector<bool> processed(num_blocks, false);
   std::vector<Block *> worklist;
 
   for (Block *b : stores) {
-    int idx = b->id;
+    auto found = block_index.find(b);
+    if (found == block_index.end())
+      continue;
+    auto idx = found->second;
     if (!processed[idx]) {
       processed[idx] = true;
       worklist.push_back(b);
@@ -114,7 +126,10 @@ auto Mem2Reg::insert_phi(
   for (size_t i = 0; i < worklist.size(); ++i) {
     Block *b = worklist[i];
     for (Block *df_block : dom.get_df(b)) {
-      int df_idx = df_block->id;
+      auto found = block_index.find(df_block);
+      if (found == block_index.end())
+        continue;
+      auto df_idx = found->second;
       if (!has_phi[df_idx]) {
         auto *phi = module->make_op(OpCode::Phi, PhiPayload{});
         phi->result = module->ctx->make_value<OpResult>(target_type, phi);

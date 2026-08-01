@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../mid/affine_loop.hpp"
+#include "../../mid/cfg_editor.hpp"
 #include "../../mid/rewriter.hpp"
 #include <unordered_map>
 
@@ -19,7 +20,8 @@ private:
   std::unordered_map<Op *, Block *> op_blocks;
 
   auto build_op_block_map(LinearFunction &func) -> void;
-  auto try_tighten(LinearFunction &func, const Loop &loop) -> bool;
+  auto try_tighten(CFGEditor &cfg, LinearFunction &func, const Loop &loop)
+    -> bool;
   auto is_loop_invariant(Value *value, const Loop &loop) const -> bool;
   auto is_increment_by_one(Op *op, Value *induction) const -> bool;
   auto has_live_out_use(
@@ -28,8 +30,6 @@ private:
   auto has_only_current_user(
     const LinearFunction &func, Value *value, Op *expected
   ) const -> bool;
-
-  static auto rebuild_cfg(LinearFunction &func) -> void;
 };
 
 } // namespace exodus::mid_ir::opt

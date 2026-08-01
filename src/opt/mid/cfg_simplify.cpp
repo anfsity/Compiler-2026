@@ -25,27 +25,28 @@ auto CFGSimplify::run(
     return exodus::opt::PreservedAnalysis::all();
 
   changed = false;
+  CFGEditor cfg(*module, func);
+  cfg.synchronize();
   rewriter.set_scope(func);
 
-  fold_constant_branches(func);
-  rebuild_cfg(func);
-  remove_unreachable_blocks(func);
-  rebuild_cfg(func);
+  fold_constant_branches(cfg);
+  remove_unreachable_blocks(cfg);
   simplify_phis(func);
   rewriter.finalize(func);
+  cfg.synchronize();
 
-  merge_linear_blocks(func);
-  rebuild_cfg(func);
+  merge_linear_blocks(cfg);
   rewriter.set_scope(func);
   simplify_phis(func);
   rewriter.finalize(func);
+  cfg.synchronize();
 
   return changed ? exodus::opt::PreservedAnalysis::none()
                  : exodus::opt::PreservedAnalysis::all();
 }
 
-auto CFGSimplify::fold_constant_branches(LinearFunction &func) -> void {
-  for (auto &block : func.blocks) {
+auto CFGSimplify::fold_constant_branches(CFGEditor &cfg) -> void {
+  for (auto &block : cfg.function().blocks) {
     if (block->insts.empty())
       continue;
 
@@ -63,36 +64,17 @@ auto CFGSimplify::fold_constant_branches(LinearFunction &func) -> void {
 
     auto selected = std::get<int>(condition->val) != 0 ? 0u : 1u;
     Block *target = branch->successors[selected];
-    condition->rmUse(branch);
-    branch->operands.clear();
-    branch->code = OpCode::Jump;
-    branch->successors = {target};
-    changed = true;
-  }
-}
-
-auto CFGSimplify::rebuild_cfg(LinearFunction &func) -> void {
-  for (auto &block : func.blocks) {
-    block->preds.clear();
-    block->succs.clear();
-  }
-
-  for (auto &block : func.blocks) {
-    if (block->insts.empty())
-      continue;
-    Op *terminator = block->insts.back();
-    if (terminator->code != OpCode::Jump && terminator->code != OpCode::Branch)
-      continue;
-    for (auto *successor : terminator->successors) {
-      block->succs.push_back(successor);
-      successor->preds.push_back(block.get());
+    auto *jump = cfg.module().make_op(OpCode::Jump);
+    jump->successors.push_back(target);
+    if (cfg.set_terminator(block.get(), jump)) {
+      changed = true;
     }
   }
 }
 
-auto CFGSimplify::remove_unreachable_blocks(LinearFunction &func) -> void {
+auto CFGSimplify::remove_unreachable_blocks(CFGEditor &cfg) -> void {
   std::unordered_set<Block *> reachable;
-  std::vector<Block *> worklist{func.blocks.front().get()};
+  std::vector<Block *> worklist{cfg.function().blocks.front().get()};
   while (!worklist.empty()) {
     Block *block = worklist.back();
     worklist.pop_back();
@@ -101,15 +83,15 @@ auto CFGSimplify::remove_unreachable_blocks(LinearFunction &func) -> void {
     worklist.insert(worklist.end(), block->succs.begin(), block->succs.end());
   }
 
-  for (auto it = func.blocks.begin(); it != func.blocks.end();) {
-    if (reachable.count(it->get())) {
-      ++it;
+  for (auto it = cfg.function().blocks.begin();
+       it != cfg.function().blocks.end();) {
+    Block *block = it->get();
+    ++it;
+    if (reachable.count(block)) {
       continue;
     }
-    for (auto *op : (*it)->insts)
-      rewriter.eraseOp(op);
-    it = func.blocks.erase(it);
-    changed = true;
+    if (cfg.remove_block(block))
+      changed = true;
   }
 }
 
@@ -136,8 +118,7 @@ auto CFGSimplify::simplify_phis(LinearFunction &func) -> void {
         replacement = payload.incoming.front().second;
       } else if (!payload.incoming.empty()) {
         replacement = payload.incoming.front().second;
-        for (auto &[pred, value] : payload.incoming) {
-          (void)pred;
+        for (auto &[_, value] : payload.incoming) {
           if (value != replacement) {
             replacement = nullptr;
             break;
@@ -154,14 +135,15 @@ auto CFGSimplify::simplify_phis(LinearFunction &func) -> void {
   }
 }
 
-auto CFGSimplify::merge_linear_blocks(LinearFunction &func) -> void {
+auto CFGSimplify::merge_linear_blocks(CFGEditor &cfg) -> void {
   bool merged = false;
   do { // NOLINT
     merged = false;
-    rebuild_cfg(func);
-    Block *entry = func.blocks.front().get();
+    cfg.synchronize();
+    Block *entry = cfg.function().blocks.front().get();
 
-    for (auto source_it = func.blocks.begin(); source_it != func.blocks.end();
+    for (auto source_it = cfg.function().blocks.begin();
+         source_it != cfg.function().blocks.end();
          ++source_it) {
       Block *source = source_it->get();
       if (
@@ -176,41 +158,11 @@ auto CFGSimplify::merge_linear_blocks(LinearFunction &func) -> void {
         starts_with_phi(target)
       )
         continue;
-
-      auto target_it = std::find_if(
-        func.blocks.begin(),
-        func.blocks.end(),
-        [target](const std::unique_ptr<Block> &block) {
-          return block.get() == target;
-        }
-      );
-      if (target_it == func.blocks.end())
-        continue;
-
-      source->insts.pop_back();
-      source->insts.splice(source->insts.end(), target->insts);
-
-      for (auto &block : func.blocks) {
-        for (auto *op : block->insts) {
-          for (auto *&successor : op->successors) {
-            if (successor == target)
-              successor = source;
-          }
-          if (op->code == OpCode::Phi) {
-            auto &payload = std::get<PhiPayload>(op->payload);
-            for (auto &[pred, value] : payload.incoming) {
-              (void)value;
-              if (pred == target)
-                pred = source;
-            }
-          }
-        }
+      if (cfg.merge_blocks(source, target)) {
+        changed = true;
+        merged = true;
+        break;
       }
-
-      func.blocks.erase(target_it);
-      changed = true;
-      merged = true;
-      break;
     }
   } while (merged);
 }

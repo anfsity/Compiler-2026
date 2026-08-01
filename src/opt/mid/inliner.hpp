@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../mid/cfg_editor.hpp"
 #include "../../mid/ir.hpp"
 #include "../AnalysisManager.hpp"
 #include <cstddef>
@@ -52,14 +53,12 @@ private:
   auto validate_callee(const LinearFunction &callee, const Op &call) const
     -> bool;
   auto inline_call(
+    CFGEditor &cfg,
     LinearFunction &caller,
     Block &call_block,
     std::list<Op *>::iterator call_it,
     LinearFunction &callee
-  ) -> void;
-
-  static auto rebuild_cfg(LinearFunction &func) -> void;
-  static auto renumber_blocks(LinearFunction &func) -> void;
+  ) -> bool;
 };
 
 } // namespace exodus::mid_ir::opt

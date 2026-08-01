@@ -35,6 +35,8 @@ auto Inliner::run(
   if (func.is_decl || func.blocks.empty())
     return exodus::opt::PreservedAnalysis::all();
 
+  CFGEditor cfg(*module, func);
+  cfg.synchronize();
   rebuild_call_graph();
   auto &loop_info = am.get_result<LoopAnalysis>(func);
 
@@ -60,8 +62,9 @@ auto Inliner::run(
         continue;
       }
 
-      inline_call(func, *block, it, *callee);
-      return exodus::opt::PreservedAnalysis::none();
+      if (inline_call(cfg, func, *block, it, *callee))
+        return exodus::opt::PreservedAnalysis::none();
+      return exodus::opt::PreservedAnalysis::all();
     }
   }
 
@@ -432,28 +435,22 @@ auto Inliner::validate_callee(
 }
 
 auto Inliner::inline_call(
+  CFGEditor &cfg,
   LinearFunction &caller,
   Block &call_block,
   std::list<Op *>::iterator call_it,
   LinearFunction &callee
-) -> void {
+) -> bool {
   Op *call = *call_it;
-  auto continuation = std::make_unique<Block>(
-    0,
+  auto tx = cfg.begin_transaction();
+  Block *continuation_ptr = cfg.create_block_after(
     caller.name + "_inline_" + callee.name + "_continuation_" +
-      std::to_string(inline_serial)
+      std::to_string(inline_serial),
+    &call_block
   );
-  Block *continuation_ptr = continuation.get();
-
-  auto call_block_it = std::find_if(
-    caller.blocks.begin(),
-    caller.blocks.end(),
-    [&](const std::unique_ptr<Block> &block) {
-      return block.get() == &call_block;
-    }
-  );
-  auto continuation_it =
-    caller.blocks.insert(std::next(call_block_it), std::move(continuation));
+  if (!continuation_ptr)
+    return false;
+  auto old_successors = call_block.succs;
 
   auto after_call = std::next(call_it);
   continuation_ptr->insts.splice(
@@ -467,28 +464,21 @@ auto Inliner::inline_call(
   // The original outgoing edges now leave the continuation block.  Update
   // existing Phi predecessor labels before connecting the call block to the
   // cloned callee entry.
-  for (auto &block : caller.blocks) {
-    for (auto *op : block->insts) {
-      if (op->code != OpCode::Phi)
-        break;
-      auto &payload = std::get<PhiPayload>(op->payload);
-      for (auto &[pred, value] : payload.incoming) {
-        (void)value;
-        if (pred == &call_block)
-          pred = continuation_ptr;
-      }
-    }
+  for (auto *successor : old_successors) {
+    if (!cfg.replace_phi_predecessor(successor, &call_block, continuation_ptr))
+      return false;
   }
 
   std::unordered_map<const Block *, Block *> block_map;
   for (const auto &old_block : callee.blocks) {
-    auto cloned_block = std::make_unique<Block>(
-      0,
+    auto *cloned_block = cfg.create_block(
       caller.name + "_inline_" + callee.name + "_" +
-        std::to_string(inline_serial) + "_" + old_block->name
+        std::to_string(inline_serial) + "_" + old_block->name,
+      continuation_ptr
     );
-    block_map[old_block.get()] = cloned_block.get();
-    caller.blocks.insert(continuation_it, std::move(cloned_block));
+    if (!cloned_block)
+      return false;
+    block_map[old_block.get()] = cloned_block;
   }
 
   std::unordered_map<const Value *, Value *> value_map;
@@ -560,12 +550,14 @@ auto Inliner::inline_call(
     returns.push_back({cloned_block, return_value});
     auto *jump = module->make_op(OpCode::Jump);
     jump->successors.push_back(continuation_ptr);
-    cloned_block->insts.push_back(jump);
+    if (!cfg.set_terminator(cloned_block, jump))
+      return false;
   }
 
   auto *entry_jump = module->make_op(OpCode::Jump);
   entry_jump->successors.push_back(block_map.at(callee.blocks.front().get()));
-  call_block.insts.push_back(entry_jump);
+  if (!cfg.set_terminator(&call_block, entry_jump))
+    return false;
 
   if (call->result && !call->result->type->is_void()) {
     Value *replacement = nullptr;
@@ -574,12 +566,13 @@ auto Inliner::inline_call(
     } else {
       auto *phi = module->make_op(OpCode::Phi, PhiPayload{});
       phi->result = module->ctx->make_value<OpResult>(call->result->type, phi);
-      auto &payload = std::get<PhiPayload>(phi->payload);
+      std::vector<std::pair<Block *, Value *>> incoming;
       for (const auto &[pred, value] : returns) {
-        payload.incoming.push_back({pred, value});
-        value->addUse(phi);
+        incoming.push_back({pred, value});
       }
       continuation_ptr->insts.push_front(phi);
+      if (!cfg.set_phi_incoming(phi, std::move(incoming)))
+        return false;
       replacement = phi->result;
     }
     MidIRRewriter rewriter;
@@ -591,32 +584,8 @@ auto Inliner::inline_call(
     operand->rmUse(call);
 
   ++inline_serial;
-  renumber_blocks(caller);
-  rebuild_cfg(caller);
-}
-
-auto Inliner::rebuild_cfg(LinearFunction &func) -> void {
-  for (auto &block : func.blocks) {
-    block->preds.clear();
-    block->succs.clear();
-  }
-  for (auto &block : func.blocks) {
-    if (block->insts.empty())
-      continue;
-    Op *terminator = block->insts.back();
-    if (terminator->code != OpCode::Jump && terminator->code != OpCode::Branch)
-      continue;
-    for (auto *successor : terminator->successors) {
-      block->succs.push_back(successor);
-      successor->preds.push_back(block.get());
-    }
-  }
-}
-
-auto Inliner::renumber_blocks(LinearFunction &func) -> void {
-  int id = 0;
-  for (auto &block : func.blocks)
-    block->id = id++;
+  cfg.synchronize();
+  return tx.commit();
 }
 
 } // namespace exodus::mid_ir::opt

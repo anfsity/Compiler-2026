@@ -16,8 +16,10 @@ auto LoopIdiomRecognize::run(
   if (func.blocks.empty())
     return exodus::opt::PreservedAnalysis::all();
 
+  CFGEditor cfg(*module, func);
+  cfg.synchronize();
   auto &loop_info = am.get_result<LoopAnalysis>(func);
-  Context context{module, &am.get_result<AffineLoopAnalysis>(func), {}};
+  Context context{module, &am.get_result<AffineLoopAnalysis>(func), {}, &cfg};
   build_op_block_map(context, func);
 
   // Store sinking changes the CFG.  Apply one proven rewrite and let the
@@ -88,7 +90,6 @@ auto LoopIdiomRecognize::sink_partial_store(
     auto *source_store = *store_it;
     Block *overwrite = nullptr;
     Block *merge = nullptr;
-    size_t overwrite_index = 0;
     for (size_t index = 0; index < 2; ++index) {
       auto *candidate = terminator->successors[index];
       if (!candidate || candidate->insts.size() != 2)
@@ -114,7 +115,6 @@ auto LoopIdiomRecognize::sink_partial_store(
       }
       overwrite = candidate;
       merge = candidate_merge;
-      overwrite_index = index;
       break;
     }
 
@@ -126,29 +126,25 @@ auto LoopIdiomRecognize::sink_partial_store(
       continue;
     }
 
-    auto merge_it = std::find_if(
-      func.blocks.begin(), func.blocks.end(), [merge](const auto &candidate) {
-        return candidate.get() == merge;
-      }
-    );
-    if (merge_it == func.blocks.end())
+    if (!context.cfg)
       continue;
 
-    auto bypass_ptr = std::make_unique<Block>(
-      static_cast<int>(func.blocks.size()), merge->name + "_store_bypass"
-    );
-    auto *bypass = bypass_ptr.get();
+    auto tx = context.cfg->begin_transaction();
+    auto *bypass =
+      context.cfg->create_block(merge->name + "_store_bypass", merge);
+    if (!bypass)
+      return false;
     bypass->insts.splice(bypass->insts.end(), block->insts, store_it);
 
     auto *jump = context.module->make_op(OpCode::Jump);
     jump->successors.push_back(merge);
-    bypass->insts.push_back(jump);
-    terminator->successors[overwrite_index == 0 ? 1 : 0] = bypass;
+    if (!context.cfg->set_terminator(bypass, jump))
+      return false;
 
-    func.blocks.insert(merge_it, std::move(bypass_ptr));
-    renumber_blocks(func);
-    rebuild_cfg(func);
-    return true;
+    if (!context.cfg->redirect_edge(block, merge, bypass, 0)) {
+      return false;
+    }
+    return tx.commit();
   }
   return false;
 }
@@ -239,24 +235,6 @@ auto LoopIdiomRecognize::same_memory_access(Op *lhs, Op *rhs) -> bool {
   return lhs->operands[1] == rhs->operands[1] ||
          alias_analysis.alias(*lhs_location, *rhs_location) ==
            AliasResult::MustAlias;
-}
-
-auto LoopIdiomRecognize::rebuild_cfg(LinearFunction &func) -> void {
-  for (auto &block : func.blocks) {
-    block->preds.clear();
-    block->succs.clear();
-  }
-  for (auto &block : func.blocks) {
-    if (block->insts.empty())
-      continue;
-    auto *terminator = block->insts.back();
-    for (auto *successor : terminator->successors) {
-      if (!successor)
-        continue;
-      block->succs.push_back(successor);
-      successor->preds.push_back(block.get());
-    }
-  }
 }
 
 auto LoopIdiomRecognize::integer_constant(Value *value) -> std::optional<int> {
@@ -612,13 +590,6 @@ auto LoopIdiomRecognize::forward_loop_carried_store(
   value_phi->result = context.module->ctx->make_value<OpResult>(
     left_load->result->type, value_phi
   );
-  auto &incoming = std::get<PhiPayload>(value_phi->payload).incoming;
-  incoming = {
-    {counted->preheader, initial_load->result},
-    {counted->latch, store->operands[0]},
-  };
-  initial_load->result->addUse(value_phi);
-  store->operands[0]->addUse(value_phi);
 
   auto header_position = counted->header->insts.begin();
   while (header_position != counted->header->insts.end() &&
@@ -626,6 +597,15 @@ auto LoopIdiomRecognize::forward_loop_carried_store(
     ++header_position;
   }
   counted->header->insts.insert(header_position, value_phi);
+  if (
+    !context.cfg || !context.cfg->set_phi_incoming(
+                      value_phi,
+                      {{counted->preheader, initial_load->result},
+                       {counted->latch, store->operands[0]}}
+                    )
+  ) {
+    return false;
+  }
 
   MidIRRewriter rewriter;
   rewriter.set_scope(func);
@@ -726,14 +706,19 @@ auto LoopIdiomRecognize::replace_single_store_loop(
     }
   }
 
+  if (!context.cfg)
+    return false;
+
+  auto tx = context.cfg->begin_transaction();
   auto *fill = store->operands[0];
   store->code = OpCode::Memset;
   store->payload = EmptyPayload{};
   reset_operands(store, {pointer, counted->induction.bound, fill});
 
-  auto *terminator = counted->latch->insts.back();
-  terminator->successors = {counted->exit};
-  return true;
+  if (!context.cfg->set_successors(counted->latch, {counted->exit}))
+    return false;
+  context.cfg->synchronize();
+  return tx.commit();
 }
 
 auto LoopIdiomRecognize::get_initial_pointer(
@@ -902,24 +887,18 @@ auto LoopIdiomRecognize::hoist_independent_store(
     header_phis.push_back(op);
   }
 
-  auto header_it = std::find_if(
-    func.blocks.begin(), func.blocks.end(), [&](const auto &block) {
-      return block.get() == counted->header;
-    }
-  );
-  if (header_it == func.blocks.end())
+  if (!context.cfg)
     return false;
 
-  auto guard_ptr = std::make_unique<Block>(
-    static_cast<int>(func.blocks.size()),
-    counted->header->name + "_memset_guard"
+  auto tx = context.cfg->begin_transaction();
+  auto *guard = context.cfg->create_block(
+    counted->header->name + "_memset_guard", counted->header
   );
-  auto init_ptr = std::make_unique<Block>(
-    static_cast<int>(func.blocks.size() + 1),
-    counted->header->name + "_memset_init"
+  auto *init = context.cfg->create_block(
+    counted->header->name + "_memset_init", counted->header
   );
-  auto *guard = guard_ptr.get();
-  auto *init = init_ptr.get();
+  if (!guard || !init)
+    return false;
 
   auto *condition = context.module->make_op(OpCode::Lt);
   condition->operands = {
@@ -936,7 +915,8 @@ auto LoopIdiomRecognize::hoist_independent_store(
   branch->operands = {condition->result};
   condition->result->addUse(branch);
   branch->successors = {init, counted->exit};
-  guard->insts.push_back(branch);
+  if (!context.cfg->set_terminator(guard, branch))
+    return false;
 
   auto *initial_pointer =
     get_initial_pointer(candidate->operands[1], *counted, context);
@@ -952,32 +932,28 @@ auto LoopIdiomRecognize::hoist_independent_store(
 
   auto *jump = context.module->make_op(OpCode::Jump);
   jump->successors = {counted->header};
-  init->insts.push_back(jump);
+  if (!context.cfg->set_terminator(init, jump))
+    return false;
 
-  preheader_terminator->successors = {guard};
   for (auto *phi : header_phis) {
-    for (auto &[pred, value] : std::get<PhiPayload>(phi->payload).incoming) {
+    auto incoming = std::get<PhiPayload>(phi->payload).incoming;
+    for (auto &[pred, value] : incoming) {
       (void)value;
       if (pred == counted->preheader)
         pred = init;
     }
+    if (!context.cfg->set_phi_incoming(phi, std::move(incoming)))
+      return false;
   }
-
-  func.blocks.insert(header_it, std::move(guard_ptr));
-  func.blocks.insert(header_it, std::move(init_ptr));
-  renumber_blocks(func);
+  if (!context.cfg->set_successors(counted->preheader, {guard}))
+    return false;
 
   MidIRRewriter rewriter;
   rewriter.set_scope(func);
   rewriter.eraseOp(candidate);
   rewriter.finalize(func);
-  return true;
-}
-
-auto LoopIdiomRecognize::renumber_blocks(LinearFunction &func) -> void {
-  int id = 0;
-  for (auto &block : func.blocks)
-    block->id = id++;
+  context.cfg->synchronize();
+  return tx.commit();
 }
 
 } // namespace exodus::mid_ir::opt

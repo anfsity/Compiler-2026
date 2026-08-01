@@ -1,6 +1,7 @@
 #include "../PassRegistry.hpp"
 #include "cfg_simplify.hpp"
 #include "dce.hpp"
+#include "dead_function_elimination.hpp"
 #include "gvn.hpp"
 #include "immutable_pointer_slot_canonicalize.hpp"
 #include "inliner.hpp"
@@ -73,6 +74,10 @@ static exodus::opt::RegisterLinearFunctionPass<CFGSimplify>
 
 static exodus::opt::RegisterLinearFunctionPass<DCE>
   reg_dce("dce", "dead code elimination");
+
+static exodus::opt::RegisterMidModulePass<DeadFunctions> reg_dead_functions(
+  "dead_functions", "remove Mid functions unreachable from main"
+);
 
 auto register_passes() -> void {}
 

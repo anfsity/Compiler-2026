@@ -56,10 +56,12 @@ auto MonotonicGuardTighten::run(
   if (func.blocks.empty())
     return exodus::opt::PreservedAnalysis::all();
 
+  CFGEditor cfg(*module, func);
+  cfg.synchronize();
   build_op_block_map(func);
   auto &loops = am.get_result<LoopAnalysis>(func);
   for (auto *loop : loops.get_loops_innermost_first()) {
-    if (try_tighten(func, *loop))
+    if (try_tighten(cfg, func, *loop))
       return exodus::opt::PreservedAnalysis::none();
   }
   return exodus::opt::PreservedAnalysis::all();
@@ -167,8 +169,9 @@ auto MonotonicGuardTighten::has_only_current_user(
          ) == 1;
 }
 
-auto MonotonicGuardTighten::try_tighten(LinearFunction &func, const Loop &loop)
-  -> bool {
+auto MonotonicGuardTighten::try_tighten(
+  CFGEditor &cfg, LinearFunction &func, const Loop &loop
+) -> bool {
   if (
     !loop.get_preheader() || loop.get_back_edges().size() != 1 ||
     loop.get_exiting_blocks().size() != 1 || loop.get_exit_blocks().size() != 1
@@ -331,6 +334,8 @@ auto MonotonicGuardTighten::try_tighten(LinearFunction &func, const Loop &loop)
   if (has_live_out_use(func, induction_phi->result, loop))
     return false;
 
+  auto tx = cfg.begin_transaction();
+
   // j < bound implies j <= INT_MAX - 1, so both original j + 1 updates are
   // non-wrapping.  Once invariant threshold < j becomes true, incrementing j
   // cannot make it false before the original signed bound exits the loop.
@@ -357,9 +362,10 @@ auto MonotonicGuardTighten::try_tighten(LinearFunction &func, const Loop &loop)
   header->insts.insert(branch_position, tightened_condition);
   reset_operands(header_branch, {tightened_condition->result});
 
-  reset_operands(guard_branch, {});
-  guard_branch->code = OpCode::Jump;
-  guard_branch->successors = {active};
+  auto *guard_jump = module->make_op(OpCode::Jump);
+  guard_jump->successors = {active};
+  if (!cfg.set_terminator(guard, guard_jump))
+    return false;
 
   rewriter.set_scope(func);
   rewriter.replace_all_uses_with(latch_phi->result, active_update->result);
@@ -372,28 +378,8 @@ auto MonotonicGuardTighten::try_tighten(LinearFunction &func, const Loop &loop)
     latch_jump_position, active->insts, active_update_position
   );
   rewriter.finalize(func);
-  rebuild_cfg(func);
-  return true;
-}
-
-auto MonotonicGuardTighten::rebuild_cfg(LinearFunction &func) -> void {
-  for (auto &block : func.blocks) {
-    block->preds.clear();
-    block->succs.clear();
-  }
-  for (auto &block : func.blocks) {
-    if (block->insts.empty())
-      continue;
-    auto *terminator = block->insts.back();
-    if (
-      terminator->code != OpCode::Jump && terminator->code != OpCode::Branch
-    ) {
-      continue;
-    }
-    block->succs = terminator->successors;
-    for (auto *successor : block->succs)
-      successor->preds.push_back(block.get());
-  }
+  cfg.synchronize();
+  return tx.commit();
 }
 
 } // namespace exodus::mid_ir::opt
