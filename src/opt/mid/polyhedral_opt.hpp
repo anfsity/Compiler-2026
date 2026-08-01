@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../mid/cfg_editor.hpp"
 #include "../AnalysisManager.hpp"
 #include "polyhedral.hpp"
 #include <unordered_set>
@@ -18,11 +19,13 @@ private:
   std::unordered_set<Block *> excluded_fallback_headers;
 
   auto prepare_reduction(
-    LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager &am
+    CFGEditor &cfg,
+    LinearFunction &func,
+    exodus::opt::LinearFunctionAnalysisManager &am
   ) -> bool;
-  static auto interchange(LinearFunction &func, const PolyhedralScop &scop)
+  static auto
+  interchange(CFGEditor &cfg, LinearFunction &func, const PolyhedralScop &scop)
     -> bool;
-  static auto rebuild_cfg(LinearFunction &func) -> void;
 };
 
 } // namespace exodus::mid_ir::opt

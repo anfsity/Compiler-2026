@@ -10,7 +10,7 @@
 
 namespace exodus::mid_ir::opt {
 
-class ImmutablePointerSlotCanonicalize {
+class PointerSlotCanonicalize {
   struct Candidate {
     Op *alloca = nullptr;
     Op *store = nullptr;
@@ -18,19 +18,24 @@ class ImmutablePointerSlotCanonicalize {
     std::vector<Op *> getptrs;
   };
 
-  std::unordered_map<Op *, Block *> op_blocks;
-  std::unordered_set<Op *> scope;
+  struct Context {
+    std::unordered_map<Op *, Block *> op_blocks;
+    std::unordered_set<Op *> scope;
+  };
 
 public:
-  explicit ImmutablePointerSlotCanonicalize([[maybe_unused]] MidModule *m) {}
+  explicit PointerSlotCanonicalize([[maybe_unused]] MidModule *m) {}
 
   auto run(LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager &am)
     -> exodus::opt::PreservedAnalysis;
 
 private:
-  auto build_scope(LinearFunction &func) -> void;
-  auto dominates(Op *definition, Op *use, DomTree &dom) const -> bool;
-  auto collect_candidate(Op *alloca, DomTree &dom) const
+  static auto build_scope(Context &context, LinearFunction &func) -> void;
+  static auto
+  dominates(Op *definition, Op *use, DomTree &dom, const Context &context)
+    -> bool;
+  static auto
+  collect_candidate(Op *alloca, DomTree &dom, const Context &context)
     -> std::optional<Candidate>;
   static auto preserves_getptr_plan(Op *getptr, Value *replacement) -> bool;
 };

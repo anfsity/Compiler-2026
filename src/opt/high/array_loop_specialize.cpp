@@ -1,4 +1,4 @@
-#include "local_array_loop_specialize.hpp"
+#include "array_loop_specialize.hpp"
 
 #include "../../high/cloner.hpp"
 #include "../../high/effects.hpp"
@@ -766,7 +766,7 @@ private:
 
 } // namespace
 
-auto LocalArrayLoopSpecialize::run(
+auto ArrayLoopSpecialize::run(
   Function &function, exodus::opt::FunctionAnalysisManager &analysis_manager
 ) -> exodus::opt::PreservedAnalysis {
   auto &summaries =

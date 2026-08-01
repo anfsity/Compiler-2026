@@ -21,29 +21,34 @@ auto is_jump_to(Block *block, Block *successor) -> bool {
 }
 
 auto set_branch_successors(
-  const CountedLoopInfo &counted, Block *continuation, Block *exit
+  CFGEditor &cfg,
+  const CountedLoopInfo &counted,
+  Block *continuation,
+  Block *exit
 ) -> bool {
   if (!counted.header || counted.header->insts.empty())
     return false;
   auto *branch = counted.header->insts.back();
   if (branch->code != OpCode::Branch || branch->successors.size() != 2)
     return false;
-  branch->successors[counted.continue_on_true ? 0 : 1] = continuation;
-  branch->successors[counted.continue_on_true ? 1 : 0] = exit;
-  return true;
+  auto successors = branch->successors;
+  successors[counted.continue_on_true ? 0 : 1] = continuation;
+  successors[counted.continue_on_true ? 1 : 0] = exit;
+  return cfg.set_successors(counted.header, std::move(successors));
 }
 
-auto set_jump_successor(Block *block, Block *successor) -> bool {
+auto set_jump_successor(CFGEditor &cfg, Block *block, Block *successor)
+  -> bool {
   if (!block || block->insts.empty())
     return false;
   auto *jump = block->insts.back();
   if (jump->code != OpCode::Jump || jump->successors.size() != 1)
     return false;
-  jump->successors.front() = successor;
-  return true;
+  return cfg.set_successors(block, {successor});
 }
 
 auto retarget_phi(
+  CFGEditor &cfg,
   Op *phi,
   Block *old_preheader,
   Block *new_preheader,
@@ -54,7 +59,8 @@ auto retarget_phi(
     return false;
   bool found_preheader = false;
   bool found_latch = false;
-  for (auto &[block, value] : std::get<PhiPayload>(phi->payload).incoming) {
+  auto incoming = std::get<PhiPayload>(phi->payload).incoming;
+  for (auto &[block, value] : incoming) {
     (void)value;
     if (block == old_preheader) {
       block = new_preheader;
@@ -64,7 +70,8 @@ auto retarget_phi(
       found_latch = true;
     }
   }
-  return found_preheader && found_latch;
+  return found_preheader && found_latch &&
+         cfg.set_phi_incoming(phi, std::move(incoming));
 }
 
 auto replace_value(Value *value, Value *from, Value *to) -> Value * {
@@ -283,6 +290,7 @@ auto loop_nest_has_no_live_outs(const LinearFunction &func, const Loop &loop)
 }
 
 auto clone_loop_nest(
+  CFGEditor &cfg,
   LinearFunction &func,
   const Loop &loop,
   Block *old_preheader,
@@ -305,23 +313,16 @@ auto clone_loop_nest(
   if (source_blocks.empty())
     return std::nullopt;
 
-  auto insertion_point = std::find_if(
-    func.blocks.begin(),
-    func.blocks.end(),
-    [header = loop.get_header()](const std::unique_ptr<Block> &block) {
-      return block.get() == header;
-    }
-  );
-  if (insertion_point == func.blocks.end())
+  if (!cfg.owns(loop.get_header()))
     return std::nullopt;
 
   std::unordered_map<Block *, Block *> block_map;
-  int next_id = static_cast<int>(func.blocks.size());
   for (auto *source : source_blocks) {
-    auto clone =
-      std::make_unique<Block>(next_id++, source->name + "_poly_fallback");
-    block_map[source] = clone.get();
-    func.blocks.insert(insertion_point, std::move(clone));
+    auto *clone =
+      cfg.create_block(source->name + "_poly_fallback", loop.get_header());
+    if (!clone)
+      return std::nullopt;
+    block_map[source] = clone;
   }
 
   std::unordered_map<Value *, Value *> value_map;
@@ -387,13 +388,15 @@ auto clone_loop_nest(
 auto PolyhedralOpt::run(
   LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager &am
 ) -> exodus::opt::PreservedAnalysis {
-  if (prepare_reduction(func, am)) {
+  CFGEditor cfg(*module, func);
+  cfg.synchronize();
+  if (prepare_reduction(cfg, func, am)) {
     DomTree dom;
     dom.compute(func);
     LoopInfo loops;
     loops.compute(func, dom);
     AffineLoopInfo affine;
-    affine.compute(func, loops, dom);
+    affine.compute(func, dom);
     ScalarEvolution scev;
     scev.compute(func, loops, affine, dom);
     PolyhedralInfo polyhedral;
@@ -403,7 +406,7 @@ auto PolyhedralOpt::run(
         scop.interchange_legal &&
         scop.interchanged_stride_cost < scop.original_stride_cost
       ) {
-        if (interchange(func, scop))
+        if (interchange(cfg, func, scop))
           break;
       }
     }
@@ -418,14 +421,16 @@ auto PolyhedralOpt::run(
     ) {
       continue;
     }
-    if (interchange(func, scop))
+    if (interchange(cfg, func, scop))
       return exodus::opt::PreservedAnalysis::none();
   }
   return exodus::opt::PreservedAnalysis::all();
 }
 
 auto PolyhedralOpt::prepare_reduction(
-  LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager &am
+  CFGEditor &cfg,
+  LinearFunction &func,
+  exodus::opt::LinearFunctionAnalysisManager &am
 ) -> bool {
   if (!module)
     return false;
@@ -701,6 +706,7 @@ auto PolyhedralOpt::prepare_reduction(
       continue;
     }
 
+    auto tx = cfg.begin_transaction();
     bool needs_runtime_guard = false;
     Block *fallback_header = nullptr;
     if (scratch_capacity) {
@@ -726,7 +732,7 @@ auto PolyhedralOpt::prepare_reduction(
       needs_runtime_guard = !constant_bound;
       if (needs_runtime_guard) {
         auto fallback = clone_loop_nest(
-          func, *outer_loop, outer->preheader, outer->preheader, module
+          cfg, func, *outer_loop, outer->preheader, outer->preheader, module
         );
         if (!fallback)
           continue;
@@ -747,23 +753,14 @@ auto PolyhedralOpt::prepare_reduction(
       );
     }
 
-    auto init_header_ptr = std::make_unique<Block>(
-      static_cast<int>(func.blocks.size()), outer->header->name + "_init"
-    );
-    auto init_body_ptr = std::make_unique<Block>(
-      static_cast<int>(func.blocks.size() + 1),
-      outer->continuation->name + "_init"
-    );
-    auto schedule_ptr = std::make_unique<Block>(
-      static_cast<int>(func.blocks.size() + 2),
-      outer->header->name + "_schedule"
-    );
-    auto *init_header = init_header_ptr.get();
-    auto *init_body = init_body_ptr.get();
-    auto *schedule = schedule_ptr.get();
-    func.blocks.insert(header_position, std::move(init_header_ptr));
-    func.blocks.insert(header_position, std::move(init_body_ptr));
-    func.blocks.insert(header_position, std::move(schedule_ptr));
+    auto *init_header =
+      cfg.create_block(outer->header->name + "_init", outer->header);
+    auto *init_body =
+      cfg.create_block(outer->continuation->name + "_init", outer->header);
+    auto *schedule =
+      cfg.create_block(outer->header->name + "_schedule", outer->header);
+    if (!init_header || !init_body || !schedule)
+      return false;
 
     auto *init_phi = module->make_op(OpCode::Phi, PhiPayload{});
     init_phi->result = module->ctx->make_value<OpResult>(
@@ -795,7 +792,8 @@ auto PolyhedralOpt::prepare_reduction(
     init_branch->successors = outer->continue_on_true
                                 ? std::vector<Block *>{init_body, schedule}
                                 : std::vector<Block *>{schedule, init_body};
-    init_header->insts.push_back(init_branch);
+    if (!cfg.set_terminator(init_header, init_branch))
+      return false;
 
     auto *init_pointer = module->make_op(OpCode::GetPtr);
     std::vector<Value *> init_pointer_operands;
@@ -836,26 +834,35 @@ auto PolyhedralOpt::prepare_reduction(
     init_body->insts.push_back(init_update);
     auto *init_jump = module->make_op(OpCode::Jump);
     init_jump->successors = {init_header};
-    init_body->insts.push_back(init_jump);
+    if (!cfg.set_terminator(init_body, init_jump))
+      return false;
 
-    auto &init_incoming = std::get<PhiPayload>(init_phi->payload).incoming;
-    init_incoming = {
-      {outer->preheader, outer->induction.initial},
-      {init_body, init_update->result},
-    };
-    outer->induction.initial->addUse(init_phi);
-    init_update->result->addUse(init_phi);
+    if (!cfg.set_phi_incoming(
+          init_phi,
+          {{outer->preheader, outer->induction.initial},
+           {init_body, init_update->result}}
+        )) {
+      return false;
+    }
 
     auto *schedule_jump = module->make_op(OpCode::Jump);
     schedule_jump->successors = {outer->header};
-    schedule->insts.push_back(schedule_jump);
+    if (!cfg.set_terminator(schedule, schedule_jump))
+      return false;
 
-    set_jump_successor(outer->preheader, init_header);
-    for (auto &[block, value] :
-         std::get<PhiPayload>(outer->induction.phi->payload).incoming) {
+    if (!set_jump_successor(cfg, outer->preheader, init_header))
+      return false;
+    auto induction_incoming =
+      std::get<PhiPayload>(outer->induction.phi->payload).incoming;
+    for (auto &[block, value] : induction_incoming) {
       (void)value;
       if (block == outer->preheader)
         block = schedule;
+    }
+    if (!cfg.set_phi_incoming(
+          outer->induction.phi, std::move(induction_incoming)
+        )) {
+      return false;
     }
 
     Op *accumulation_pointer = output_getptr;
@@ -903,28 +910,20 @@ auto PolyhedralOpt::prepare_reduction(
     inner->latch->insts.insert(update_position, store);
 
     if (scratch_alloca) {
-      auto writeback_preheader_ptr = std::make_unique<Block>(
-        static_cast<int>(func.blocks.size()),
-        outer->header->name + "_writeback_preheader"
+      auto *writeback_preheader = cfg.create_block(
+        outer->header->name + "_writeback_preheader", outer->exit
       );
-      auto writeback_header_ptr = std::make_unique<Block>(
-        static_cast<int>(func.blocks.size() + 1),
-        outer->header->name + "_writeback"
-      );
-      auto writeback_body_ptr = std::make_unique<Block>(
-        static_cast<int>(func.blocks.size() + 2),
-        outer->continuation->name + "_writeback"
-      );
-      auto *writeback_preheader = writeback_preheader_ptr.get();
-      auto *writeback_header = writeback_header_ptr.get();
-      auto *writeback_body = writeback_body_ptr.get();
-      func.blocks.insert(exit_position, std::move(writeback_preheader_ptr));
-      func.blocks.insert(exit_position, std::move(writeback_header_ptr));
-      func.blocks.insert(exit_position, std::move(writeback_body_ptr));
+      auto *writeback_header =
+        cfg.create_block(outer->header->name + "_writeback", outer->exit);
+      auto *writeback_body =
+        cfg.create_block(outer->continuation->name + "_writeback", outer->exit);
+      if (!writeback_preheader || !writeback_header || !writeback_body)
+        return false;
 
       auto *preheader_jump = module->make_op(OpCode::Jump);
       preheader_jump->successors = {writeback_header};
-      writeback_preheader->insts.push_back(preheader_jump);
+      if (!cfg.set_terminator(writeback_preheader, preheader_jump))
+        return false;
 
       auto *writeback_phi = module->make_op(OpCode::Phi, PhiPayload{});
       writeback_phi->result = module->ctx->make_value<OpResult>(
@@ -957,7 +956,8 @@ auto PolyhedralOpt::prepare_reduction(
         outer->continue_on_true
           ? std::vector<Block *>{writeback_body, outer->exit}
           : std::vector<Block *>{outer->exit, writeback_body};
-      writeback_header->insts.push_back(writeback_branch);
+      if (!cfg.set_terminator(writeback_header, writeback_branch))
+        return false;
 
       auto *scratch_pointer = module->make_op(OpCode::GetPtr);
       append_operands(
@@ -1010,18 +1010,22 @@ auto PolyhedralOpt::prepare_reduction(
       writeback_body->insts.push_back(writeback_update);
       auto *writeback_jump = module->make_op(OpCode::Jump);
       writeback_jump->successors = {writeback_header};
-      writeback_body->insts.push_back(writeback_jump);
+      if (!cfg.set_terminator(writeback_body, writeback_jump))
+        return false;
 
-      auto &writeback_incoming =
-        std::get<PhiPayload>(writeback_phi->payload).incoming;
-      writeback_incoming = {
-        {writeback_preheader, outer->induction.initial},
-        {writeback_body, writeback_update->result},
-      };
-      outer->induction.initial->addUse(writeback_phi);
-      writeback_update->result->addUse(writeback_phi);
+      if (!cfg.set_phi_incoming(
+            writeback_phi,
+            {{writeback_preheader, outer->induction.initial},
+             {writeback_body, writeback_update->result}}
+          )) {
+        return false;
+      }
 
-      set_branch_successors(*outer, outer->continuation, writeback_preheader);
+      if (!set_branch_successors(
+            cfg, *outer, outer->continuation, writeback_preheader
+          )) {
+        return false;
+      }
     }
 
     if (needs_runtime_guard) {
@@ -1037,9 +1041,11 @@ auto PolyhedralOpt::prepare_reduction(
       outer->preheader->insts.insert(
         std::prev(outer->preheader->insts.end()), guard_compare
       );
-      guard_terminator->code = OpCode::Branch;
-      append_operands(guard_terminator, {guard_compare->result});
-      guard_terminator->successors = {transformed_entry, fallback_header};
+      auto *guard_branch = module->make_op(OpCode::Branch);
+      append_operands(guard_branch, {guard_compare->result});
+      guard_branch->successors = {transformed_entry, fallback_header};
+      if (!cfg.set_terminator(outer->preheader, guard_branch))
+        return false;
     }
 
     MidIRRewriter rewriter;
@@ -1050,14 +1056,14 @@ auto PolyhedralOpt::prepare_reduction(
     rewriter.replace_all_uses_with(reduction_phi->result, load->result);
     rewriter.eraseOp(reduction_phi);
     rewriter.finalize(func);
-    rebuild_cfg(func);
-    return true;
+    cfg.synchronize();
+    return tx.commit();
   }
   return false;
 }
 
 auto PolyhedralOpt::interchange(
-  LinearFunction &func, const PolyhedralScop &scop
+  CFGEditor &cfg, LinearFunction & /* func */, const PolyhedralScop &scop
 ) -> bool {
   const auto &outer = scop.outer_counted;
   const auto &inner = scop.inner_counted;
@@ -1070,8 +1076,11 @@ auto PolyhedralOpt::interchange(
     return false;
   }
 
+  auto tx = cfg.begin_transaction();
+
   if (
     !retarget_phi(
+      cfg,
       outer.induction.phi,
       outer.preheader,
       inner.preheader,
@@ -1079,6 +1088,7 @@ auto PolyhedralOpt::interchange(
       inner.latch
     ) ||
     !retarget_phi(
+      cfg,
       inner.induction.phi,
       inner.preheader,
       outer.preheader,
@@ -1119,38 +1129,18 @@ auto PolyhedralOpt::interchange(
   );
 
   if (
-    !set_jump_successor(outer.preheader, inner.header) ||
-    !set_branch_successors(inner, inner.preheader, outer.exit) ||
-    !set_jump_successor(inner.preheader, outer.header) ||
-    !set_branch_successors(outer, inner.continuation, outer.latch) ||
-    !set_jump_successor(inner.latch, outer.header) ||
-    !set_jump_successor(outer.latch, inner.header)
+    !set_jump_successor(cfg, outer.preheader, inner.header) ||
+    !set_branch_successors(cfg, inner, inner.preheader, outer.exit) ||
+    !set_jump_successor(cfg, inner.preheader, outer.header) ||
+    !set_branch_successors(cfg, outer, inner.continuation, outer.latch) ||
+    !set_jump_successor(cfg, inner.latch, outer.header) ||
+    !set_jump_successor(cfg, outer.latch, inner.header)
   ) {
     return false;
   }
 
-  rebuild_cfg(func);
-  return true;
-}
-
-auto PolyhedralOpt::rebuild_cfg(LinearFunction &func) -> void {
-  for (auto &block : func.blocks) {
-    block->preds.clear();
-    block->succs.clear();
-  }
-  for (auto &block : func.blocks) {
-    if (block->insts.empty())
-      continue;
-    auto *terminator = block->insts.back();
-    if (
-      terminator->code != OpCode::Jump && terminator->code != OpCode::Branch
-    ) {
-      continue;
-    }
-    block->succs = terminator->successors;
-    for (auto *successor : block->succs)
-      successor->preds.push_back(block.get());
-  }
+  cfg.synchronize();
+  return tx.commit();
 }
 
 } // namespace exodus::mid_ir::opt

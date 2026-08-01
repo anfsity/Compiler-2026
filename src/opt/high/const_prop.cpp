@@ -1,10 +1,10 @@
-#include "constant_propagation.hpp"
+#include "const_prop.hpp"
 
 namespace exodus::high_ir::opt {
 
-CP::CP(Module *_m) : ctx(&_m->ctx), m(_m) {}
+ConstProp::ConstProp(Module *_m) : ctx(&_m->ctx), m(_m) {}
 
-auto CP::run(Function &f, FunctionAnalysisManager & /* FAM */)
+auto ConstProp::run(Function &f, FunctionAnalysisManager & /* FAM */)
   -> PreservedAnalysis {
   env.clear();
   safe_allocas.clear();
@@ -38,15 +38,15 @@ auto CP::run(Function &f, FunctionAnalysisManager & /* FAM */)
   return changed ? PreservedAnalysis::none() : PreservedAnalysis::all();
 }
 
-auto CP::visit(Op *op) -> void {
-  RecursiveOpVisitor<CP>::visit(op);
+auto ConstProp::visit(Op *op) -> void {
+  RecursiveOpVisitor<ConstProp>::visit(op);
 
   if (op->result && !op->operands.empty()) {
     try_fold(op);
   }
 }
 
-auto CP::visit(Op *op, OpTag<OpCode::Alloca>) -> void {
+auto ConstProp::visit(Op *op, OpTag<OpCode::Alloca>) -> void {
   auto ptr_type = std::static_pointer_cast<exodus::Ptr>(op->result->type);
   if (
     ptr_type->target->is_i32() || ptr_type->target->is_f32() ||
@@ -56,7 +56,7 @@ auto CP::visit(Op *op, OpTag<OpCode::Alloca>) -> void {
   }
 }
 
-auto CP::visit(Op *op, OpTag<OpCode::Load>) -> void {
+auto ConstProp::visit(Op *op, OpTag<OpCode::Load>) -> void {
   Value *ptr = op->operands[0];
   if (env.count(ptr)) {
     rewriter.replace_op(op, env[ptr]);
@@ -64,7 +64,7 @@ auto CP::visit(Op *op, OpTag<OpCode::Load>) -> void {
   }
 }
 
-auto CP::visit(Op *op, OpTag<OpCode::Store>) -> void {
+auto ConstProp::visit(Op *op, OpTag<OpCode::Store>) -> void {
   Value *val = op->operands[0];
   Value *ptr = op->operands[1];
 
@@ -73,8 +73,8 @@ auto CP::visit(Op *op, OpTag<OpCode::Store>) -> void {
   }
 }
 
-auto CP::visit(Op *op, OpTag<OpCode::Call>) -> void {
-  RecursiveOpVisitor<CP>::visit(op, OpTag<OpCode::Call>{});
+auto ConstProp::visit(Op *op, OpTag<OpCode::Call>) -> void {
+  RecursiveOpVisitor<ConstProp>::visit(op, OpTag<OpCode::Call>{});
   const auto &payload = std::get<CallPayload>(op->payload);
   auto function = functions.find(payload.func_name);
   if (function != functions.end() && !function->second->is_decl) {
@@ -89,7 +89,7 @@ auto CP::visit(Op *op, OpTag<OpCode::Call>) -> void {
   invalidate_writes(get_op_effects(*op));
 }
 
-auto CP::visit(Op *op, OpTag<OpCode::If>) -> void {
+auto ConstProp::visit(Op *op, OpTag<OpCode::If>) -> void {
   auto &p = std::get<IfPayload>(op->payload);
   auto effects = resolved_effects(*p.then_region);
   if (p.else_region)
@@ -107,7 +107,7 @@ auto CP::visit(Op *op, OpTag<OpCode::If>) -> void {
   invalidate_writes(effects);
 }
 
-auto CP::visit(Op *op, OpTag<OpCode::While>) -> void {
+auto ConstProp::visit(Op *op, OpTag<OpCode::While>) -> void {
   auto &p = std::get<WhilePayload>(op->payload);
   auto effects = resolved_effects(*p.cond_region);
   effects.merge(resolved_effects(*p.loop_region));
@@ -135,18 +135,18 @@ auto CP::visit(Op *op, OpTag<OpCode::While>) -> void {
   invalidate_writes(effects);
 }
 
-auto CP::invalidate_writes(const OpEffects &effects) -> void {
+auto ConstProp::invalidate_writes(const OpEffects &effects) -> void {
   for (auto *value : effects.writes)
     env.erase(value);
   if (effects.has_unknown_effect)
     clear_global_env();
 }
 
-auto CP::resolved_effects(const Region &region) const -> OpEffects {
+auto ConstProp::resolved_effects(const Region &region) const -> OpEffects {
   return get_resolved_region_effects(region, functions, function_effects);
 }
 
-auto CP::clear_global_env() -> void {
+auto ConstProp::clear_global_env() -> void {
   for (auto it = env.begin(); it != env.end();) {
     Value *addr = it->first;
     if (addr->kind == ValueKind::GlobalVar) {
@@ -158,7 +158,8 @@ auto CP::clear_global_env() -> void {
 }
 
 template <typename T>
-auto CP::fold_arith(OpCode code, T l, T r) -> std::optional<Constant::Data> {
+auto ConstProp::fold_arith(OpCode code, T l, T r)
+  -> std::optional<Constant::Data> {
   switch (code) {
     // clang-format off
   case OpCode::Add:  case OpCode::FAdd: return l + r;
@@ -181,7 +182,7 @@ auto CP::fold_arith(OpCode code, T l, T r) -> std::optional<Constant::Data> {
   }
 }
 
-auto CP::try_fold(Op *op) -> void {
+auto ConstProp::try_fold(Op *op) -> void {
   for (auto *v : op->operands)
     if (v->kind != ValueKind::Constant)
       return;

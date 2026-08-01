@@ -22,11 +22,12 @@
 #include "mid/loop.hpp"
 #include "opt/AnalysisManager.hpp"
 #include "opt/PassBuilder.hpp"
+#include "opt/PassContext.hpp"
 #include "opt/PassManager.hpp"
 #include "opt/high/local_array_summary.hpp"
-#include "opt/mid/dead_function_elimination.hpp"
 #include "opt/mid/polyhedral.hpp"
 #include "opt/mid/scalar_evolution.hpp"
+#include "opt/pipeline_builder.hpp"
 
 using namespace exodus::ast;
 using namespace exodus::high_ir;
@@ -49,6 +50,7 @@ struct Compiler {
     std::string input_file;
     std::string output_file;
     std::vector<std::string> pass_names;
+    unsigned opt_level = 2;
     bool print_ir_after_all = false;
     bool dump_ra = false;
     bool emit_ra = false;
@@ -89,18 +91,15 @@ private:
   auto parse_args(int argc, char **argv) -> bool {
     for (int i = 1; i < argc; ++i) {
       std::string arg = argv[i];
-      if (arg == "-S") {
-        // Assembly output is the only supported output mode.
-      } else if (arg == "-o") {
-        if (i + 1 >= argc) {
-          fmt::print(stderr, "Error: -o requires an output file\n");
-          return false;
-        }
-        options.output_file = argv[++i];
-      } else if (arg == "-O1") {
-        // Contest optimization mode uses the existing default pipeline.
-      } else if (arg.size() > 2 && arg.substr(0, 2) == "-O") {
-        options.pass_names.push_back(arg.substr(2));
+      if (arg.size() > 2 && arg.substr(0, 2) == "-O") {
+        auto value = arg.substr(2);
+        bool numeric = !value.empty();
+        for (auto ch : value)
+          numeric = numeric && ch >= '0' && ch <= '9';
+        if (numeric)
+          options.opt_level = static_cast<unsigned>(std::stoul(value));
+        else
+          options.pass_names.push_back(std::move(value));
       } else if (arg == "-print-ir-after-all") {
         options.print_ir_after_all = true;
       } else if (arg == "-dump-ra") {
@@ -174,29 +173,49 @@ private:
 
   auto run_high_opt() -> void {
     PassBuilder pb(module.get());
+    PipelineBuilder pipeline_builder(module.get());
     FunctionAnalysisManager fam;
     fam.register_pass<exodus::high_ir::opt::LocalArraySummaryAnalysis>();
     ModuleAnalysisManager mam;
 
-    auto instrumentation = [&](const std::string &name, const auto &unit) {
-      this->instrument(name, unit);
+    PassOptions pass_options;
+    pass_options.opt_level = options.opt_level;
+    auto function_instrumentation =
+      [&](const std::string &name, Function &function) {
+        this->instrument(name, function);
+      };
+    auto module_instrumentation = [&](const std::string &name, Module &mod) {
+      this->instrument(name, mod);
     };
+    PassDiagnostics diagnostics;
 
     if (options.pass_names.empty()) {
-      auto fpm = pb.build_function_pipeline();
-      auto mpm = pb.build_module_pipeline();
-      fpm.set_after_pass_callback(instrumentation);
-      mpm.set_after_pass_callback(instrumentation);
-
-      constexpr size_t max_iterations = 8;
-      for (size_t iteration = 0; iteration < max_iterations; ++iteration) {
+      auto fpm = pipeline_builder.build_function_pipeline(options.opt_level);
+      auto mpm = pipeline_builder.build_module_pipeline(options.opt_level);
+      FixedPointContext fixed_point(pass_options.max_fixed_point_iterations);
+      while (fixed_point.can_run_iteration()) {
         bool changed = false;
+        auto preserved = PreservedAnalysis::all();
         for (auto &f : module->functions) {
-          if (!f->is_decl && !fpm.run(*f, fam).all_preserved())
-            changed = true;
+          if (f->is_decl)
+            continue;
+          PassContext<Function> context(
+            *f, fam, pass_options, function_instrumentation, diagnostics
+          );
+          auto result = fpm.run_to_fixed_point(
+            context, pass_options.max_fixed_point_iterations
+          );
+          changed = changed || result.changed_any;
+          preserved.intersect(result.preserved);
         }
-        if (!mpm.run(*module, mam).all_preserved())
-          changed = true;
+        PassContext<Module> context(
+          *module, mam, pass_options, module_instrumentation, diagnostics
+        );
+        context.add_child_analysis_manager(fam);
+        auto result = mpm.run_with_result(context);
+        changed = changed || result.changed;
+        preserved.intersect(result.preserved);
+        fixed_point.record_iteration({changed, preserved});
         if (!changed)
           break;
       }
@@ -206,14 +225,19 @@ private:
           auto pass = pb.create_function_pass(name);
           for (auto &f : module->functions) {
             if (!f->is_decl) {
-              pass.run(*f, fam);
-              instrument(name, *f);
+              PassContext<Function> context(
+                *f, fam, pass_options, function_instrumentation, diagnostics
+              );
+              pass.run(context);
             }
           }
         } else if (pb.is_module_pass(name)) {
           auto pass = pb.create_module_pass(name);
-          pass.run(*module, mam);
-          instrument(name, *module);
+          PassContext<Module> context(
+            *module, mam, pass_options, module_instrumentation, diagnostics
+          );
+          context.add_child_analysis_manager(fam);
+          pass.run(context);
         }
       }
     }
@@ -236,47 +260,76 @@ private:
 
   auto run_mid_opt() -> void {
     PassBuilder pb(module.get(), mid_module.get());
+    PipelineBuilder pipeline_builder(module.get(), mid_module.get());
     LinearFunctionAnalysisManager lfam;
     lfam.register_pass<DominanceAnalysis>();
     lfam.register_pass<LoopAnalysis>();
     lfam.register_pass<AffineLoopAnalysis>();
     lfam.register_pass<ScalarEvolutionAnalysis>();
     lfam.register_pass(PolyhedralAnalysis{mid_module.get()});
+    MidModuleAnalysisManager mmam;
 
-    auto instrumentation = [&](const std::string &name, const auto &unit) {
-      this->instrument(name, unit);
-    };
+    PassOptions pass_options;
+    pass_options.opt_level = options.opt_level;
+    auto function_instrumentation =
+      [&](const std::string &name, LinearFunction &function) {
+        this->instrument(name, function);
+      };
+    auto module_instrumentation = [&](
+                                    const std::string &name, MidModule &module
+                                  ) { this->instrument(name, module); };
+    PassDiagnostics diagnostics;
 
     if (options.pass_names.empty()) {
-      auto lfpm = pb.build_linear_function_pipeline();
-      lfpm.set_after_pass_callback(instrumentation);
-      constexpr size_t max_module_iterations = 8;
-      for (size_t iteration = 0; iteration < max_module_iterations;
-           ++iteration) {
+      auto lfpm =
+        pipeline_builder.build_linear_function_pipeline(options.opt_level);
+      auto mmpm = pipeline_builder.build_mid_module_pipeline(options.opt_level);
+      FixedPointContext fixed_point(pass_options.max_fixed_point_iterations);
+      while (fixed_point.can_run_iteration()) {
         bool changed = false;
+        auto preserved = PreservedAnalysis::all();
         for (auto &f : mid_module->functions) {
-          if (
-            !f->is_decl && !lfpm.run_to_fixed_point(*f, lfam).all_preserved()
-          ) {
-            changed = true;
-          }
+          if (f->is_decl)
+            continue;
+          PassContext<LinearFunction> context(
+            *f, lfam, pass_options, function_instrumentation, diagnostics
+          );
+          auto result = lfpm.run_to_fixed_point(
+            context, pass_options.max_fixed_point_iterations
+          );
+          changed = changed || result.changed_any;
+          preserved.intersect(result.preserved);
         }
+        PassContext<MidModule> context(
+          *mid_module, mmam, pass_options, module_instrumentation, diagnostics
+        );
+        context.add_child_analysis_manager(lfam);
+        auto module_result = mmpm.run_with_result(context);
+        changed = changed || module_result.changed;
+        preserved.intersect(module_result.preserved);
+        fixed_point.record_iteration({changed, preserved});
         if (!changed)
           break;
       }
-      if (exodus::mid_ir::opt::eliminate_dead_functions(*mid_module))
-        instrument("mid_dead_function_elimination", *mid_module);
     } else {
       for (const auto &name : options.pass_names) {
         if (pb.is_linear_function_pass(name)) {
           auto pass = pb.create_linear_function_pass(name);
           for (auto &f : mid_module->functions) {
             if (!f->is_decl) {
-              auto preserved = pass.run(*f, lfam);
-              instrument(name, *f);
-              lfam.invalidate(*f, preserved);
+              PassContext<LinearFunction> context(
+                *f, lfam, pass_options, function_instrumentation, diagnostics
+              );
+              pass.run(context);
             }
           }
+        } else if (pb.is_mid_module_pass(name)) {
+          auto pass = pb.create_mid_module_pass(name);
+          PassContext<MidModule> context(
+            *mid_module, mmam, pass_options, module_instrumentation, diagnostics
+          );
+          context.add_child_analysis_manager(lfam);
+          pass.run(context);
         }
       }
     }

@@ -7,6 +7,8 @@
 
 namespace exodus::mid_ir {
 
+class CFGEditor;
+
 struct Flattener {
   Flattener(high_ir::Module *m) : old_module(m) {}
   auto flatten() -> std::unique_ptr<MidModule>;
@@ -16,6 +18,7 @@ private:
   MidModule *new_module = nullptr;
   LinearFunction *cur_func = nullptr;
   Block *cur_block = nullptr;
+  CFGEditor *cur_cfg = nullptr;
 
   int b_cnt = 0;
   std::vector<std::pair<Block *, Block *>> loop_stk;

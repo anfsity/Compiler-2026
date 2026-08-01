@@ -9,17 +9,7 @@
 
 namespace exodus::mid_ir {
 
-struct SCEVAffineExpr {
-  int64_t constant = 0;
-  std::unordered_map<Value *, int64_t> coefficients;
-  bool no_wrap = false;
-
-  auto coefficient(Value *symbol) const -> int64_t {
-    auto it = coefficients.find(symbol);
-    return it == coefficients.end() ? 0 : it->second;
-  }
-  auto is_constant() const -> bool { return coefficients.empty(); }
-};
+using SCEVAffineExpr = AffineExpression;
 
 struct SCEVAddRecurrence {
   const Loop *loop = nullptr;

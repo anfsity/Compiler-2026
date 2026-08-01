@@ -68,35 +68,6 @@ auto TailRecursionElim::collect_tail_calls(LinearFunction &func)
   return tail_calls;
 }
 
-auto TailRecursionElim::renumber_blocks(LinearFunction &func) -> void {
-  int id = 0;
-  for (auto &block : func.blocks) {
-    block->id = id++;
-  }
-}
-
-auto TailRecursionElim::rebuild_cfg(LinearFunction &func) -> void {
-  for (auto &block : func.blocks) {
-    block->preds.clear();
-    block->succs.clear();
-  }
-
-  for (auto &block_ptr : func.blocks) {
-    Block *block = block_ptr.get();
-    if (block->insts.empty())
-      continue;
-
-    Op *terminator = block->insts.back();
-    if (terminator->code != OpCode::Jump && terminator->code != OpCode::Branch)
-      continue;
-
-    for (auto *successor : terminator->successors) {
-      block->succs.push_back(successor);
-      successor->preds.push_back(block);
-    }
-  }
-}
-
 auto TailRecursionElim::run(
   LinearFunction &func, exodus::opt::LinearFunctionAnalysisManager & /* am */
 ) -> exodus::opt::PreservedAnalysis {
@@ -108,17 +79,16 @@ auto TailRecursionElim::run(
     return exodus::opt::PreservedAnalysis::all();
 
   Block *entry = func.blocks.front().get();
+  CFGEditor cfg(*module, func);
+  cfg.synchronize();
+  auto tx = cfg.begin_transaction();
 
   // The original entry block becomes the loop header. A preheader supplies
   // the initial values for the loop-carried arguments, while every tail call
   // supplies one back-edge incoming value.
-  int new_block_id = static_cast<int>(func.blocks.size());
-  auto preheader_ptr =
-    std::make_unique<Block>(new_block_id, func.name + "_tail_preheader");
-  Block *preheader = preheader_ptr.get();
-
-  func.blocks.push_front(std::move(preheader_ptr));
-  renumber_blocks(func);
+  Block *preheader = cfg.create_block(func.name + "_tail_preheader", entry);
+  if (!preheader)
+    return exodus::opt::PreservedAnalysis::all();
 
   std::vector<Op *> phis;
   phis.reserve(func.args.size());
@@ -142,21 +112,18 @@ auto TailRecursionElim::run(
   }
 
   for (size_t i = 0; i < func.args.size(); ++i) {
-    auto &payload = std::get<PhiPayload>(phis[i]->payload);
-    payload.incoming.push_back({preheader, func.args[i]});
-    func.args[i]->addUse(phis[i]);
+    if (!cfg.add_phi_incoming(phis[i], preheader, func.args[i]))
+      return exodus::opt::PreservedAnalysis::all();
   }
 
   auto *preheader_jump = module->make_op(OpCode::Jump);
   preheader_jump->successors.push_back(entry);
-  preheader->insts.push_back(preheader_jump);
 
   for (const auto &tail_call : tail_calls) {
     for (size_t i = 0; i < phis.size(); ++i) {
-      auto &payload = std::get<PhiPayload>(phis[i]->payload);
       Value *next_value = tail_call.call->operands[i];
-      payload.incoming.push_back({tail_call.block, next_value});
-      next_value->addUse(phis[i]);
+      if (!cfg.add_phi_incoming(phis[i], tail_call.block, next_value))
+        return exodus::opt::PreservedAnalysis::all();
     }
 
     rewriter.eraseOp(tail_call.call);
@@ -164,13 +131,15 @@ auto TailRecursionElim::run(
 
     auto *backedge = module->make_op(OpCode::Jump);
     backedge->successors.push_back(entry);
-    tail_call.block->insts.push_back(backedge);
+    if (!cfg.set_terminator(tail_call.block, backedge))
+      return exodus::opt::PreservedAnalysis::all();
   }
 
   rewriter.finalize(func);
-  rebuild_cfg(func);
-  func.tail_recursion_eliminated = true;
+  if (!cfg.set_terminator(preheader, preheader_jump) || !tx.commit())
+    return exodus::opt::PreservedAnalysis::all();
 
+  func.tail_recursion_eliminated = true;
   return exodus::opt::PreservedAnalysis::none();
 }
 

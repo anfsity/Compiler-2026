@@ -5,9 +5,9 @@
 
 namespace exodus::high_ir::opt {
 
-class IdempotentLoopSimplify {
+class IdempotentLoops {
 public:
-  explicit IdempotentLoopSimplify(Module *module) : module(module) {}
+  explicit IdempotentLoops(Module *module) : module(module) {}
 
   auto run(Module &, exodus::opt::ModuleAnalysisManager &)
     -> exodus::opt::PreservedAnalysis;

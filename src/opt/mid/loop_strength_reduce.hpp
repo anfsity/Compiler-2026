@@ -1,9 +1,7 @@
 #pragma once
 
-#include "../../mid/affine_loop.hpp"
-#include "../../mid/rewriter.hpp"
-#include <optional>
-#include <unordered_map>
+#include "../../mid/ir.hpp"
+#include "../AnalysisManager.hpp"
 
 namespace exodus::mid_ir::opt {
 
@@ -16,54 +14,6 @@ public:
 
 private:
   MidModule *module;
-  DomTree *dom = nullptr;
-  AffineLoopInfo *affine_loops = nullptr;
-  std::unordered_map<Op *, Block *> op_blocks;
-
-  auto build_op_block_map(LinearFunction &func) -> void;
-  auto
-  linear_coefficient(Value *value, Value *induction, const Loop &loop) const
-    -> std::optional<int>;
-  auto matches_migrated_affine_shape(
-    Value *value, Value *induction, const Loop &loop
-  ) const -> bool;
-  auto expression_cost(Value *value, Value *induction, const Loop &loop) const
-    -> std::optional<unsigned>;
-  auto clone_initial_expression(
-    Value *value,
-    Value *induction,
-    Value *initial,
-    const Loop &loop,
-    Block *preheader,
-    std::unordered_map<Value *, Value *> &cache
-  ) -> Value *;
-  auto can_clone_initial_expression(
-    Value *value,
-    Value *induction,
-    Value *initial,
-    const Loop &loop,
-    Block *preheader
-  ) const -> bool;
-  auto dynamic_guard_proves_no_wrap(
-    Value *value, const CountedLoopInfo &counted, const Loop &loop
-  ) const -> bool;
-  auto constant_affine_difference(
-    Value *value, Value *anchor, const Loop &loop
-  ) const -> std::optional<int64_t>;
-  auto reduce_getptrs(LinearFunction &func, const Loop &loop) -> bool;
-  auto reduce_getptr(
-    Op *getptr,
-    const Loop &loop,
-    const CountedLoopInfo &counted,
-    MidIRRewriter &rewriter,
-    std::unordered_map<Value *, Value *> &cache,
-    Value **replacement
-  ) -> bool;
-
-  auto immutable_local_pointer_slot(Value *base, Block *preheader) const
-    -> bool;
-
-  auto is_clonable_expression(const Op &op, const Loop &loop) const -> bool;
 };
 
 } // namespace exodus::mid_ir::opt

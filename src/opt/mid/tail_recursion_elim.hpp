@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../mid/cfg_editor.hpp"
 #include "../../mid/ir.hpp"
 #include "../../mid/rewriter.hpp"
 #include "../AnalysisManager.hpp"
@@ -24,8 +25,6 @@ public:
 
 private:
   auto collect_tail_calls(LinearFunction &func) -> std::vector<TailCall>;
-  auto rebuild_cfg(LinearFunction &func) -> void;
-  auto renumber_blocks(LinearFunction &func) -> void;
 };
 
 } // namespace exodus::mid_ir::opt

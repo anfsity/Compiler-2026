@@ -30,7 +30,8 @@ private:
     [[maybe_unused]] LinearFunction &func,
     DomTree &dom,
     Op *alloca,
-    const std::vector<Block *> &stores
+    const std::vector<Block *> &stores,
+    const std::unordered_map<Block *, size_t> &block_index
   ) -> void;
 
   auto rename(

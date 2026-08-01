@@ -33,6 +33,21 @@ struct PreservedAnalysis {
   }
 
   auto all_preserved() const -> bool { return all_presvd; }
+
+  auto intersect(const PreservedAnalysis &other) -> void {
+    if (other.all_presvd)
+      return;
+    if (all_presvd) {
+      *this = other;
+      return;
+    }
+    for (auto it = presvd_ids.begin(); it != presvd_ids.end();) {
+      if (!other.presvd_ids.count(*it))
+        it = presvd_ids.erase(it);
+      else
+        ++it;
+    }
+  }
 };
 
 struct AnalysisResult {
@@ -109,6 +124,11 @@ struct AnalysisManager {
 
   auto clear() -> void { cache.clear(); }
 
+  // Parent/module passes use this bridge when their mutation can invalidate
+  // analyses cached for child units.  The child manager owns the precise
+  // cache keys, so clearing it is safer than trying to infer affected units.
+  auto invalidate_children() -> void { cache.clear(); }
+
 private:
   struct CacheKey { // NOLINT
     IRUnitT *ir;
@@ -137,5 +157,6 @@ using ModuleAnalysisManager = AnalysisManager<high_ir::Module>;
 // mid-IR
 using LinearFunctionAnalysisManager =
   AnalysisManager<::exodus::mid_ir::LinearFunction>;
+using MidModuleAnalysisManager = AnalysisManager<::exodus::mid_ir::MidModule>;
 
 } // namespace exodus::opt

@@ -10,17 +10,22 @@ auto LoopSimplify::run(
   if (func.blocks.empty())
     return exodus::opt::PreservedAnalysis::all();
 
+  CFGEditor cfg(*module, func);
+  cfg.synchronize();
   auto &loop_info = am.get_result<LoopAnalysis>(func);
   bool changed = false;
   for (auto *loop : loop_info.get_loops_innermost_first()) {
-    if (!loop->get_preheader())
-      changed |= create_preheader(func, *loop);
+    if (!loop->get_preheader()) {
+      changed = create_preheader(cfg, *loop);
+      if (changed)
+        break;
+    }
   }
 
   if (!changed) {
     for (auto *loop : loop_info.get_loops_innermost_first()) {
       if (loop->get_back_edges().size() > 1) {
-        changed = create_single_latch(func, *loop);
+        changed = create_single_latch(cfg, *loop);
         break;
       }
     }
@@ -29,13 +34,11 @@ auto LoopSimplify::run(
   if (!changed)
     return exodus::opt::PreservedAnalysis::all();
 
-  renumber_blocks(func);
-  rebuild_cfg(func);
+  cfg.synchronize();
   return exodus::opt::PreservedAnalysis::none();
 }
 
-auto LoopSimplify::create_single_latch(LinearFunction &func, Loop &loop)
-  -> bool {
+auto LoopSimplify::create_single_latch(CFGEditor &cfg, Loop &loop) -> bool {
   auto *header = loop.get_header();
   if (!header || loop.get_back_edges().size() < 2)
     return false;
@@ -54,21 +57,8 @@ auto LoopSimplify::create_single_latch(LinearFunction &func, Loop &loop)
   if (backedge_blocks.size() < 2)
     return false;
 
-  auto header_it = std::find_if(
-    func.blocks.begin(),
-    func.blocks.end(),
-    [header](const std::unique_ptr<Block> &block) {
-      return block.get() == header;
-    }
-  );
-  if (header_it == func.blocks.end())
+  if (!cfg.owns(header))
     return false;
-
-  auto latch_ptr = std::make_unique<Block>(
-    static_cast<int>(func.blocks.size()), header->name + "_latch"
-  );
-  auto *latch = latch_ptr.get();
-  func.blocks.insert(header_it, std::move(latch_ptr));
 
   std::unordered_set<Block *> backedge_set(
     backedge_blocks.begin(), backedge_blocks.end()
@@ -77,16 +67,29 @@ auto LoopSimplify::create_single_latch(LinearFunction &func, Loop &loop)
     if (block->insts.empty())
       return false;
     auto *terminator = block->insts.back();
-    bool retargeted = false;
-    for (auto *&successor : terminator->successors) {
-      if (successor == header) {
-        successor = latch;
-        retargeted = true;
-      }
-    }
-    if (!retargeted)
+    if (terminator->code != OpCode::Jump && terminator->code != OpCode::Branch)
+      return false;
+    if (
+      std::find(
+        terminator->successors.begin(), terminator->successors.end(), header
+      ) == terminator->successors.end()
+    )
       return false;
   }
+
+  std::vector<std::pair<Op *, std::vector<std::pair<Block *, Value *>>>>
+    rewritten_header_phis;
+  struct LatchPhiPlan {
+    Op *header_phi = nullptr;
+    std::vector<std::pair<Block *, Value *>> backedge_incoming;
+  };
+  std::vector<LatchPhiPlan> latch_phi_plans;
+  struct ClonedUpdatePlan {
+    Op *header_phi = nullptr;
+    Op *representative = nullptr;
+    std::vector<std::pair<Block *, Value *>> header_incoming;
+  };
+  std::vector<ClonedUpdatePlan> cloned_update_plans;
 
   for (auto *phi : header->insts) {
     if (phi->code != OpCode::Phi)
@@ -110,67 +113,82 @@ auto LoopSimplify::create_single_latch(LinearFunction &func, Loop &loop)
       [latch_value](const auto &entry) { return entry.second == latch_value; }
     );
     if (!all_same) {
-      Op *representative = nullptr;
-      bool identical_update = true;
-      for (const auto &[block, value] : backedge_incoming) {
-        (void)block;
-        if (!value || value->kind != ValueKind::OpResult) {
-          identical_update = false;
-          break;
-        }
-        auto *candidate =
-          static_cast<Op *>(static_cast<OpResult *>(value)->creator);
-        if (
-          !candidate || !candidate->result || candidate->operands.size() != 2 ||
-          (candidate->code != OpCode::Add && candidate->code != OpCode::Sub)
-        ) {
-          identical_update = false;
-          break;
-        }
-        if (!representative) {
-          representative = candidate;
-          continue;
-        }
-        if (
-          candidate->code != representative->code ||
-          candidate->operands != representative->operands
-        ) {
-          identical_update = false;
-          break;
-        }
-      }
-
-      if (identical_update) {
-        auto *update = module->make_op(representative->code);
-        update->operands = representative->operands;
-        for (auto *operand : update->operands)
-          operand->addUse(update);
-        update->result = module->ctx->make_value<OpResult>(
-          representative->result->type, update
-        );
-        latch->insts.push_back(update);
-        latch_value = update->result;
+      if (auto *representative = identical_binary_update(backedge_incoming)) {
+        cloned_update_plans.push_back({phi, representative, header_incoming});
       } else {
-        auto *latch_phi = module->make_op(OpCode::Phi, PhiPayload{});
-        latch_phi->result =
-          module->ctx->make_value<OpResult>(phi->result->type, latch_phi);
-        reset_phi_incoming(latch_phi, backedge_incoming);
-        latch->insts.push_back(latch_phi);
-        latch_value = latch_phi->result;
+        latch_phi_plans.push_back({phi, backedge_incoming});
       }
+      continue;
     }
-    header_incoming.push_back({latch, latch_value});
-    reset_phi_incoming(phi, std::move(header_incoming));
+    header_incoming.push_back({nullptr, latch_value});
+    rewritten_header_phis.push_back({phi, std::move(header_incoming)});
+  }
+
+  auto tx = cfg.begin_transaction();
+  auto *latch = cfg.create_block(header->name + "_latch", header);
+  if (!latch)
+    return false;
+
+  for (auto &[phi, incoming] : rewritten_header_phis) {
+    for (auto &[pred, _] : incoming) {
+      if (pred == nullptr)
+        pred = latch;
+    }
+    if (!cfg.set_phi_incoming(phi, std::move(incoming)))
+      return false;
+  }
+
+  for (auto &plan : cloned_update_plans) {
+    auto *update = module->make_op(plan.representative->code);
+    update->operands = plan.representative->operands;
+    for (auto *operand : update->operands)
+      operand->addUse(update);
+    update->result = module->ctx->make_value<OpResult>(
+      plan.representative->result->type, update
+    );
+    latch->insts.push_back(update);
+    plan.header_incoming.push_back({latch, update->result});
+    if (!cfg.set_phi_incoming(plan.header_phi, std::move(plan.header_incoming)))
+      return false;
+  }
+
+  for (auto &plan : latch_phi_plans) {
+    auto *latch_phi = module->make_op(OpCode::Phi, PhiPayload{});
+    latch_phi->result = module->ctx->make_value<OpResult>(
+      plan.header_phi->result->type, latch_phi
+    );
+    latch->insts.push_back(latch_phi);
+    if (!cfg.set_phi_incoming(latch_phi, plan.backedge_incoming))
+      return false;
+
+    const auto original_incoming =
+      std::get<PhiPayload>(plan.header_phi->payload).incoming;
+    std::vector<std::pair<Block *, Value *>> header_incoming;
+    for (const auto &incoming : original_incoming) {
+      if (!backedge_set.count(incoming.first))
+        header_incoming.push_back(incoming);
+    }
+    header_incoming.push_back({latch, latch_phi->result});
+    if (!cfg.set_phi_incoming(plan.header_phi, std::move(header_incoming)))
+      return false;
+  }
+
+  for (auto *block : backedge_blocks) {
+    if (!cfg.redirect_edge(block, header, latch))
+      return false;
   }
 
   auto *jump = module->make_op(OpCode::Jump);
   jump->successors.push_back(header);
-  latch->insts.push_back(jump);
-  return true;
+  if (!cfg.set_terminator(latch, jump))
+    return false;
+  return tx.commit();
 }
 
-auto LoopSimplify::create_preheader(LinearFunction &func, Loop &loop) -> bool {
+auto LoopSimplify::create_preheader(CFGEditor &cfg, Loop &loop) -> bool {
   Block *header = loop.get_header();
+  if (!header || !cfg.owns(header))
+    return false;
   std::vector<Block *> outside_preds;
   for (auto *pred : header->preds) {
     if (
@@ -182,7 +200,7 @@ auto LoopSimplify::create_preheader(LinearFunction &func, Loop &loop) -> bool {
     }
   }
 
-  if (outside_preds.empty() && header != func.blocks.front().get())
+  if (outside_preds.empty() && header != cfg.function().blocks.front().get())
     return false;
   if (
     outside_preds.empty() && !header->insts.empty() &&
@@ -192,44 +210,31 @@ auto LoopSimplify::create_preheader(LinearFunction &func, Loop &loop) -> bool {
     return false;
   }
 
-  auto header_it = std::find_if(
-    func.blocks.begin(),
-    func.blocks.end(),
-    [header](const std::unique_ptr<Block> &block) {
-      return block.get() == header;
-    }
-  );
-  if (header_it == func.blocks.end())
+  auto tx = cfg.begin_transaction();
+  Block *preheader = cfg.create_block(header->name + "_preheader", header);
+  if (!preheader)
     return false;
-
-  auto preheader_ptr = std::make_unique<Block>(
-    static_cast<int>(func.blocks.size()), header->name + "_preheader"
-  );
-  Block *preheader = preheader_ptr.get();
-  func.blocks.insert(header_it, std::move(preheader_ptr));
-
-  for (auto *pred : outside_preds) {
-    if (pred->insts.empty())
-      continue;
-    Op *terminator = pred->insts.back();
-    for (auto *&successor : terminator->successors) {
-      if (successor == header)
-        successor = preheader;
-    }
-  }
-
-  auto *jump = module->make_op(OpCode::Jump);
-  jump->successors.push_back(header);
-  preheader->insts.push_back(jump);
 
   std::unordered_set<Block *> outside_set(
     outside_preds.begin(), outside_preds.end()
   );
-  rewrite_header_phis(header, preheader, outside_set);
-  return true;
+  rewrite_header_phis(cfg, header, preheader, outside_set);
+
+  for (auto *pred : outside_preds) {
+    if (!cfg.redirect_edge(pred, header, preheader))
+      return false;
+  }
+
+  auto *jump = module->make_op(OpCode::Jump);
+  jump->successors.push_back(header);
+  if (!cfg.set_terminator(preheader, jump))
+    return false;
+
+  return tx.commit();
 }
 
 auto LoopSimplify::rewrite_header_phis(
+  CFGEditor &cfg,
   Block *header,
   Block *preheader,
   const std::unordered_set<Block *> &outside_preds
@@ -266,61 +271,43 @@ auto LoopSimplify::rewrite_header_phis(
       auto *preheader_phi = module->make_op(OpCode::Phi, PhiPayload{});
       preheader_phi->result =
         module->ctx->make_value<OpResult>(phi->result->type, preheader_phi);
-      reset_phi_incoming(preheader_phi, outside_incoming);
       preheader->insts.push_front(preheader_phi);
+      cfg.set_phi_incoming(preheader_phi, outside_incoming);
       preheader_value = preheader_phi->result;
     }
 
     header_incoming.push_back({preheader, preheader_value});
-    reset_phi_incoming(phi, std::move(header_incoming));
+    cfg.set_phi_incoming(phi, std::move(header_incoming));
   }
 }
 
-auto LoopSimplify::reset_phi_incoming(
-  Op *phi, std::vector<std::pair<Block *, Value *>> incoming
-) -> void {
-  auto &payload = std::get<PhiPayload>(phi->payload);
-  std::unordered_set<Value *> old_values;
-  for (const auto &[block, value] : payload.incoming) {
-    (void)block;
-    if (value)
-      old_values.insert(value);
-  }
-  for (auto *value : old_values)
-    value->rmUse(phi);
-
-  payload.incoming = std::move(incoming);
-  for (const auto &[block, value] : payload.incoming) {
-    (void)block;
-    if (value)
-      value->addUse(phi);
-  }
-}
-
-auto LoopSimplify::rebuild_cfg(LinearFunction &func) -> void {
-  for (auto &block : func.blocks) {
-    block->preds.clear();
-    block->succs.clear();
-  }
-
-  for (auto &block_ptr : func.blocks) {
-    Block *block = block_ptr.get();
-    if (block->insts.empty())
+auto LoopSimplify::identical_binary_update(
+  const std::vector<std::pair<Block *, Value *>> &incoming
+) -> Op * {
+  Op *representative = nullptr;
+  for (const auto &[_, value] : incoming) {
+    if (!value || value->kind != ValueKind::OpResult)
+      return nullptr;
+    auto *candidate =
+      static_cast<Op *>(static_cast<OpResult *>(value)->creator);
+    if (
+      !candidate || !candidate->result || candidate->operands.size() != 2 ||
+      (candidate->code != OpCode::Add && candidate->code != OpCode::Sub)
+    ) {
+      return nullptr;
+    }
+    if (!representative) {
+      representative = candidate;
       continue;
-    Op *terminator = block->insts.back();
-    if (terminator->code != OpCode::Jump && terminator->code != OpCode::Branch)
-      continue;
-    for (auto *successor : terminator->successors) {
-      block->succs.push_back(successor);
-      successor->preds.push_back(block);
+    }
+    if (
+      candidate->code != representative->code ||
+      candidate->operands != representative->operands
+    ) {
+      return nullptr;
     }
   }
-}
-
-auto LoopSimplify::renumber_blocks(LinearFunction &func) -> void {
-  int id = 0;
-  for (auto &block : func.blocks)
-    block->id = id++;
+  return representative;
 }
 
 } // namespace exodus::mid_ir::opt

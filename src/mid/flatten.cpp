@@ -1,5 +1,6 @@
 #include "flatten.hpp"
 
+#include "cfg_editor.hpp"
 #include "getptr.hpp"
 
 namespace exodus::mid_ir {
@@ -77,10 +78,8 @@ auto Flattener::convert_op(high_ir::Op *old_op) -> Op * {
 
 auto Flattener::create_block(const std::string &name) -> Block * {
   int id = b_cnt++;
-  auto b = std::make_unique<Block>(id, name + "_" + std::to_string(id));
-  auto *ptr = b.get();
-  cur_func->blocks.push_back(std::move(b));
-  return ptr;
+  assert(cur_cfg);
+  return cur_cfg->create_block(name + "_" + std::to_string(id));
 }
 
 auto Flattener::flatten() -> std::unique_ptr<MidModule> {
@@ -110,9 +109,12 @@ auto Flattener::visit(high_ir::Function *f) -> std::unique_ptr<LinearFunction> {
   cur_func->no_inline = f->no_inline;
 
   if (!f->is_decl) {
+    CFGEditor cfg(*new_module, *cur_func);
+    cur_cfg = &cfg;
     cur_block = create_block("entry");
     visit(f->body);
     build_cfg();
+    cur_cfg = nullptr;
   }
 
   cur_func = nullptr;
@@ -121,19 +123,8 @@ auto Flattener::visit(high_ir::Function *f) -> std::unique_ptr<LinearFunction> {
 }
 
 auto Flattener::build_cfg() -> void {
-  for (auto &b_ptr : cur_func->blocks) {
-    Block *u = b_ptr.get();
-    if (u->insts.empty())
-      continue;
-
-    Op *last = u->insts.back();
-    if (last->code == OpCode::Jump || last->code == OpCode::Branch) {
-      for (Block *v : last->successors) {
-        u->succs.push_back(v);
-        v->preds.push_back(u);
-      }
-    }
-  }
+  assert(cur_cfg);
+  cur_cfg->synchronize();
 }
 
 auto Flattener::visit(const high_ir::Region &region) -> void {

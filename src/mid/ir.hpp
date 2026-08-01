@@ -8,6 +8,11 @@ namespace exodus::mid_ir {
 
 using namespace exodus::ir;
 
+// Block ids are opaque identities owned by CFGEditor.  They deliberately do
+// not describe the block's position in LinearFunction::blocks; passes that
+// need a dense index must build their own Block* -> index map.
+using BlockId = uint64_t;
+
 struct Block;
 
 struct EmptyPayload {};
@@ -57,14 +62,14 @@ struct Op : OpBase {
 };
 
 struct Block {
-  int id;
+  BlockId id;
   std::string name;
   std::list<Op *> insts;
 
   std::vector<Block *> preds;
   std::vector<Block *> succs;
 
-  Block(int _id, std::string n) : id(_id), name(std::move(n)) {}
+  Block(BlockId _id, std::string n) : id(_id), name(std::move(n)) {}
 };
 
 struct LinearFunction {
@@ -73,6 +78,7 @@ struct LinearFunction {
   std::vector<Argument *> args;
 
   std::list<std::unique_ptr<Block>> blocks;
+  BlockId next_block_id = 0;
   bool is_decl = false;
   bool tail_recursion_eliminated = false;
   bool no_inline = false;

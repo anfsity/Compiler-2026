@@ -1,4 +1,4 @@
-#include "loop_recurrence_simplify.hpp"
+#include "recurrence_simplify.hpp"
 
 #include "../../base/integer_range.hpp"
 #include "../../high/effects.hpp"
@@ -70,22 +70,26 @@ auto may_write_memory(const Op &op) -> bool {
 
 } // namespace
 
-auto LoopRecurrenceSimplify::run(
+auto RecurrenceSimplify::run(
   Function &function, exodus::opt::FunctionAnalysisManager &
 ) -> exodus::opt::PreservedAnalysis {
-  return simplify_region(function.body) ? exodus::opt::PreservedAnalysis::none()
-                                        : exodus::opt::PreservedAnalysis::all();
+  std::unordered_set<Op *> guarded_fallbacks;
+  return simplify_region(function.body, guarded_fallbacks)
+           ? exodus::opt::PreservedAnalysis::none()
+           : exodus::opt::PreservedAnalysis::all();
 }
 
-auto LoopRecurrenceSimplify::simplify_region(Region &region) -> bool {
+auto RecurrenceSimplify::simplify_region(
+  Region &region, std::unordered_set<Op *> &guarded_fallbacks
+) -> bool {
   bool changed = false;
   for (auto it = region.begin(); it != region.end(); ++it) {
     auto *op = *it;
     if (op->code == OpCode::If) {
       auto &payload = std::get<IfPayload>(op->payload);
-      changed |= simplify_region(*payload.then_region);
+      changed |= simplify_region(*payload.then_region, guarded_fallbacks);
       if (payload.else_region)
-        changed |= simplify_region(*payload.else_region);
+        changed |= simplify_region(*payload.else_region, guarded_fallbacks);
       continue;
     }
     if (op->code != OpCode::While)
@@ -93,20 +97,22 @@ auto LoopRecurrenceSimplify::simplify_region(Region &region) -> bool {
 
     if (!guarded_fallbacks.count(op)) {
       if (auto match = match_modular_recurrence(region, it, op)) {
-        replace_with_guarded_closed_form(region, it, op, *match);
+        replace_with_guarded_closed_form(
+          region, it, op, *match, guarded_fallbacks
+        );
         changed = true;
         continue;
       }
     }
 
     auto &payload = std::get<WhilePayload>(op->payload);
-    changed |= simplify_region(*payload.cond_region);
-    changed |= simplify_region(*payload.loop_region);
+    changed |= simplify_region(*payload.cond_region, guarded_fallbacks);
+    changed |= simplify_region(*payload.loop_region, guarded_fallbacks);
   }
   return changed;
 }
 
-auto LoopRecurrenceSimplify::match_modular_recurrence(
+auto RecurrenceSimplify::match_modular_recurrence(
   Region &parent, Region::iterator position, Op *loop
 ) const -> std::optional<ModularRecurrence> {
   if (!loop || loop->code != OpCode::While)
@@ -332,11 +338,12 @@ auto LoopRecurrenceSimplify::match_modular_recurrence(
   };
 }
 
-auto LoopRecurrenceSimplify::replace_with_guarded_closed_form(
+auto RecurrenceSimplify::replace_with_guarded_closed_form(
   Region &parent,
   Region::iterator position,
   Op *loop,
-  const ModularRecurrence &match
+  const ModularRecurrence &match,
+  std::unordered_set<Op *> &guarded_fallbacks
 ) -> void {
   auto *zero = module->ctx.make_const(I32::get(), 0);
   auto *upper = module->ctx.make_const(I32::get(), match.state_modulus - 1);

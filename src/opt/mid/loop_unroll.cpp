@@ -11,6 +11,8 @@ auto LoopUnroll::run(
   if (!module || !module->ctx || func.blocks.empty())
     return exodus::opt::PreservedAnalysis::all();
 
+  CFGEditor cfg(*module, func);
+  cfg.synchronize();
   auto &loops = am.get_result<LoopAnalysis>(func);
   auto &affine = am.get_result<AffineLoopAnalysis>(func);
   build_op_block_map(func);
@@ -25,7 +27,7 @@ auto LoopUnroll::run(
     auto trip_count = affine.exact_trip_count(*counted);
     if (!trip_count || *trip_count > max_trip_count)
       continue;
-    if (try_unroll(func, *loop, *counted, *trip_count)) {
+    if (try_unroll(cfg, func, *loop, *counted, *trip_count)) {
       op_blocks.clear();
       return exodus::opt::PreservedAnalysis::none();
     }
@@ -274,26 +276,17 @@ auto LoopUnroll::clone_body(
 }
 
 auto LoopUnroll::remove_loop_blocks(
-  LinearFunction &func, const CountedLoopInfo &counted
-) -> void {
-  MidIRRewriter rewriter;
-  rewriter.set_scope(func);
-  for (auto *block : {counted.header, counted.latch}) {
-    for (auto *op : block->insts)
-      rewriter.eraseOp(op);
-  }
-  rewriter.clear();
-
-  for (auto it = func.blocks.begin(); it != func.blocks.end();) {
-    if (it->get() == counted.header || it->get() == counted.latch) {
-      it = func.blocks.erase(it);
-    } else {
-      ++it;
-    }
-  }
+  CFGEditor &cfg, const CountedLoopInfo &counted
+) -> bool {
+  if (!cfg.set_successors(counted.preheader, {counted.exit}))
+    return false;
+  if (!cfg.remove_block(counted.header))
+    return false;
+  return cfg.remove_block(counted.latch);
 }
 
 auto LoopUnroll::try_unroll(
+  CFGEditor &cfg,
   LinearFunction &func,
   const Loop &loop,
   const CountedLoopInfo &counted,
@@ -304,6 +297,7 @@ auto LoopUnroll::try_unroll(
   if (!validate_shape(func, loop, counted, trip_count, phis, body))
     return false;
 
+  auto tx = cfg.begin_transaction();
   std::unordered_map<Value *, Value *> final_values;
   if (!clone_body(
         counted.preheader, body, phis, counted, trip_count, final_values
@@ -320,17 +314,10 @@ auto LoopUnroll::try_unroll(
     rewriter.replace_all_uses_with(phi->result, replacement->second);
   }
 
-  auto *terminator = counted.preheader->insts.back();
-  terminator->successors = {counted.exit};
-  remove_loop_blocks(func, counted);
-  renumber_blocks(func);
-  return true;
-}
-
-auto LoopUnroll::renumber_blocks(LinearFunction &func) -> void {
-  int id = 0;
-  for (auto &block : func.blocks)
-    block->id = id++;
+  if (!remove_loop_blocks(cfg, counted))
+    return false;
+  cfg.synchronize();
+  return tx.commit();
 }
 
 } // namespace exodus::mid_ir::opt

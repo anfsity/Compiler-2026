@@ -1,8 +1,8 @@
 #include "../PassRegistry.hpp"
 #include "cfg_simplify.hpp"
 #include "dce.hpp"
+#include "dead_functions.hpp"
 #include "gvn.hpp"
-#include "immutable_pointer_slot_canonicalize.hpp"
 #include "inliner.hpp"
 #include "inst_combine.hpp"
 #include "licm.hpp"
@@ -12,14 +12,15 @@
 #include "loop_unroll.hpp"
 #include "mem2reg.hpp"
 #include "monotonic_guard_tighten.hpp"
+#include "pointer_slot_canonicalize.hpp"
 #include "polyhedral_opt.hpp"
 #include "tail_recursion_elim.hpp"
 
 namespace exodus::mid_ir::opt {
 
-static exodus::opt::RegisterLinearFunctionPass<ImmutablePointerSlotCanonicalize>
-  reg_immutable_pointer_slot_canonicalize(
-    "immutable_pointer_slot_canonicalize",
+static exodus::opt::RegisterLinearFunctionPass<PointerSlotCanonicalize>
+  reg_pointer_slot_canonicalize(
+    "pointer_slot_canonicalize",
     "canonicalize proven immutable local pointer slots"
   );
 
@@ -73,6 +74,10 @@ static exodus::opt::RegisterLinearFunctionPass<CFGSimplify>
 
 static exodus::opt::RegisterLinearFunctionPass<DCE>
   reg_dce("dce", "dead code elimination");
+
+static exodus::opt::RegisterMidModulePass<DeadFunctions> reg_dead_functions(
+  "dead_functions", "remove Mid functions unreachable from main"
+);
 
 auto register_passes() -> void {}
 
