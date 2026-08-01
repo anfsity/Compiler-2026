@@ -41,7 +41,7 @@ public:
     PassDiagnostics diagnostics = {},
     DebugVerifier verifier = {}
   )
-      : ir_unit(&ir), analysis_manager(&analysis), options(std::move(options)),
+      : ir_unit(&ir), analysis_manager(&analysis), options(options),
         instrumentation(std::move(instrumentation)),
         diagnostics(std::move(diagnostics)), verifier(std::move(verifier)) {}
 

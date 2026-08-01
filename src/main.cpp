@@ -69,9 +69,7 @@ struct Compiler {
 
     run_high_opt();
 
-    // High verifier failure is intentionally diagnostic-only for now.  The
-    // pipeline keeps its historical continue-on-invalid debug strategy.
-    static_cast<void>(verify_high_ir());
+    verify_high_ir();
     run_lowering();
     run_mid_opt();
     run_isel();
@@ -201,8 +199,10 @@ private:
           PassContext<Function> context(
             *f, fam, pass_options, function_instrumentation, diagnostics
           );
-          auto result = fpm.run_with_result(context);
-          changed = changed || result.changed;
+          auto result = fpm.run_to_fixed_point(
+            context, pass_options.max_fixed_point_iterations
+          );
+          changed = changed || result.changed_any;
           preserved.intersect(result.preserved);
         }
         PassContext<Module> context(
