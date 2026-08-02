@@ -30,9 +30,9 @@ auto test_stack_frame_is_aligned_and_indexed_from_sp() -> void {
 
   auto text = AsmPrinter::to_string(mf);
   require(text.find("addi sp, sp, -16") != std::string::npos);
-  require(text.find("sd ra, 8(sp)") != std::string::npos);
+  require(text.find("sd ra") == std::string::npos);
   require(text.find("addi t0, sp, 0") != std::string::npos);
-  require(text.find("ld ra, 8(sp)") != std::string::npos);
+  require(text.find("ld ra") == std::string::npos);
   require(text.find("addi sp, sp, 16") != std::string::npos);
 }
 

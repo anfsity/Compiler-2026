@@ -20,12 +20,11 @@ auto LoopStrengthReduce::run(
   GetPtrRecurrencePlanner planner(context, func);
   bool changed = false;
   for (auto *loop : loop_info.get_loops_innermost_first()) {
-    // A recurrence in a non-innermost loop stays live across its complete
-    // subloops.  That long live range can cost more spills than the occasional
-    // outer-loop address calculation saves, so only form short-lived pointer
-    // recurrences here.
-    if (!loop->get_subloops().empty())
-      continue;
+    // Outer-loop address recurrences may stay live across a child loop, but
+    // the same affine/no-wrap and dominance proofs still apply.  Keeping the
+    // decision in the planner lets it reject expressions whose update would
+    // not repay the longer live range while enabling row/column pointers in
+    // nested dynamic-programming loops.
     changed |= planner.reduce(*loop);
   }
 

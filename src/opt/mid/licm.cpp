@@ -18,6 +18,7 @@ auto LICM::run(
   dom = &dom_result;
   changed = false;
   build_op_block_map(func);
+  readnone_scalar_functions = compute_readnone_scalar_functions(*module);
 
   for (auto *loop : loop_info.get_loops_innermost_first())
     process_loop(func, *loop);
@@ -25,6 +26,7 @@ auto LICM::run(
   dom = nullptr;
   invariant_ops.clear();
   op_blocks.clear();
+  readnone_scalar_functions.clear();
 
   if (!changed)
     return exodus::opt::PreservedAnalysis::all();
@@ -249,8 +251,11 @@ auto LICM::has_aliasing_write(
 ) const -> bool {
   for (auto *block : loop.get_blocks()) {
     for (auto *op : block->insts) {
-      if (op->code == OpCode::Call)
-        return true;
+      if (op->code == OpCode::Call) {
+        if (!is_readnone_scalar_call(*op, readnone_scalar_functions))
+          return true;
+        continue;
+      }
       if (op->code != OpCode::Store && op->code != OpCode::Memset)
         continue;
       auto write_location = alias_analysis.get_location(*op);

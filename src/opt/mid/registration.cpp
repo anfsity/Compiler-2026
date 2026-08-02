@@ -6,6 +6,7 @@
 #include "inliner.hpp"
 #include "inst_combine.hpp"
 #include "licm.hpp"
+#include "loop_guard_simplify.hpp"
 #include "loop_idiom_recognize.hpp"
 #include "loop_simplify.hpp"
 #include "loop_strength_reduce.hpp"
@@ -51,6 +52,11 @@ static exodus::opt::RegisterLinearFunctionPass<DCE>
 static exodus::opt::RegisterLinearFunctionPass<MonotonicGuardTighten>
   reg_monotonic_guard_tighten(
     "monotonic_guard_tighten", "tighten proven effect-free loop guard suffixes"
+  );
+
+static exodus::opt::RegisterLinearFunctionPass<LoopGuardSimplify>
+  reg_loop_guard_simplify(
+    "loop_guard_simplify", "fold proven nested-loop body guards"
   );
 
 static exodus::opt::RegisterLinearFunctionPass<PolyhedralOpt>

@@ -850,8 +850,8 @@ auto PolyhedralOpt::prepare_reduction(
     if (!cfg.set_terminator(schedule, schedule_jump))
       return false;
 
-    if (!set_jump_successor(cfg, outer->preheader, init_header))
-      return false;
+    // set_successors removes incoming values for the old edge, so retarget
+    // this Phi from a snapshot before changing the preheader successor.
     auto induction_incoming =
       std::get<PhiPayload>(outer->induction.phi->payload).incoming;
     for (auto &[block, value] : induction_incoming) {
@@ -859,6 +859,8 @@ auto PolyhedralOpt::prepare_reduction(
       if (block == outer->preheader)
         block = schedule;
     }
+    if (!set_jump_successor(cfg, outer->preheader, init_header))
+      return false;
     if (!cfg.set_phi_incoming(
           outer->induction.phi, std::move(induction_incoming)
         )) {

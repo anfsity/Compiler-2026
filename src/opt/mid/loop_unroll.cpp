@@ -1,6 +1,7 @@
 #include "loop_unroll.hpp"
 
 #include <algorithm>
+#include <unordered_set>
 #include <variant>
 
 namespace exodus::mid_ir::opt {
@@ -280,9 +281,64 @@ auto LoopUnroll::remove_loop_blocks(
 ) -> bool {
   if (!cfg.set_successors(counted.preheader, {counted.exit}))
     return false;
-  if (!cfg.remove_block(counted.header))
-    return false;
-  return cfg.remove_block(counted.latch);
+
+  std::unordered_set<Block *> removed_blocks{counted.header, counted.latch};
+  std::unordered_set<Op *> removed_ops;
+  std::unordered_set<Value *> removed_results;
+  for (auto *block : removed_blocks) {
+    for (auto *op : block->insts) {
+      removed_ops.insert(op);
+      if (op->result)
+        removed_results.insert(op->result);
+    }
+  }
+
+  for (const auto &block : cfg.function().blocks) {
+    if (removed_blocks.count(block.get()))
+      continue;
+    for (auto *op : block->insts) {
+      for (auto *operand : op->operands) {
+        if (removed_results.count(operand))
+          return false;
+      }
+      if (op->code != OpCode::Phi)
+        continue;
+      for (const auto &[_, value] :
+           std::get<PhiPayload>(op->payload).incoming) {
+        (void)_;
+        if (removed_results.count(value))
+          return false;
+      }
+    }
+  }
+
+  for (auto *op : removed_ops) {
+    for (auto *operand : op->operands) {
+      if (operand)
+        operand->rmUse(op);
+    }
+    if (op->code == OpCode::Phi) {
+      for (auto &[_, value] : std::get<PhiPayload>(op->payload).incoming) {
+        (void)_;
+        if (value)
+          value->rmUse(op);
+      }
+    }
+    if (op->result)
+      op->result->users.clear();
+    op->operands.clear();
+    op->successors.clear();
+  }
+
+  for (auto it = cfg.function().blocks.begin();
+       it != cfg.function().blocks.end();) {
+    if (removed_blocks.count(it->get()))
+      it = cfg.function().blocks.erase(it);
+    else
+      ++it;
+  }
+  cfg.synchronize();
+  return true;
 }
 
 auto LoopUnroll::try_unroll(
@@ -312,7 +368,9 @@ auto LoopUnroll::try_unroll(
     if (replacement == final_values.end() || !replacement->second)
       return false;
     rewriter.replace_all_uses_with(phi->result, replacement->second);
+    rewriter.eraseOp(phi);
   }
+  rewriter.finalize(func);
 
   if (!remove_loop_blocks(cfg, counted))
     return false;

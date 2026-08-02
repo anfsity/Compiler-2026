@@ -1,9 +1,11 @@
 #pragma once
 
+#include "../../mid/effects.hpp"
 #include "../../mid/loop.hpp"
 #include "../../mid/memory.hpp"
 #include "../../mid/rewriter.hpp"
 #include <deque>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -23,6 +25,7 @@ private:
   DomTree *dom = nullptr;
   std::unordered_map<Op *, Block *> op_blocks;
   std::unordered_set<Op *> invariant_ops;
+  std::unordered_set<std::string> readnone_scalar_functions;
   bool changed = false;
 
   auto build_op_block_map(LinearFunction &func) -> void;

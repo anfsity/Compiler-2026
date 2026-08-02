@@ -134,6 +134,7 @@ auto default_mid_function_pipeline() -> const std::vector<std::string> & {
     "gvn",
     "early_dce",
     "monotonic_guard_tighten",
+    "loop_guard_simplify",
     "polyhedral_opt",
     "loop_strength_reduce",
     "loop_idiom_recognize",

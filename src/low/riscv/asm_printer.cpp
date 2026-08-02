@@ -59,9 +59,20 @@ auto target_label(
 struct FrameLayout {
   int frame_bytes = 0;
   int ra_offset = 0;
+  bool saves_ra = false;
   std::unordered_map<int, int> offsets;
   std::unordered_map<int, int> saved_reg_offsets;
 };
+
+auto function_has_call(const MachineFunction &function) -> bool {
+  for (const auto &block : function.blocks) {
+    for (const auto &inst : block->insts) {
+      if (inst.opcode == CALL)
+        return true;
+    }
+  }
+  return false;
+}
 
 auto is_callee_saved_reg(int reg) -> bool {
   return reg == static_cast<int>(S1) ||
@@ -96,6 +107,7 @@ auto compute_frame_layout(const MachineFunction &function) -> FrameLayout {
   FrameLayout layout;
   int outgoing_extent = 0;
   auto saved_regs = collect_used_callee_saved_regs(function);
+  layout.saves_ra = function_has_call(function);
 
   for (const auto &slot : function.stack_slots) {
     auto size = align_to(slot.size, slot.align);
@@ -135,9 +147,11 @@ auto compute_frame_layout(const MachineFunction &function) -> FrameLayout {
     layout.saved_reg_offsets[reg] = save_offset;
     save_offset += slot_size;
   }
-  save_offset = align_to(save_offset, 8);
-  layout.ra_offset = save_offset;
-  save_offset += 8;
+  if (layout.saves_ra) {
+    save_offset = align_to(save_offset, 8);
+    layout.ra_offset = save_offset;
+    save_offset += 8;
+  }
 
   layout.frame_bytes = align_to(save_offset, 16);
   for (const auto &slot : function.stack_slots) {
@@ -510,7 +524,8 @@ auto emit_inst(
         out, is_float_reg(reg) ? "flw" : "ld", get_reg_name(reg), offset, "sp"
       );
     }
-    append_mem_inst(out, "ld", "ra", layout.ra_offset, "sp");
+    if (layout.saves_ra)
+      append_mem_inst(out, "ld", "ra", layout.ra_offset, "sp");
     append_stack_adjust(out, layout.frame_bytes);
     out += "    ret\n";
     break;
@@ -519,7 +534,8 @@ auto emit_inst(
     break;
   case PROLOGUE:
     append_stack_adjust(out, -layout.frame_bytes);
-    append_mem_inst(out, "sd", "ra", layout.ra_offset, "sp");
+    if (layout.saves_ra)
+      append_mem_inst(out, "sd", "ra", layout.ra_offset, "sp");
     for (const auto &[reg, offset] : layout.saved_reg_offsets) {
       append_mem_inst(
         out, is_float_reg(reg) ? "fsw" : "sd", get_reg_name(reg), offset, "sp"
