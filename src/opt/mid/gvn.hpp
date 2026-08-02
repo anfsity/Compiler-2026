@@ -1,10 +1,12 @@
 #pragma once
 
 #include "../../mid/dom.hpp"
+#include "../../mid/effects.hpp"
 #include "../../mid/ir.hpp"
 #include "../../mid/memory.hpp"
 #include "../../mid/rewriter.hpp"
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -14,11 +16,12 @@ namespace exodus::mid_ir::opt {
 struct Expression {
   OpCode code;
   Type *type = nullptr;
+  std::string callee;
   std::vector<uint32_t> operands;
   Type *getptr_layout_type = nullptr;
 
   auto operator==(const Expression &other) const -> bool {
-    return code == other.code && type == other.type &&
+    return code == other.code && type == other.type && callee == other.callee &&
            operands == other.operands &&
            getptr_layout_type == other.getptr_layout_type;
   }
@@ -28,6 +31,8 @@ struct ExpressionHash {
   auto operator()(const Expression &expression) const -> size_t {
     size_t hash = std::hash<int>{}(static_cast<int>(expression.code));
     hash ^= std::hash<Type *>{}(expression.type) + (hash << 6) + (hash >> 2);
+    hash ^=
+      std::hash<std::string>{}(expression.callee) + (hash << 6) + (hash >> 2);
     for (auto operand : expression.operands) {
       hash ^= std::hash<uint32_t>{}(operand) + (hash << 6) + (hash >> 2);
     }
@@ -73,6 +78,7 @@ class GVN {
   std::unordered_map<Op *, Block *> op_blocks;
   std::unordered_map<std::string, ValueNumber> constant_numbers;
   std::unordered_map<Expression, Value *, ExpressionHash> available;
+  std::unordered_set<std::string> readnone_scalar_functions;
   bool changed = false;
   ValueNumber next_number = 0;
 
@@ -108,9 +114,9 @@ private:
   auto build_expression(Op *op) -> std::optional<Expression>;
   auto simplify(Op *op, const std::vector<ValueNumber> &operands) -> Value *;
 
-  static auto is_pure_opcode(OpCode code) -> bool;
+  auto is_pure_opcode(OpCode code) const -> bool;
   static auto reads_memory_through_getptr(const Op *op) -> bool;
-  static auto is_memory_barrier(const Op *op) -> bool;
+  auto is_memory_barrier(const Op *op) const -> bool;
   static auto is_commutative(OpCode code) -> bool;
 };
 

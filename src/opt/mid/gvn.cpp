@@ -19,6 +19,7 @@ auto GVN::run(
   op_blocks.clear();
   constant_numbers.clear();
   available.clear();
+  readnone_scalar_functions = compute_readnone_scalar_functions(*module);
   changed = false;
   next_number = 0;
   dom = &dom_result;
@@ -129,7 +130,7 @@ auto GVN::process_op(
     auto location = alias_analysis.get_location(*op);
     observe_read(state, location);
     Expression expression{
-      OpCode::Load, op->result->type.get(), {address_number}
+      OpCode::Load, op->result->type.get(), "", {address_number}, nullptr
     };
     auto it = state.loads.find(expression);
     if (it != state.loads.end()) {
@@ -427,10 +428,18 @@ auto GVN::build_expression(Op *op) -> std::optional<Expression> {
 
   if (!is_pure_opcode(op->code))
     return std::nullopt;
+  if (
+    op->code == OpCode::Call &&
+    !is_readnone_scalar_call(*op, readnone_scalar_functions)
+  ) {
+    return std::nullopt;
+  }
   if (reads_memory_through_getptr(op))
     return std::nullopt;
 
-  Expression expression{op->code, op->result->type.get(), {}};
+  Expression expression{op->code, op->result->type.get(), "", {}, nullptr};
+  if (op->code == OpCode::Call)
+    expression.callee = std::get<CallPayload>(op->payload).func_name;
   if (op->code == OpCode::GetPtr)
     expression.getptr_layout_type = getptr_layout_type(*op).get();
   expression.operands.reserve(op->operands.size());
@@ -466,7 +475,7 @@ auto GVN::simplify(Op *op, const std::vector<ValueNumber> &operands)
   }
 }
 
-auto GVN::is_pure_opcode(OpCode code) -> bool {
+auto GVN::is_pure_opcode(OpCode code) const -> bool {
   switch (code) {
   case OpCode::Add:
   case OpCode::Sub:
@@ -492,6 +501,7 @@ auto GVN::is_pure_opcode(OpCode code) -> bool {
   case OpCode::Shl:
   case OpCode::Shr:
   case OpCode::GetPtr:
+  case OpCode::Call:
     return true;
   default:
     return false;
@@ -509,8 +519,10 @@ auto GVN::reads_memory_through_getptr(const Op *op) -> bool {
   return !plan.valid || plan.reads_memory;
 }
 
-auto GVN::is_memory_barrier(const Op *op) -> bool {
-  return op && (op->code == OpCode::Memset || op->code == OpCode::Call ||
+auto GVN::is_memory_barrier(const Op *op) const -> bool {
+  return op && (op->code == OpCode::Memset ||
+                (op->code == OpCode::Call &&
+                 !is_readnone_scalar_call(*op, readnone_scalar_functions)) ||
                 reads_memory_through_getptr(op));
 }
 
