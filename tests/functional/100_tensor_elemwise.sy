@@ -1,0 +1,14 @@
+int main() {
+  tensor int a[4] = {1, 2, 3, 4};
+  tensor int b[4] = {1, 2, 3, 4};
+  tensor int c[4] = a + b * 2 + 10;
+  putint(c[0]);
+  putch(10);
+  putint(c[1]);
+  putch(10);
+  putint(c[2]);
+  putch(10);
+  putint(c[3]);
+  putch(10);
+  return 0;
+}

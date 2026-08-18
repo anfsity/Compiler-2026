@@ -49,6 +49,23 @@ private:
   auto eval_arith(ast::BinaryOp op, Constant::Data l, Constant::Data r)
     -> Constant::Data;
   auto eval_unary(ast::UnaryOp op, Constant::Data v) -> Constant::Data;
+  auto is_tensor_ptr(const Value *v) const -> bool;
+  auto tensor_dims_from_ptr(const Value *v) const -> std::vector<int>;
+  auto tensor_scalar_from_ptr(const Value *v) const -> std::shared_ptr<Type>;
+  auto tensor_numel_from_dims(const std::vector<int> &dims) const -> int;
+  auto tensor_element_ptr(
+    Value *base_ptr, const std::vector<int> &dims, int flat_idx
+  ) -> Value *;
+  auto tensor_elem_value(
+    Value *v, const std::vector<int> &dims, int flat_idx
+  ) -> Value *;
+  auto tensor_assign(
+    Value *dst_ptr,
+    const std::shared_ptr<Type> &dst_type,
+    Value *src
+  ) -> bool;
+  auto tensor_elementwise(ast::BinaryOp op, Value *lhs, Value *rhs) -> Value *;
+  auto tensor_matmul(Value *lhs, Value *rhs) -> Value *;
 
   // clang-format off
   auto visit(const ast::GlobalItem &ast_item) -> void;

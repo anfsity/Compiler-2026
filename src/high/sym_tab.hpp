@@ -18,6 +18,7 @@ struct Symbol {
   Constant *const_val;
   Function *func;
   bool is_const;
+  bool is_tensor;
 };
 
 struct SymTab {
@@ -67,7 +68,8 @@ inline auto SymTab::register_sysy() -> void {
                        const std::vector<std::shared_ptr<Type>> &params
                      ) {
     [[maybe_unused]] const bool ok = push(
-      name, {Func::get(ret_type, params), nullptr, nullptr, nullptr, false}
+      name,
+      {Func::get(ret_type, params), nullptr, nullptr, nullptr, false, false}
     );
     assert(ok && "duplicated SysY builtin symbol");
   };

@@ -54,7 +54,10 @@ auto IRBuilder::visit(const ast::GlobalItem &ast_item) -> void {
           }
 
           g_var->addr = ctx->make_value<GlobalAddr>(type->ptr_to(), def->name);
-          symtab.push(def->name, {type, g_var->addr, cv, nullptr, d->is_const});
+          symtab.push(
+            def->name,
+            {type, g_var->addr, cv, nullptr, d->is_const, d->is_tensor}
+          );
           module->globals.push_back(std::move(g_var));
         }
       },
@@ -84,6 +87,12 @@ auto IRBuilder::visit(const ast::VarDeclAST &ast_decl) -> void {
             auto init_val = visit(expr);
             auto target_type =
               std::static_pointer_cast<Ptr>(alloca_res->type)->target;
+            if (
+              ast_decl.is_tensor && target_type->is_array() &&
+              tensor_assign(alloca_res, target_type, init_val)
+            ) {
+              return;
+            }
             init_val = coerce(init_val, target_type);
             emit(OpCode::Store, nullptr, init_val, alloca_res);
             if (ast_decl.is_const && init_val->kind == ValueKind::Constant) {
@@ -100,7 +109,10 @@ auto IRBuilder::visit(const ast::VarDeclAST &ast_decl) -> void {
       );
     }
 
-    symtab.push(def->name, {type, alloca_res, cv, nullptr, ast_decl.is_const});
+    symtab.push(
+      def->name,
+      {type, alloca_res, cv, nullptr, ast_decl.is_const, ast_decl.is_tensor}
+    );
   }
 }
 
@@ -138,7 +150,7 @@ auto IRBuilder::visit(const ast::FuncDefAST &ast_func) -> void {
 
   cur_region = &func->body;
   // sysy 不存在 const 函数
-  symtab.push(func->name, {func->type, nullptr, nullptr, func, false});
+  symtab.push(func->name, {func->type, nullptr, nullptr, func, false, false});
   symtab.enter_scope();
 
   for (size_t i = 0; i < ast_func.params.size(); ++i) {
@@ -151,7 +163,7 @@ auto IRBuilder::visit(const ast::FuncDefAST &ast_func) -> void {
 
     Value *alloca_res = emit_val(OpCode::Alloca, param_type->ptr_to());
     emit(OpCode::Store, nullptr, arg_val, alloca_res);
-    symtab.push(p->name, {sym_type, alloca_res, nullptr, nullptr, false});
+    symtab.push(p->name, {sym_type, alloca_res, nullptr, nullptr, false, false});
   }
 
   // FIXME: 用 visit(stmt) 优化？
@@ -188,6 +200,13 @@ auto IRBuilder::visit(const ast::Stmt &ast_stmt) -> void {
         Value *val = visit(assign->expr);
         Value *ptr = visit(*assign->lval);
         auto target_type = std::static_pointer_cast<Ptr>(ptr->type)->target;
+        auto lhs_sym = symtab.lookup(assign->lval->name);
+        if (
+          lhs_sym && lhs_sym->is_tensor && assign->lval->indices.empty() &&
+          target_type->is_array() && tensor_assign(ptr, target_type, val)
+        ) {
+          return;
+        }
         val = coerce(val, target_type);
         emit(OpCode::Store, nullptr, val, ptr);
       },
@@ -290,6 +309,9 @@ auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
         auto tar_type = std::static_pointer_cast<Ptr>(ptr->type)->target;
 
         if (tar_type->is_array()) {
+          if (sym_opt && sym_opt->is_tensor && lval->indices.empty()) {
+            return ptr;
+          }
           auto base = std::static_pointer_cast<Array>(tar_type)->base;
           auto zero = ctx->make_zero(I32::get());
           return emit_val(
@@ -304,6 +326,10 @@ auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
           // A && B 或 A || B
           Value *res_ptr = emit_val(OpCode::Alloca, Bool::get()->ptr_to());
           Value *lhs = visit(bin->left);
+          if (is_tensor_ptr(lhs)) {
+            Log::log_error("tensor does not support logical operations");
+            return ctx->make_zero(I32::get());
+          }
           auto lhs_bool = coerce(lhs, Bool::get());
           emit(OpCode::Store, nullptr, lhs_bool, res_ptr);
 
@@ -318,6 +344,10 @@ auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
           cur_region = then_region.get();
 
           Value *rhs = visit(bin->right);
+          if (is_tensor_ptr(rhs)) {
+            Log::log_error("tensor does not support logical operations");
+            return ctx->make_zero(I32::get());
+          }
           Value *rhs_bool = coerce(rhs, Bool::get());
           emit(OpCode::Store, nullptr, rhs_bool, res_ptr);
 
@@ -349,6 +379,21 @@ auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
           {ast::BinaryOp::Le, OpCode::Le},
           {ast::BinaryOp::Ge, OpCode::Ge},
         };
+
+        if (is_tensor_ptr(lhs) || is_tensor_ptr(rhs)) {
+          if (cmp_map.count(bin->op)) {
+            Log::log_error("tensor does not support comparison operations");
+            return ctx->make_zero(Bool::get());
+          }
+          if (bin->op == ast::BinaryOp::MatMul) {
+            return tensor_matmul(lhs, rhs);
+          }
+          if (op_map.count(bin->op)) {
+            return tensor_elementwise(bin->op, lhs, rhs);
+          }
+          Log::log_error("unsupported tensor binary operation");
+          return ctx->make_zero(I32::get());
+        }
 
         std::shared_ptr<Type> eval_type;
         if (lhs->type->is_f32() || rhs->type->is_f32()) {
@@ -394,6 +439,11 @@ auto IRBuilder::visit(const ast::Expr &ast_expr) -> Value * {
 
         if (cmp_map.count(bin->op)) {
           return emit_val(cmp_map.at(bin->op), Bool::get(), lhs, rhs);
+        }
+
+        if (bin->op == ast::BinaryOp::MatMul) {
+          Log::log_error("operator '@' requires tensor operands");
+          return ctx->make_zero(I32::get());
         }
 
         return nullptr;
@@ -766,6 +816,223 @@ auto IRBuilder::flatten_gb_list(
   }
 }
 
+auto IRBuilder::is_tensor_ptr(const Value *v) const -> bool {
+  if (!v || !v->type || !v->type->is_ptr()) {
+    return false;
+  }
+  auto target = std::static_pointer_cast<Ptr>(v->type)->target;
+  return target && target->is_array();
+}
+
+auto IRBuilder::tensor_dims_from_ptr(const Value *v) const -> std::vector<int> {
+  std::vector<int> dims;
+  if (!is_tensor_ptr(v)) {
+    return dims;
+  }
+  auto t = std::static_pointer_cast<Ptr>(v->type)->target;
+  while (t->is_array()) {
+    auto arr_t = std::static_pointer_cast<Array>(t);
+    dims.push_back(arr_t->len);
+    t = arr_t->base;
+  }
+  return dims;
+}
+
+auto IRBuilder::tensor_scalar_from_ptr(const Value *v) const
+  -> std::shared_ptr<Type> {
+  if (!is_tensor_ptr(v)) {
+    return nullptr;
+  }
+  auto t = std::static_pointer_cast<Ptr>(v->type)->target;
+  while (t->is_array()) {
+    t = std::static_pointer_cast<Array>(t)->base;
+  }
+  return t;
+}
+
+auto IRBuilder::tensor_numel_from_dims(const std::vector<int> &dims) const
+  -> int {
+  int total = 1;
+  for (int d : dims) {
+    total *= d;
+  }
+  return total;
+}
+
+auto IRBuilder::tensor_element_ptr(
+  Value *base_ptr, const std::vector<int> &dims, int flat_idx
+) -> Value * {
+  if (dims.empty()) {
+    return base_ptr;
+  }
+
+  std::vector<int> strides(dims.size(), 1);
+  for (int i = static_cast<int>(dims.size()) - 2; i >= 0; --i) {
+    strides[i] = strides[i + 1] * dims[i + 1];
+  }
+
+  std::vector<Value *> indices;
+  int rem = flat_idx;
+  for (size_t i = 0; i < dims.size(); ++i) {
+    int idx = rem / strides[i];
+    rem %= strides[i];
+    indices.push_back(ctx->make_const(I32::get(), idx));
+  }
+
+  auto scalar_t = tensor_scalar_from_ptr(base_ptr);
+  return emit_val(OpCode::GetPtr, scalar_t->ptr_to(), base_ptr, indices);
+}
+
+auto IRBuilder::tensor_elem_value(
+  Value *v, const std::vector<int> &dims, int flat_idx
+) -> Value * {
+  if (!is_tensor_ptr(v)) {
+    return v;
+  }
+  auto scalar_t = tensor_scalar_from_ptr(v);
+  auto ptr = tensor_element_ptr(v, dims, flat_idx);
+  return emit_val(OpCode::Load, scalar_t, ptr);
+}
+
+auto IRBuilder::tensor_assign(
+  Value *dst_ptr, const std::shared_ptr<Type> &dst_type, Value *src
+) -> bool {
+  if (!dst_type->is_array()) {
+    return false;
+  }
+
+  auto dst_dims = tensor_dims_from_ptr(dst_ptr);
+  auto dst_scalar = tensor_scalar_from_ptr(dst_ptr);
+  int numel = tensor_numel_from_dims(dst_dims);
+
+  if (is_tensor_ptr(src)) {
+    auto src_dims = tensor_dims_from_ptr(src);
+    if (src_dims != dst_dims) {
+      Log::log_error("tensor shape mismatch in assignment");
+      return true;
+    }
+    for (int i = 0; i < numel; ++i) {
+      Value *val = tensor_elem_value(src, src_dims, i);
+      val = coerce(val, dst_scalar);
+      Value *ptr = tensor_element_ptr(dst_ptr, dst_dims, i);
+      emit(OpCode::Store, nullptr, val, ptr);
+    }
+    return true;
+  }
+
+  if (src && !src->type->is_i32() && !src->type->is_f32() && !src->type->is_bool()) {
+    Log::log_error("cannot assign non-scalar value to tensor");
+    return true;
+  }
+
+  Value *fill = coerce(src, dst_scalar);
+  for (int i = 0; i < numel; ++i) {
+    Value *ptr = tensor_element_ptr(dst_ptr, dst_dims, i);
+    emit(OpCode::Store, nullptr, fill, ptr);
+  }
+  return true;
+}
+
+auto IRBuilder::tensor_elementwise(ast::BinaryOp op, Value *lhs, Value *rhs)
+  -> Value * {
+  bool lhs_tensor = is_tensor_ptr(lhs);
+  bool rhs_tensor = is_tensor_ptr(rhs);
+  auto lhs_dims = lhs_tensor ? tensor_dims_from_ptr(lhs) : std::vector<int>{};
+  auto rhs_dims = rhs_tensor ? tensor_dims_from_ptr(rhs) : std::vector<int>{};
+  auto out_dims = lhs_tensor ? lhs_dims : rhs_dims;
+
+  if (lhs_tensor && rhs_tensor && lhs_dims != rhs_dims) {
+    Log::log_error("tensor shape mismatch in elementwise operation");
+  }
+
+  auto lhs_scalar = lhs_tensor ? tensor_scalar_from_ptr(lhs) : lhs->type;
+  auto rhs_scalar = rhs_tensor ? tensor_scalar_from_ptr(rhs) : rhs->type;
+  auto out_scalar =
+    (lhs_scalar->is_f32() || rhs_scalar->is_f32()) ? Float::get() : I32::get();
+
+  if (op == ast::BinaryOp::Mod && !out_scalar->is_i32()) {
+    Log::log_error("tensor modulo only supports integer operands");
+  }
+
+  auto out_type = out_scalar;
+  for (auto it = out_dims.rbegin(); it != out_dims.rend(); ++it) {
+    out_type = out_type->array_of(*it);
+  }
+
+  Value *out_ptr = emit_val(OpCode::Alloca, out_type->ptr_to());
+  int numel = tensor_numel_from_dims(out_dims);
+
+  for (int i = 0; i < numel; ++i) {
+    Value *lv = tensor_elem_value(lhs, lhs_dims, i);
+    Value *rv = tensor_elem_value(rhs, rhs_dims, i);
+    lv = coerce(lv, out_scalar);
+    rv = coerce(rv, out_scalar);
+
+    Value *res = nullptr;
+    if (op == ast::BinaryOp::Add) {
+      res = emit_val(out_scalar->is_f32() ? OpCode::FAdd : OpCode::Add, out_scalar, lv, rv);
+    } else if (op == ast::BinaryOp::Sub) {
+      res = emit_val(out_scalar->is_f32() ? OpCode::FSub : OpCode::Sub, out_scalar, lv, rv);
+    } else if (op == ast::BinaryOp::Mul) {
+      res = emit_val(out_scalar->is_f32() ? OpCode::FMul : OpCode::Mul, out_scalar, lv, rv);
+    } else if (op == ast::BinaryOp::Div) {
+      res = emit_val(out_scalar->is_f32() ? OpCode::FDiv : OpCode::Div, out_scalar, lv, rv);
+    } else if (op == ast::BinaryOp::Mod) {
+      res = emit_val(OpCode::Mod, I32::get(), lv, rv);
+    }
+
+    Value *dst = tensor_element_ptr(out_ptr, out_dims, i);
+    emit(OpCode::Store, nullptr, res, dst);
+  }
+
+  return out_ptr;
+}
+
+auto IRBuilder::tensor_matmul(Value *lhs, Value *rhs) -> Value * {
+  if (!is_tensor_ptr(lhs) || !is_tensor_ptr(rhs)) {
+    Log::log_error("operator '@' requires tensor operands");
+    return ctx->make_zero(I32::get());
+  }
+
+  auto ld = tensor_dims_from_ptr(lhs);
+  auto rd = tensor_dims_from_ptr(rhs);
+  if (ld.size() != 2u || rd.size() != 2u || ld[1] != rd[0]) {
+    Log::log_error("matrix multiplication shape mismatch");
+    return ctx->make_zero(I32::get());
+  }
+
+  auto lhs_scalar = tensor_scalar_from_ptr(lhs);
+  auto rhs_scalar = tensor_scalar_from_ptr(rhs);
+  auto out_scalar =
+    (lhs_scalar->is_f32() || rhs_scalar->is_f32()) ? Float::get() : I32::get();
+
+  int m = ld[0], k = ld[1], n = rd[1];
+  auto out_type = out_scalar->array_of(n)->array_of(m);
+  Value *out_ptr = emit_val(OpCode::Alloca, out_type->ptr_to());
+
+  for (int i = 0; i < m; ++i) {
+    for (int j = 0; j < n; ++j) {
+      Value *acc = ctx->make_zero(out_scalar);
+      for (int t = 0; t < k; ++t) {
+        int l_flat = i * k + t;
+        int r_flat = t * n + j;
+        Value *lv = tensor_elem_value(lhs, ld, l_flat);
+        Value *rv = tensor_elem_value(rhs, rd, r_flat);
+        lv = coerce(lv, out_scalar);
+        rv = coerce(rv, out_scalar);
+        Value *mul =
+          emit_val(out_scalar->is_f32() ? OpCode::FMul : OpCode::Mul, out_scalar, lv, rv);
+        acc = emit_val(out_scalar->is_f32() ? OpCode::FAdd : OpCode::Add, out_scalar, acc, mul);
+      }
+      int o_flat = i * n + j;
+      Value *dst = tensor_element_ptr(out_ptr, {m, n}, o_flat);
+      emit(OpCode::Store, nullptr, acc, dst);
+    }
+  }
+
+  return out_ptr;
+}
+
 auto IRBuilder::eval_arith(ast::BinaryOp op, Constant::Data l, Constant::Data r)
   -> Constant::Data {
   if (std::holds_alternative<int>(l) && std::holds_alternative<int>(r)) {
@@ -797,6 +1064,8 @@ auto IRBuilder::eval_arith(ast::BinaryOp op, Constant::Data l, Constant::Data r)
       return (v1 != 0 && v2 != 0) ? 1 : 0;
     case ast::BinaryOp::Or:
       return (v1 != 0 || v2 != 0) ? 1 : 0;
+    case ast::BinaryOp::MatMul:
+      return 0;
     }
   } else {
     float v1 = std::holds_alternative<float>(l)
@@ -830,6 +1099,8 @@ auto IRBuilder::eval_arith(ast::BinaryOp op, Constant::Data l, Constant::Data r)
       return (v1 != 0.0f && v2 != 0.0f) ? 1 : 0;
     case ast::BinaryOp::Or:
       return (v1 != 0.0f || v2 != 0.0f) ? 1 : 0;
+    case ast::BinaryOp::MatMul:
+      return 0.0f;
     default:
       return 0.0f;
     }
