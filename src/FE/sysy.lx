@@ -83,6 +83,7 @@ HexFloat 0[xX]({HexDigit}*\.{HexDigit}+|{HexDigit}+\.){PHexExponent}[fF]?|0[xX]{
 "while"             { return WHILE; }
 "break"             { return BREAK; }
 "continue"          { return CONTINUE; }
+"tensor"            { return TENSOR; }
 
 {Identifier}        { yylval.str = new std::string(yytext); return IDENT; }
 
@@ -99,6 +100,7 @@ HexFloat 0[xX]({HexDigit}*\.{HexDigit}+|{HexDigit}+\.){PHexExponent}[fF]?|0[xX]{
 "!="                { return NE; }
 "&&"                { return AND; }
 "||"                { return OR; }
+"@"                 { return MATMUL; }
 "<"                 { return LT; }
 ">"                 { return GT; }
 

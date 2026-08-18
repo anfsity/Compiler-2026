@@ -15,7 +15,7 @@ namespace exodus {
 
 // 虽然 function
 // 不是一等公民，但是如果把函数作为类型，我们可以统一符号表的逻辑。这样写起来代码会很清爽
-enum class Kind : uint8_t { I32, F32, Ptr, Array, Bool, Void, Func };
+enum class Kind : uint8_t { I32, F32, Ptr, Array, Tensor, Bool, Void, Func };
 
 struct Type : std::enable_shared_from_this<Type> {
   Kind kind;
@@ -31,6 +31,7 @@ struct Type : std::enable_shared_from_this<Type> {
   virtual auto is_f32() const -> bool { return kind == Kind::F32; };
   virtual auto is_ptr() const -> bool { return kind == Kind::Ptr; };
   virtual auto is_array() const -> bool { return kind == Kind::Array; };
+  virtual auto is_tensor() const -> bool { return kind == Kind::Tensor; };
   virtual auto is_bool() const -> bool { return kind == Kind::Bool; };
   virtual auto is_void() const -> bool { return kind == Kind::Void; };
   virtual auto is_func() const -> bool { return kind == Kind::Func; };
@@ -193,6 +194,27 @@ struct Array : Type {
     }
     return res;
   }
+};
+
+struct Tensor : Type {
+  std::shared_ptr<Type> elem;
+
+  Tensor(std::shared_ptr<Type> _elem) : Type(Kind::Tensor), elem(std::move(_elem)) {}
+
+  static auto get(const std::shared_ptr<Type> &_elem) -> std::shared_ptr<Type> {
+    static std::map<Type *, std::shared_ptr<Type>> cache;
+    auto key = _elem.get();
+    if (cache.find(key) != cache.end()) {
+      return cache[key];
+    }
+    return cache[key] = std::make_shared<Tensor>(_elem);
+  }
+
+  auto to_string() const -> std::string override {
+    return fmt::format("tensor<{}>", elem->to_string());
+  }
+
+  auto byte_size() const -> int override { return elem->byte_size(); }
 };
 
 inline auto Type::ptr_to() -> std::shared_ptr<Type> {

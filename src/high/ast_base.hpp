@@ -17,6 +17,7 @@ enum class BinaryOp : uint8_t {
   Mul, // *
   Div, // /
   Mod, // %
+  MatMul, // @
   Lt,  // <
   Gt,  // >
   Le,  // <=

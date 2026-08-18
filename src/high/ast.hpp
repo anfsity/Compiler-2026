@@ -103,8 +103,12 @@ struct VarDeclAST : Sourcelocation {
   std::shared_ptr<Type> type;
   std::vector<std::unique_ptr<VarDefAST>> defs;
   bool is_const;
+  bool is_tensor;
   VarDeclAST(
-    std::shared_ptr<Type> t, std::vector<std::unique_ptr<VarDefAST>> d, bool c
+    std::shared_ptr<Type> t,
+    std::vector<std::unique_ptr<VarDefAST>> d,
+    bool c,
+    bool tensor = false
   );
 };
 
@@ -173,9 +177,12 @@ inline VarDefAST::VarDefAST(
     : name(std::move(n)), dims(std::move(d)), init(std::move(i)) {}
 
 inline VarDeclAST::VarDeclAST(
-  std::shared_ptr<Type> t, std::vector<std::unique_ptr<VarDefAST>> d, bool c
+  std::shared_ptr<Type> t,
+  std::vector<std::unique_ptr<VarDefAST>> d,
+  bool c,
+  bool tensor
 )
-    : type(std::move(t)), defs(std::move(d)), is_const(c) {}
+    : type(std::move(t)), defs(std::move(d)), is_const(c), is_tensor(tensor) {}
 
 inline FuncParamAST::FuncParamAST(
   std::shared_ptr<Type> t, std::string n, std::vector<Expr> d

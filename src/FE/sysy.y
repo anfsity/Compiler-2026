@@ -173,9 +173,12 @@ static auto var_decl(
   std::shared_ptr<exodus::Type> type,
   std::vector<std::unique_ptr<VarDefAST>> *defs,
   bool is_const,
+  bool is_tensor,
   const Loc &loc
 ) -> Decl * {
-  return new Decl(make_ast<VarDeclAST>(loc, std::move(type), take(defs), is_const));
+  return new Decl(
+    make_ast<VarDeclAST>(loc, std::move(type), take(defs), is_const, is_tensor)
+  );
 }
 
 template <typename Loc>
@@ -231,8 +234,8 @@ void yyerror(exodus::ast::CompUnitAST &ast, const char *s);
 %token <str> IDENT
 %token <i32> INT_CONST
 %token <f32> FLOAT_CONST
-%token INT FLOAT VOID CONST RETURN IF ELSE WHILE BREAK CONTINUE
-%token AND OR LE GE EQ NE LT GT
+%token INT FLOAT VOID CONST RETURN IF ELSE WHILE BREAK CONTINUE TENSOR
+%token AND OR LE GE EQ NE LT GT MATMUL
 
 %type <decl> Decl ConstDecl VarDecl
 %type <func_def> FuncDef
@@ -277,8 +280,10 @@ Decl
     ;
 
 ConstDecl
-    : CONST INT ConstDefList ';' { $$ = var_decl(I32::get(), $3, true, @$); }
-    | CONST FLOAT ConstDefList ';' { $$ = var_decl(Float::get(), $3, true, @$); }
+    : CONST INT ConstDefList ';' { $$ = var_decl(I32::get(), $3, true, false, @$); }
+    | CONST FLOAT ConstDefList ';' { $$ = var_decl(Float::get(), $3, true, false, @$); }
+    | CONST TENSOR INT ConstDefList ';' { $$ = var_decl(I32::get(), $4, true, true, @$); }
+    | CONST TENSOR FLOAT ConstDefList ';' { $$ = var_decl(Float::get(), $4, true, true, @$); }
     ;
 
 ConstDefList
@@ -294,8 +299,10 @@ ConstDef
     ;
 
 VarDecl
-    : INT VarDefList ';' { $$ = var_decl(I32::get(), $2, false, @$); }
-    | FLOAT VarDefList ';' { $$ = var_decl(Float::get(), $2, false, @$); }
+    : INT VarDefList ';' { $$ = var_decl(I32::get(), $2, false, false, @$); }
+    | FLOAT VarDefList ';' { $$ = var_decl(Float::get(), $2, false, false, @$); }
+    | TENSOR INT VarDefList ';' { $$ = var_decl(I32::get(), $3, false, true, @$); }
+    | TENSOR FLOAT VarDefList ';' { $$ = var_decl(Float::get(), $3, false, true, @$); }
     ;
 
 VarDefList
@@ -464,6 +471,7 @@ MulExp
     | MulExp '*' UnaryExp { $$ = binary_expr(BinaryOp::Mul, $1, $3, @$); }
     | MulExp '/' UnaryExp { $$ = binary_expr(BinaryOp::Div, $1, $3, @$); }
     | MulExp '%' UnaryExp { $$ = binary_expr(BinaryOp::Mod, $1, $3, @$); }
+    | MulExp MATMUL UnaryExp { $$ = binary_expr(BinaryOp::MatMul, $1, $3, @$); }
     ;
 
 AddExp
